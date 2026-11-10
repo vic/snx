@@ -47,7 +47,7 @@ enum Nx.BinOp:
 
 // Nx.Expr after scope resolution (nx/compile.srs): every variable is a frame walk, a with lookup or a builtin
 enum Nx.Code:
-  case Nx.CConst(v: Nx.Val)
+  case Nx.CConst(v: Nx.Val, c: Ptr)                       // c = a cell holding v, shared by every lazy use
   case Nx.CLocal(up: I64, i: I64)                         // frame up levels out, slot i (slot 0 = parent frame)
   case Nx.CWithVar(sym: I64, ups: Coll.List[I64], name: Str)   // frame levels to each enclosing with frame, innermost first
   case Nx.CCell(c: Ptr)                                   // a base env name (builtins, true, map, ...): its cell
@@ -62,6 +62,7 @@ enum Nx.Code:
   case Nx.CWith(a: Nx.Code, body: Nx.Code)                // new frame of 1 slot: the set (forced on first lookup)
   case Nx.CLam(arg: Bool, nformals: I64, formals: Ptr, ellipsis: Bool, nslots: I64, body: Nx.Code, name: Str)
   case Nx.CCall(f: Nx.Code, n: I64, args: Ptr)
+  case Nx.CPrimCall(id: I64, n: I64, args: Ptr)           // a base env primop called with exactly its arity
   case Nx.CSelect(e: Nx.Code, path: Coll.List[Nx.CKey], dflt: Coll.Option[Nx.Code])
   case Nx.CHas(e: Nx.Code, path: Coll.List[Nx.CKey])
   case Nx.CIf(c: Nx.Code, t: Nx.Code, e: Nx.Code)
@@ -72,6 +73,7 @@ enum Nx.Code:
   case Nx.CImpl(a: Nx.Code, b: Nx.Code)
   case Nx.CBin(op: Nx.BinOp, a: Nx.Code, b: Nx.Code)
   case Nx.CLamArg(body: Nx.Code, name: Str)               // x: body, a frame of 1 slot: the argument (CLam = a pattern)
+  case Nx.CAppSlots(n: I64)                               // slot 1 applied to slots 2..n+1 (the thunks of map, genList, ..)
 
 enum Nx.CKey:
   case Nx.KSym(sym: I64)

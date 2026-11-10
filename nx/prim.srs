@@ -59,6 +59,9 @@ enum Nx.Prim:
   case Nx.PMatch
   case Nx.PSplit
   case Nx.PFromToml
+  case Nx.PBitAnd
+  case Nx.PBitOr
+  case Nx.PBitXor
 
 // the arithmetic primops
 enum Nx.Ar:
@@ -99,6 +102,9 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PMul => Nx.arith(Nx.ArMul, Nx.force(a), Nx.force(b))
     case Nx.PDiv => Nx.arith(Nx.ArDiv, Nx.force(a), Nx.force(b))
     case Nx.PLessThan => Nx.lessThan(Nx.force(a), Nx.force(b))
+    case Nx.PBitAnd => Nx.bitOp(Nx.BitAnd, Nx.force(a), Nx.force(b))
+    case Nx.PBitOr => Nx.bitOp(Nx.BitOr, Nx.force(a), Nx.force(b))
+    case Nx.PBitXor => Nx.bitOp(Nx.BitXor, Nx.force(a), Nx.force(b))
     case Nx.PMap => Nx.pMap(a, Nx.force(b))
     case Nx.PLength =>
       val l = Nx.force(a)
@@ -160,7 +166,7 @@ def Nx.typeName(v: Nx.Val): Str = v match
 
 def Nx.pTypeOf(v: Nx.Val): Nx.Val = if Nx.isErr(v) then v else Nx.VStr(Nx.typeName(v), Coll.Nil)
 
-def Nx.pIs(v: Nx.Val, t: Str): Nx.Val = if Nx.isErr(v) then v else Nx.VBool(Str.eq(Nx.typeName(v), t))
+def Nx.pIs(v: Nx.Val, t: Str): Nx.Val = if Nx.isErr(v) then v else Nx.bool(Str.eq(Nx.typeName(v), t))
 
 def Nx.isFunction(v: Nx.Val): Bool = Str.eq(Nx.typeName(v), "lambda")
 
@@ -178,13 +184,13 @@ def Nx.pTryEval(a: Ptr): Nx.Val =
   val v = Nx.force(a)
   v match
     case Nx.VErr(k, _) => k match
-      case Nx.KThrow => Nx.tryRes(false, Nx.cell(Nx.VBool(false)))
-      case Nx.KAssert => Nx.tryRes(false, Nx.cell(Nx.VBool(false)))
+      case Nx.KThrow => Nx.tryRes(false, Nx.cell(Nx.bool(false)))
+      case Nx.KAssert => Nx.tryRes(false, Nx.cell(Nx.bool(false)))
       case _ => v
     case _ => Nx.tryRes(true, a)
 
 def Nx.tryRes(ok: Bool, value: Ptr): Nx.Val =
-  Nx.attrsOf(Coll.Cons(Nx.pair("success", Nx.VBool(ok)), Coll.Cons(Nx.Pair(Nx.intern("value"), value), Coll.Nil)))
+  Nx.attrsOf(Coll.Cons(Nx.pair("success", Nx.bool(ok)), Coll.Cons(Nx.Pair(Nx.intern("value"), value), Coll.Nil)))
 
 def Nx.pTrace(x: Nx.Val, b: Ptr): Nx.Val = x match
   case Nx.VErr(_, _) => x
@@ -214,13 +220,13 @@ def Nx.arith(op: Nx.Ar, x: Nx.Val, y: Nx.Val): Nx.Val =
 def Nx.overflow(): Nx.Val = Nx.VErr(Nx.KOther, "integer overflow")
 
 def Nx.intOp(op: Nx.Ar, a: I64, b: I64): Nx.Val = op match
-  case Nx.ArAdd => if Nx.addOv(a, b) then Nx.overflow() else Nx.VInt(Nx.iadd(a, b))
-  case Nx.ArSub => if Nx.subOv(a, b) then Nx.overflow() else Nx.VInt(Nx.isub(a, b))
-  case Nx.ArMul => if Nx.mulOv(a, b) then Nx.overflow() else Nx.VInt(Nx.imul(a, b))
+  case Nx.ArAdd => if Nx.addOv(a, b) then Nx.overflow() else Nx.int(Nx.iadd(a, b))
+  case Nx.ArSub => if Nx.subOv(a, b) then Nx.overflow() else Nx.int(Nx.isub(a, b))
+  case Nx.ArMul => if Nx.mulOv(a, b) then Nx.overflow() else Nx.int(Nx.imul(a, b))
   case Nx.ArDiv =>
     if b == 0 then Nx.VErr(Nx.KOther, "division by zero")
     else if b == 0 - 1 && Nx.subOv(0, a) then Nx.overflow()
-    else Nx.VInt(Nx.idiv(a, b))
+    else Nx.int(Nx.idiv(a, b))
 
 def Nx.floatOp(op: Nx.Ar, a: I64, b: I64): Nx.Val = op match
   case Nx.ArAdd => Nx.VFloat(Nx.fadd(a, b))
@@ -228,19 +234,25 @@ def Nx.floatOp(op: Nx.Ar, a: I64, b: I64): Nx.Val = op match
   case Nx.ArMul => Nx.VFloat(Nx.fmul(a, b))
   case Nx.ArDiv => if Nx.feq(b, Nx.fOfInt(0)) then Nx.VErr(Nx.KOther, "division by zero") else Nx.VFloat(Nx.fdiv(a, b))
 
+// the bitwise primops: integers only (prim_bitAnd, prim_bitOr, prim_bitXor force both with forceInt)
+enum Nx.Bits:
+  case Nx.BitAnd
+  case Nx.BitOr
+  case Nx.BitXor
+
+def Nx.bitOp(op: Nx.Bits, x: Nx.Val, y: Nx.Val): Nx.Val = x match
+  case Nx.VInt(a) => y match
+    case Nx.VInt(b) => op match
+      case Nx.BitAnd => Nx.int(Nx.iand(a, b))
+      case Nx.BitOr => Nx.int(Nx.ior(a, b))
+      case Nx.BitXor => Nx.int(Nx.ixor(a, b))
+    case _ => Nx.typeErr("an integer", y)
+  case _ => Nx.typeErr("an integer", x)
+
 // ---- lists ----------------------------------------------------------------------------------------------------
 
 // f applied to the cells of a frame: (slot 1) (slot 2) .. (slot n)
-def Nx.appCode(nargs: I64): Nx.Code =
-  val args = Nx.arrNew(nargs)
-  Nx.appArgs(args, 0, nargs)
-  Nx.CCall(Nx.CLocal(0, 1), nargs, args)
-
-def Nx.appArgs(args: Ptr, i: I64, n: I64): Unit =
-  if i < n then
-    Nx.aset[Nx.Code](args, i, Nx.CLocal(0, i + 2))
-    Nx.appArgs(args, i + 1, n)
-  else ()
+def Nx.appCode(nargs: I64): Nx.Code = Nx.CAppSlots(nargs)
 
 // a thunk of f x
 def Nx.app1(code: Nx.Code, f: Ptr, x: Ptr): Ptr =
@@ -329,11 +341,11 @@ def Nx.foldGo(f: Nx.Val, acc: Ptr, xs: Ptr, i: I64, n: I64): Nx.Val =
   if Nx.isErr(r) || i + 1 == n then r else Nx.foldGo(f, Nx.cell(r), xs, i + 1, n)
 
 def Nx.pAnyAll(a: Ptr, l: Nx.Val, any: Bool): Nx.Val = l match
-  case Nx.VList(n, xs) => if n == 0 then Nx.VBool(!any) else Nx.anyGo(Nx.force(a), xs, 0, n, any)
+  case Nx.VList(n, xs) => if n == 0 then Nx.bool(!any) else Nx.anyGo(Nx.force(a), xs, 0, n, any)
   case _ => Nx.typeErr("a list", l)
 
 def Nx.anyGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, any: Bool): Nx.Val =
-  if i == n then Nx.VBool(!any)
+  if i == n then Nx.bool(!any)
   else
     val r = Nx.callBool(f, Nx.aget[Ptr](xs, i))
     r match
@@ -345,7 +357,7 @@ def Nx.pElem(x: Ptr, l: Nx.Val): Nx.Val = l match
   case _ => Nx.typeErr("a list", l)
 
 def Nx.elemGo(x: Ptr, xs: Ptr, i: I64, n: I64): Nx.Val =
-  if i == n then Nx.VBool(false)
+  if i == n then Nx.bool(false)
   else
     val r = Nx.eqCells(x, Nx.aget[Ptr](xs, i))
     r match
@@ -584,7 +596,7 @@ def Nx.pGetAttr(nv: Nx.Val, sv: Nx.Val, has: Bool): Nx.Val = nv match
   case Nx.VStr(name, _) => sv match
     case Nx.VAttrs(n, syms, vals) =>
       val i = Nx.findSym(syms, n, Nx.intern(name))
-      if has then Nx.VBool(i < n)
+      if has then Nx.bool(i < n)
       else if i < n then Nx.force(Nx.aget[Ptr](vals, i))
       else Nx.VErr(Nx.KMissing, Nx.cat(Nx.cat("attribute '", name), "' missing"))
     case _ => Nx.typeErr("a set", sv)
@@ -708,7 +720,7 @@ def Nx.fargsGo(fms: Ptr, syms: Ptr, vals: Ptr, i: I64, n: I64): Unit =
         val has: Bool = d match
           case Coll.Some(_) => true
           case Coll.None => false
-        Nx.aset[Ptr](vals, i, Nx.cell(Nx.VBool(has)))
+        Nx.aset[Ptr](vals, i, Nx.cell(Nx.bool(has)))
         Nx.fargsGo(fms, syms, vals, i + 1, n)
   else ()
 

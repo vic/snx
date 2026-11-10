@@ -12,6 +12,24 @@ def Nx.gImports(): I64 = 5
 def Nx.gMaxDepth(): I64 = 6
 def Nx.gTimestamps(): I64 = 7
 def Nx.gRegex(): I64 = 8
+def Nx.gTrue(): I64 = 9
+def Nx.gFalse(): I64 = 10
+def Nx.gInts(): I64 = 11
+
+// the integers 0 until Nx.smallInts() are made once, as the Booleans
+def Nx.smallInts(): I64 = 256
+
+def Nx.int(n: I64): Nx.Val =
+  if n >= 0 && n < Nx.smallInts() then Nx.aget[Nx.Val](Nx.aget[Ptr](Nx.globals(), Nx.gInts()), n) else Nx.VInt(n)
+
+def Nx.fillInts(a: Ptr, i: I64): Ptr =
+  if i < Nx.smallInts() then
+    Nx.aset[Nx.Val](a, i, Nx.VInt(i))
+    Nx.fillInts(a, i + 1)
+  else a
+
+// a Boolean: the two values made once (a constructor call would allocate one per result)
+def Nx.bool(b: Bool): Nx.Val = if b then Nx.aget[Nx.Val](Nx.globals(), Nx.gTrue()) else Nx.aget[Nx.Val](Nx.globals(), Nx.gFalse())
 
 // the capacity of the builder arrays: more names than Nix has
 def Nx.bsCap(): I64 = 512
@@ -76,6 +94,9 @@ def Nx.bsBuild(b: Nx.BB): Nx.Val = b match
     val g = Nx.globals()
     Nx.aset[Ptr](g, Nx.gKinds(), pk)
     Nx.aset[Ptr](g, Nx.gNames(), pn)
+    Nx.aset[Nx.Val](g, Nx.gTrue(), Nx.VBool(true))
+    Nx.aset[Nx.Val](g, Nx.gFalse(), Nx.VBool(false))
+    Nx.aset[Ptr](g, Nx.gInts(), Nx.fillInts(Nx.arrNew(Nx.smallInts()), 0))
     val bcell = Nx.cell(Nx.VNull)
     Nx.bbScope(b, Nx.intern("builtins"), bcell)
     Nx.bbBuiltin(b, Nx.intern("builtins"), bcell)
@@ -91,8 +112,8 @@ def Nx.bsBuild(b: Nx.BB): Nx.Val = b match
 
 // primops.cc:5153-5391
 def Nx.bsConsts(b: Nx.BB): Unit =
-  Nx.bsConst(b, "true", Nx.VBool(true))
-  Nx.bsConst(b, "false", Nx.VBool(false))
+  Nx.bsConst(b, "true", Nx.bool(true))
+  Nx.bsConst(b, "false", Nx.bool(false))
   Nx.bsConst(b, "null", Nx.VNull)
   Nx.bsConst(b, "__currentTime", Nx.VInt(Nx.timeNow()))
   Nx.bsConst(b, "__currentSystem", Nx.VStr("x86_64-linux", Coll.Nil))
@@ -206,9 +227,9 @@ def Nx.bsTodos(b: Nx.BB): Unit =
   Nx.bsTodo(b, "__zipAttrsWith", 2)
   Nx.bsTodo(b, "__partition", 2)
   Nx.bsTodo(b, "__groupBy", 2)
-  Nx.bsTodo(b, "__bitAnd", 2)
-  Nx.bsTodo(b, "__bitOr", 2)
-  Nx.bsTodo(b, "__bitXor", 2)
+  Nx.bsPrim(b, "__bitAnd", 2, Nx.PBitAnd)
+  Nx.bsPrim(b, "__bitOr", 2, Nx.PBitOr)
+  Nx.bsPrim(b, "__bitXor", 2, Nx.PBitXor)
   Nx.bsTodo(b, "__hashString", 2)
   Nx.bsTodo(b, "__convertHash", 1)
   Nx.bsTodo(b, "__replaceStrings", 3)

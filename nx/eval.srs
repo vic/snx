@@ -40,11 +40,11 @@ def Nx.force(c: Ptr): Nx.Val =
     case Nx.VBusy => Nx.VErr(Nx.KInfRec, "infinite recursion encountered")
     case _ => v
 
-// the cell of code in a lazy position [L:B1-B3]: a variable passes its cell on, a literal gets a forced cell
+// the cell of code in a lazy position [L:B1-B3]: a variable passes its cell on, a literal its prebuilt forced cell
 def Nx.thunk(env: Ptr, c: Nx.Code): Ptr = c match
   case Nx.CLocal(up, i) => Nx.aget[Ptr](Nx.up(env, up), i)
   case Nx.CCell(x) => x
-  case Nx.CConst(v) => Nx.cell(v)
+  case Nx.CConst(_, x) => x
   case _ => Nx.cell(Nx.VPending(env, c))
 
 // a thunk of code that runs in frame f while f is being filled: a slot of f itself may not be set yet
@@ -109,7 +109,7 @@ def Nx.pair(name: Str, v: Nx.Val): Nx.Pair = Nx.Pair(Nx.intern(name), Nx.cell(v)
 // ---- eval -----------------------------------------------------------------------------------------------------
 
 def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
-  case Nx.CConst(v) => v
+  case Nx.CConst(v, _) => v
   case Nx.CLocal(up, i) => Nx.force(Nx.aget[Ptr](Nx.up(env, up), i))
   case Nx.CWithVar(sym, ups, name) => Nx.withVar(env, sym, ups, name)
   case Nx.CCell(x) => Nx.force(x)
@@ -117,7 +117,7 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
     Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.VStr(file, Coll.Nil)), Coll.Cons(Nx.pair("line", Nx.VInt(line)), Coll.Cons(Nx.pair("column", Nx.VInt(col)), Coll.Nil))))
   case Nx.CStr(s) => Nx.VStr(s, Coll.Nil)
   case Nx.CPath(s) => Nx.VPath(s)
-  case Nx.CConcat(fs, n, parts) => Nx.concat(env, parts, 0, n, !fs, Nx.CatStr, 0, Nx.fOfInt(0), Nx.sbNew(), Coll.Nil)
+  case Nx.CConcat(fs, n, parts) => Nx.concat(env, parts, 0, n, !fs, Nx.CatStr, 0, Nx.fOfInt(0), Nx.noFrame(), Coll.Nil)
   case Nx.CList(n, xs) => Nx.VList(n, Nx.thunks(env, xs, Nx.arrNew(n), 0, n))
   case Nx.CAttrs(n, syms, vals, dyn) => Nx.dynAttrs(env, n, syms, Nx.thunks(env, vals, Nx.arrNew(n), 0, n), dyn)
   case Nx.CRecAttrs(n, syms, vals, dyn) =>
@@ -136,6 +136,8 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
   case Nx.CLam(_, _, _, _, _, _, _) => Nx.VLam(env, c)
   case Nx.CLamArg(_, _) => Nx.VLam(env, c)
   case Nx.CCall(f, n, args) => Nx.callN(env, Nx.eval(env, f), args, 0, n)
+  case Nx.CPrimCall(id, n, args) => Nx.primNow(env, id, n, args, 0)
+  case Nx.CAppSlots(n) => Nx.appSlots(env, Nx.force(Nx.aget[Ptr](env, 1)), 2, n + 2)
   case Nx.CSelect(e, path, d) => Nx.select(env, Nx.eval(env, e), path, d)
   case Nx.CHas(e, path) => Nx.has(env, Nx.eval(env, e), path)
   case Nx.CIf(cnd, t, e) =>
@@ -151,7 +153,7 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
   case Nx.CNot(a) =>
     val b = Nx.eval(env, a)
     b match
-      case Nx.VBool(x) => Nx.VBool(!x)
+      case Nx.VBool(x) => Nx.bool(!x)
       case _ => Nx.typeErr("a Boolean", b)
   case Nx.CAnd(a, b) =>
     val x = Nx.eval(env, a)
@@ -166,7 +168,7 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
   case Nx.CImpl(a, b) =>
     val x = Nx.eval(env, a)
     x match
-      case Nx.VBool(t) => if t then Nx.evalBool(env, b) else Nx.VBool(true)
+      case Nx.VBool(t) => if t then Nx.evalBool(env, b) else Nx.bool(true)
       case _ => Nx.typeErr("a Boolean", x)
   case Nx.CBin(op, a, b) => Nx.bin(env, op, a, b)
 
@@ -296,7 +298,7 @@ def Nx.selectSym(env: Ptr, v: Nx.Val, sym: I64, rest: Coll.List[Nx.CKey], d: Col
 
 // ExprOpHasAttr::eval (eval.cc:1483-1503)
 def Nx.has(env: Ptr, v: Nx.Val, path: Coll.List[Nx.CKey]): Nx.Val = path match
-  case Coll.Nil => Nx.VBool(true)
+  case Coll.Nil => Nx.bool(true)
   case Coll.Cons(k, rest) => v match
     case Nx.VErr(_, _) => v
     case _ => k match
@@ -310,10 +312,14 @@ def Nx.has(env: Ptr, v: Nx.Val, path: Coll.List[Nx.CKey]): Nx.Val = path match
 def Nx.hasSym(env: Ptr, v: Nx.Val, sym: I64, rest: Coll.List[Nx.CKey]): Nx.Val = v match
   case Nx.VAttrs(n, syms, vals) =>
     val i = Nx.findSym(syms, n, sym)
-    if i < n then Nx.has(env, Nx.force(Nx.aget[Ptr](vals, i)), rest) else Nx.VBool(false)
-  case _ => Nx.VBool(false)
+    if i < n then Nx.has(env, Nx.force(Nx.aget[Ptr](vals, i)), rest) else Nx.bool(false)
+  case _ => Nx.bool(false)
 
 // ---- calls ----------------------------------------------------------------------------------------------------
+
+// f applied to the cells in slots i..end of frame env, one at a time (an error passes through Nx.apply)
+def Nx.appSlots(env: Ptr, f: Nx.Val, i: I64, end: I64): Nx.Val =
+  if i == end then f else Nx.appSlots(env, Nx.apply(f, Nx.aget[Ptr](env, i)), i + 1, end)
 
 def Nx.callN(env: Ptr, f: Nx.Val, args: Ptr, i: I64, n: I64): Nx.Val =
   if i == n then f
@@ -425,6 +431,9 @@ def Nx.kindOf(v: Nx.Val): Nx.CatK = v match
   case Nx.VPath(_) => Nx.CatPath
   case _ => Nx.CatStr
 
+// the string builder of a chain, made at its first string part: a number chain (a + b) makes none
+def Nx.sbOf(sb: Ptr): Ptr = if Nx.ptrEq(sb, Nx.noFrame()) then Nx.sbNew() else sb
+
 def Nx.concat(env: Ptr, parts: Ptr, i: I64, n: I64, first: Bool, k: Nx.CatK, ia: I64, fa: I64, sb: Ptr, ctx: Coll.List[Str]): Nx.Val =
   if i == n then Nx.catDone(k, ia, fa, sb, ctx)
   else
@@ -443,8 +452,8 @@ def Nx.concat(env: Ptr, parts: Ptr, i: I64, n: I64, first: Bool, k: Nx.CatK, ia:
           case Nx.VInt(x) => Nx.concat(env, parts, i + 1, n, false, k2, ia, Nx.fadd(fa, Nx.fOfInt(x)), sb, ctx)
           case Nx.VFloat(x) => Nx.concat(env, parts, i + 1, n, false, k2, ia, Nx.fadd(fa, x), sb, ctx)
           case _ => Nx.VErr(Nx.KType, Nx.cat(Nx.cat("cannot add ", Nx.showType(v)), " to a float"))
-        case Nx.CatPath => Nx.concatStr(env, parts, i, n, k2, v, false, sb, ctx)
-        case Nx.CatStr => Nx.concatStr(env, parts, i, n, k2, v, true, sb, ctx)
+        case Nx.CatPath => Nx.concatStr(env, parts, i, n, k2, v, false, Nx.sbOf(sb), ctx)
+        case Nx.CatStr => Nx.concatStr(env, parts, i, n, k2, v, true, Nx.sbOf(sb), ctx)
 
 def Nx.concatStr(env: Ptr, parts: Ptr, i: I64, n: I64, k: Nx.CatK, v: Nx.Val, toStore: Bool, sb: Ptr, ctx: Coll.List[Str]): Nx.Val =
   val s = Nx.coerce(v, false, toStore)
@@ -455,7 +464,7 @@ def Nx.concatStr(env: Ptr, parts: Ptr, i: I64, n: I64, k: Nx.CatK, v: Nx.Val, to
     case _ => s
 
 def Nx.catDone(k: Nx.CatK, ia: I64, fa: I64, sb: Ptr, ctx: Coll.List[Str]): Nx.Val = k match
-  case Nx.CatInt => Nx.VInt(ia)
+  case Nx.CatInt => Nx.int(ia)
   case Nx.CatFloat => Nx.VFloat(fa)
   case Nx.CatPath => ctx match
     case Coll.Nil => Nx.VPath(Nx.canonPath(Nx.sbGet(sb)))
@@ -514,7 +523,7 @@ def Nx.bin(env: Ptr, op: Nx.BinOp, a: Nx.Code, b: Nx.Code): Nx.Val = op match
   case Nx.ONe =>
     val r = Nx.eqVals(Nx.eval(env, a), Nx.eval(env, b))
     r match
-      case Nx.VBool(t) => Nx.VBool(!t)
+      case Nx.VBool(t) => Nx.bool(!t)
       case _ => r
   case Nx.OUpdate =>
     // the right operand first (ExprOpUpdate::evalForUpdate, eval.cc:2015-2020)
@@ -530,12 +539,31 @@ def Nx.update(x: Nx.Val, y: Nx.Val): Nx.Val = x match
     case Nx.VAttrs(n2, s2, v2) =>
       if n1 == 0 then y
       else if n2 == 0 then x
+      else if Nx.namesIn(s2, n2, s1, n1, 0) then
+        // no new name: the result shares x's names and copies only its cells
+        val ov = Nx.arrNew(n1)
+        Nx.copyCells(v1, 0, ov, 0, n1)
+        Nx.overwrite(s2, v2, n2, s1, n1, ov, 0)
+        Nx.VAttrs(n1, s1, ov)
       else
         val os = Nx.arrNew(n1 + n2)
         val ov = Nx.arrNew(n1 + n2)
         Nx.VAttrs(Nx.mergeAttrs(s1, v1, n1, s2, v2, n2, 0, 0, os, ov, 0), os, ov)
     case _ => Nx.typeErr("a set", y)
   case _ => Nx.typeErr("a set", x)
+
+// every name of s2[j..n2) is in s1 (a binary search each, stops at the first absent one)
+def Nx.namesIn(s2: Ptr, n2: I64, s1: Ptr, n1: I64, j: I64): Bool =
+  if j == n2 then true
+  else if Nx.findSym(s1, n1, Nx.ageti(s2, j)) < n1 then Nx.namesIn(s2, n2, s1, n1, j + 1)
+  else false
+
+// ov[slot of s2[j] in s1] = v2[j] for j in j..n2; every name present (Nx.namesIn)
+def Nx.overwrite(s2: Ptr, v2: Ptr, n2: I64, s1: Ptr, n1: I64, ov: Ptr, j: I64): Unit =
+  if j < n2 then
+    Nx.aset[Ptr](ov, Nx.findSym(s1, n1, Nx.ageti(s2, j)), Nx.aget[Ptr](v2, j))
+    Nx.overwrite(s2, v2, n2, s1, n1, ov, j + 1)
+  else ()
 
 // both sorted by symbol: the union, y's value on a shared name; returns the count
 def Nx.mergeAttrs(s1: Ptr, v1: Ptr, n1: I64, s2: Ptr, v2: Ptr, n2: I64, i: I64, j: I64, os: Ptr, ov: Ptr, k: I64): I64 =
@@ -569,39 +597,39 @@ def Nx.eqVals(x: Nx.Val, y: Nx.Val): Nx.Val =
   if Nx.isErr(x) then x else if Nx.isErr(y) then y else Nx.eqOk(x, y)
 
 // the same cell is equal to itself, functions included (eval.cc:2911-2912)
-def Nx.eqCells(a: Ptr, b: Ptr): Nx.Val = if Nx.ptrEq(a, b) then Nx.VBool(true) else Nx.eqVals(Nx.force(a), Nx.force(b))
+def Nx.eqCells(a: Ptr, b: Ptr): Nx.Val = if Nx.ptrEq(a, b) then Nx.bool(true) else Nx.eqVals(Nx.force(a), Nx.force(b))
 
 def Nx.eqOk(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case Nx.VInt(a) => y match
-    case Nx.VInt(b) => Nx.VBool(a == b)
-    case Nx.VFloat(b) => Nx.VBool(Nx.feq(Nx.fOfInt(a), b))
-    case _ => Nx.VBool(false)
+    case Nx.VInt(b) => Nx.bool(a == b)
+    case Nx.VFloat(b) => Nx.bool(Nx.feq(Nx.fOfInt(a), b))
+    case _ => Nx.bool(false)
   case Nx.VFloat(a) => y match
-    case Nx.VInt(b) => Nx.VBool(Nx.feq(a, Nx.fOfInt(b)))
-    case Nx.VFloat(b) => Nx.VBool(Nx.feq(a, b))
-    case _ => Nx.VBool(false)
+    case Nx.VInt(b) => Nx.bool(Nx.feq(a, Nx.fOfInt(b)))
+    case Nx.VFloat(b) => Nx.bool(Nx.feq(a, b))
+    case _ => Nx.bool(false)
   case Nx.VBool(a) => y match
-    case Nx.VBool(b) => Nx.VBool(if a then b else !b)
-    case _ => Nx.VBool(false)
+    case Nx.VBool(b) => Nx.bool(if a then b else !b)
+    case _ => Nx.bool(false)
   case Nx.VStr(s, _) => y match
-    case Nx.VStr(t, _) => Nx.VBool(Str.eq(s, t))
-    case _ => Nx.VBool(false)
+    case Nx.VStr(t, _) => Nx.bool(Str.eq(s, t))
+    case _ => Nx.bool(false)
   case Nx.VPath(s) => y match
-    case Nx.VPath(t) => Nx.VBool(Str.eq(s, t))
-    case _ => Nx.VBool(false)
+    case Nx.VPath(t) => Nx.bool(Str.eq(s, t))
+    case _ => Nx.bool(false)
   case Nx.VNull => y match
-    case Nx.VNull => Nx.VBool(true)
-    case _ => Nx.VBool(false)
+    case Nx.VNull => Nx.bool(true)
+    case _ => Nx.bool(false)
   case Nx.VList(n, xs) => y match
-    case Nx.VList(m, ys) => if n != m then Nx.VBool(false) else Nx.eqList(xs, ys, 0, n)
-    case _ => Nx.VBool(false)
+    case Nx.VList(m, ys) => if n != m then Nx.bool(false) else Nx.eqList(xs, ys, 0, n)
+    case _ => Nx.bool(false)
   case Nx.VAttrs(_, _, _) => y match
     case Nx.VAttrs(_, _, _) => Nx.eqAttrs(x, y)
-    case _ => Nx.VBool(false)
-  case _ => Nx.VBool(false)
+    case _ => Nx.bool(false)
+  case _ => Nx.bool(false)
 
 def Nx.eqList(xs: Ptr, ys: Ptr, i: I64, n: I64): Nx.Val =
-  if i == n then Nx.VBool(true)
+  if i == n then Nx.bool(true)
   else
     val r = Nx.eqCells(Nx.aget[Ptr](xs, i), Nx.aget[Ptr](ys, i))
     r match
@@ -615,11 +643,11 @@ def Nx.isDrv(v: Nx.Val): Nx.Val = v match
     if i < n then
       val t = Nx.force(Nx.aget[Ptr](vals, i))
       t match
-        case Nx.VStr(s, _) => Nx.VBool(Str.eq(s, "derivation"))
+        case Nx.VStr(s, _) => Nx.bool(Str.eq(s, "derivation"))
         case Nx.VErr(_, _) => t
-        case _ => Nx.VBool(false)
-    else Nx.VBool(false)
-  case _ => Nx.VBool(false)
+        case _ => Nx.bool(false)
+    else Nx.bool(false)
+  case _ => Nx.bool(false)
 
 def Nx.eqAttrs(x: Nx.Val, y: Nx.Val): Nx.Val =
   val dx = Nx.isDrv(x)
@@ -640,18 +668,18 @@ def Nx.eqDrvs(x: Nx.Val, y: Nx.Val): Nx.Val = x match
       val i = Nx.findSym(s1, n1, o)
       val j = Nx.findSym(s2, n2, o)
       if i < n1 && j < n2 then Nx.eqCells(Nx.aget[Ptr](v1, i), Nx.aget[Ptr](v2, j)) else Nx.eqAttrsPlain(x, y)
-    case _ => Nx.VBool(false)
-  case _ => Nx.VBool(false)
+    case _ => Nx.bool(false)
+  case _ => Nx.bool(false)
 
 def Nx.eqAttrsPlain(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case Nx.VAttrs(n1, s1, v1) => y match
-    case Nx.VAttrs(n2, s2, v2) => if n1 != n2 then Nx.VBool(false) else Nx.eqAttrsGo(s1, v1, s2, v2, 0, n1)
-    case _ => Nx.VBool(false)
-  case _ => Nx.VBool(false)
+    case Nx.VAttrs(n2, s2, v2) => if n1 != n2 then Nx.bool(false) else Nx.eqAttrsGo(s1, v1, s2, v2, 0, n1)
+    case _ => Nx.bool(false)
+  case _ => Nx.bool(false)
 
 def Nx.eqAttrsGo(s1: Ptr, v1: Ptr, s2: Ptr, v2: Ptr, i: I64, n: I64): Nx.Val =
-  if i == n then Nx.VBool(true)
-  else if Nx.ageti(s1, i) != Nx.ageti(s2, i) then Nx.VBool(false)
+  if i == n then Nx.bool(true)
+  else if Nx.ageti(s1, i) != Nx.ageti(s2, i) then Nx.bool(false)
   else
     val r = Nx.eqCells(Nx.aget[Ptr](v1, i), Nx.aget[Ptr](v2, i))
     r match
@@ -667,18 +695,18 @@ def Nx.cmpErr(x: Nx.Val, y: Nx.Val): Nx.Val =
 
 def Nx.lessOk(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case Nx.VInt(a) => y match
-    case Nx.VInt(b) => Nx.VBool(a < b)
-    case Nx.VFloat(b) => Nx.VBool(Nx.flt(Nx.fOfInt(a), b))
+    case Nx.VInt(b) => Nx.bool(a < b)
+    case Nx.VFloat(b) => Nx.bool(Nx.flt(Nx.fOfInt(a), b))
     case _ => Nx.cmpErr(x, y)
   case Nx.VFloat(a) => y match
-    case Nx.VInt(b) => Nx.VBool(Nx.flt(a, Nx.fOfInt(b)))
-    case Nx.VFloat(b) => Nx.VBool(Nx.flt(a, b))
+    case Nx.VInt(b) => Nx.bool(Nx.flt(a, Nx.fOfInt(b)))
+    case Nx.VFloat(b) => Nx.bool(Nx.flt(a, b))
     case _ => Nx.cmpErr(x, y)
   case Nx.VStr(s, _) => y match
-    case Nx.VStr(t, _) => Nx.VBool(Nx.strLess(s, t))
+    case Nx.VStr(t, _) => Nx.bool(Nx.strLess(s, t))
     case _ => Nx.cmpErr(x, y)
   case Nx.VPath(s) => y match
-    case Nx.VPath(t) => Nx.VBool(Nx.strLess(s, t))
+    case Nx.VPath(t) => Nx.bool(Nx.strLess(s, t))
     case _ => Nx.cmpErr(x, y)
   case Nx.VList(n, xs) => y match
     case Nx.VList(m, ys) => Nx.listLess(xs, n, ys, m, 0)
@@ -686,8 +714,8 @@ def Nx.lessOk(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case _ => Nx.cmpErr(x, y)
 
 def Nx.listLess(xs: Ptr, n: I64, ys: Ptr, m: I64, i: I64): Nx.Val =
-  if i == m then Nx.VBool(false)
-  else if i == n then Nx.VBool(true)
+  if i == m then Nx.bool(false)
+  else if i == n then Nx.bool(true)
   else
     val a = Nx.aget[Ptr](xs, i)
     val b = Nx.aget[Ptr](ys, i)

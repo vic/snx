@@ -236,6 +236,10 @@ bool Nx__subOv(int64_t a, int64_t b) { int64_t r; return __builtin_sub_overflow(
 bool Nx__mulOv(int64_t a, int64_t b) { int64_t r; return __builtin_mul_overflow(a, b, &r); }
 // a / b truncated; call only with b != 0 and not (INT64_MIN, -1)
 int64_t Nx__idiv(int64_t a, int64_t b) { return a / b; }
+// prim_bitAnd, prim_bitOr, prim_bitXor
+int64_t Nx__iand(int64_t a, int64_t b) { return a & b; }
+int64_t Nx__ior(int64_t a, int64_t b) { return a | b; }
+int64_t Nx__ixor(int64_t a, int64_t b) { return a ^ b; }
 // doubles on their bits
 static double nx_d(int64_t b) { double d; memcpy(&d, &b, sizeof d); return d; }
 static int64_t nx_b(double d) { int64_t b; memcpy(&b, &d, sizeof b); return b; }

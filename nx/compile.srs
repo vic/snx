@@ -23,11 +23,14 @@ def Nx.compile(e: Nx.Expr, file: Str, src: Str): Nx.CompileResult =
   val c = Nx.cp(e, Coll.Nil, Nx.Cx(file, src, u, Nx.baseEnv()))
   if Nx.ageti(u, 0) == 1 then Nx.Undefined(Nx.ageti(u, 1), Nx.symName(Nx.ageti(u, 2))) else Nx.Compiled(c)
 
+// a literal: its value, and one cell of it for every lazy use (a forced cell is never written again)
+def Nx.konst(v: Nx.Val): Nx.Code = Nx.CConst(v, Nx.cell(v))
+
 def Nx.cp(e: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = e match
-  case Nx.EInt(_, v) => Nx.CConst(Nx.VInt(v))
-  case Nx.EFloat(_, b) => Nx.CConst(Nx.VFloat(b))
-  case Nx.EStr(_, s) => Nx.CConst(Nx.VStr(s, Coll.Nil))
-  case Nx.EPath(_, s) => Nx.CConst(Nx.VPath(s))
+  case Nx.EInt(_, v) => Nx.konst(Nx.VInt(v))
+  case Nx.EFloat(_, b) => Nx.konst(Nx.VFloat(b))
+  case Nx.EStr(_, s) => Nx.konst(Nx.VStr(s, Coll.Nil))
+  case Nx.EPath(_, s) => Nx.konst(Nx.VPath(s))
   case Nx.EConcat(_, fs, parts) =>
     val n = Coll.length(parts)
     Nx.CConcat(fs, n, Nx.cpArr(parts, sc, cx, Nx.arrNew(n), 0))
@@ -42,7 +45,7 @@ def Nx.cp(e: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = e match
   case Nx.ELambda(_, arg, fms, body) => Nx.cpLam(arg, fms, body, sc, cx)
   case Nx.ECall(_, f, args) =>
     val n = Coll.length(args)
-    Nx.CCall(Nx.cp(f, sc, cx), n, Nx.cpArr(args, sc, cx, Nx.arrNew(n), 0))
+    Nx.cpCall(Nx.cp(f, sc, cx), n, Nx.cpArr(args, sc, cx, Nx.arrNew(n), 0))
   case Nx.ELet(_, attrs, body) => Nx.cpLet(attrs, body, sc, cx)
   case Nx.EWith(_, a, b) => Nx.CWith(Nx.cp(a, sc, cx), Nx.cp(b, Coll.Cons(Nx.ScWith, sc), cx))
   case Nx.EIf(_, c, t, f) => Nx.CIf(Nx.cp(c, sc, cx), Nx.cp(t, sc, cx), Nx.cp(f, sc, cx))
@@ -55,6 +58,36 @@ def Nx.cp(e: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = e match
   case Nx.EImpl(_, a, b) => Nx.CImpl(Nx.cp(a, sc, cx), Nx.cp(b, sc, cx))
   case Nx.EUpdate(_, a, b) => Nx.CBin(Nx.OUpdate, Nx.cp(a, sc, cx), Nx.cp(b, sc, cx))
   case Nx.EListConcat(_, a, b) => Nx.CBin(Nx.OListConcat, Nx.cp(a, sc, cx), Nx.cp(b, sc, cx))
+
+// a call; a base env primop given exactly its arity runs without the function value and callN
+def Nx.cpCall(f: Nx.Code, n: I64, args: Ptr): Nx.Code = Nx.fixedCell(f) match
+  case Coll.Some(c) => Nx.cpPrimCall(Nx.get(c), f, n, args)
+  case Coll.None => Nx.CCall(f, n, args)
+
+def Nx.cpPrimCall(v: Nx.Val, f: Nx.Code, n: I64, args: Ptr): Nx.Code = v match
+  case Nx.VPrim(id, ar) => if ar == n then Nx.CPrimCall(id, n, args) else Nx.CCall(f, n, args)
+  case _ => Nx.CCall(f, n, args)
+
+// the cell a call head always names: a base env name (lexical, so fixed) or builtins.<name> (the base sets never
+// change). Only in call heads: a lazy builtins.<name> elsewhere keeps its own thunk, as Nix's (eqValues tests identity)
+def Nx.fixedCell(f: Nx.Code): Coll.Option[Ptr] = f match
+  case Nx.CCell(c) => Coll.Some(c)
+  case Nx.CSelect(e, path, _) => e match
+    case Nx.CCell(c) => path match
+      case Coll.Cons(k, rest) => rest match
+        case Coll.Nil => k match
+          case Nx.KSym(sym) => Nx.cellIn(Nx.get(c), sym)
+          case _ => Coll.None
+        case _ => Coll.None
+      case _ => Coll.None
+    case _ => Coll.None
+  case _ => Coll.None
+
+def Nx.cellIn(v: Nx.Val, sym: I64): Coll.Option[Ptr] = v match
+  case Nx.VAttrs(n, syms, vals) =>
+    val i = Nx.findSym(syms, n, sym)
+    if i < n then Coll.Some(Nx.aget[Ptr](vals, i)) else Coll.None
+  case _ => Coll.None
 
 // xs compiled into arr from slot i
 def Nx.cpArr(xs: Coll.List[Nx.Expr], sc: Coll.List[Nx.Sc], cx: Nx.Cx, arr: Ptr, i: I64): Ptr = xs match
@@ -106,7 +139,7 @@ def Nx.cpWithVar(p: I64, sym: I64, name: Str, withs: Coll.List[I64], u: Ptr): Nx
       Nx.aseti(u, 1, p)
       Nx.aseti(u, 2, sym)
     else ()
-    Nx.CConst(Nx.VErr(Nx.KOther, Nx.cat("undefined variable ", name)))
+    Nx.konst(Nx.VErr(Nx.KOther, Nx.cat("undefined variable ", name)))
 
 // ---- bindings -------------------------------------------------------------------------------------------------
 

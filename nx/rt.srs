@@ -22,6 +22,9 @@ extern def Nx.addOv(a: I64, b: I64): Bool
 extern def Nx.subOv(a: I64, b: I64): Bool
 extern def Nx.mulOv(a: I64, b: I64): Bool
 extern def Nx.idiv(a: I64, b: I64): I64
+extern def Nx.iand(a: I64, b: I64): I64
+extern def Nx.ior(a: I64, b: I64): I64
+extern def Nx.ixor(a: I64, b: I64): I64
 extern def Nx.fadd(a: I64, b: I64): I64
 extern def Nx.fsub(a: I64, b: I64): I64
 extern def Nx.fmul(a: I64, b: I64): I64
