@@ -29,17 +29,23 @@ def Nx.compileIn(e: Nx.Expr, file: Str, src: Str, sc: Coll.List[Nx.Sc]): Nx.Comp
 // a literal: its value, and one cell of it for every lazy use (a forced cell is never written again)
 def Nx.konst(v: Nx.Val): Nx.Code = Nx.CConst(v, Nx.cell(v))
 
+// an array of n words in the current region: for a loaded file its load arena (nx/load.srs), so it dies with the
+// file's tokens and tree. Only arrays that the serialized code copies by content (scopes, binding lists, the Code
+// arrays of lists, calls, strings and sets) live here; the ones kept by address (the symbols of a set, the formals of
+// a pattern, position records: load.srs wbPutP, rt/snx_fs.c posPut) stay Nx.arrNew words
+def Nx.tmpArr(n: I64): Ptr = Region.alloc(8 * n)
+
 def Nx.cp(e: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = e match
-  case Nx.EInt(_, v) => Nx.konst(Nx.VInt(v))
+  case Nx.EInt(_, v) => Nx.konst(Nx.int(v))
   case Nx.EFloat(_, b) => Nx.konst(Nx.VFloat(b))
   case Nx.EStr(_, s) => Nx.konst(Nx.VStr(s, Coll.Nil))
   case Nx.EPath(_, s) => Nx.konst(Nx.VPath(s))
   case Nx.EConcat(_, fs, parts) =>
     val n = Coll.length(parts)
-    Nx.CConcat(fs, n, Nx.cpArr(parts, sc, cx, Nx.arrNew(n), 0))
+    Nx.CConcat(fs, n, Nx.cpArr(parts, sc, cx, Nx.tmpArr(n), 0))
   case Nx.EList(_, xs) =>
     val n = Coll.length(xs)
-    Nx.CList(n, Nx.cpArr(xs, sc, cx, Nx.arrNew(n), 0))
+    Nx.CList(n, Nx.cpArr(xs, sc, cx, Nx.tmpArr(n), 0))
   case Nx.EVar(p, name) => Nx.cpVar(p, Nx.intern(name), name, sc, 0, Coll.Nil, cx)
   case Nx.ECurPos(p) => Nx.cpPos(p, cx)
   case Nx.ESelect(_, a, path, d) => Nx.CSelect(Nx.cp(a, sc, cx), Nx.cpKeys(path, sc, cx, Coll.Nil), Nx.cpOpt(d, sc, cx))
@@ -48,7 +54,7 @@ def Nx.cp(e: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = e match
   case Nx.ELambda(_, arg, fms, body) => Nx.cpLam(arg, fms, body, sc, cx)
   case Nx.ECall(_, f, args) =>
     val n = Coll.length(args)
-    Nx.cpCall(Nx.cp(f, sc, cx), n, Nx.markNum(Nx.cpArr(args, sc, cx, Nx.arrNew(n), 0), 0, n))
+    Nx.cpCall(Nx.cp(f, sc, cx), n, Nx.markNum(Nx.cpArr(args, sc, cx, Nx.tmpArr(n), 0), 0, n))
   case Nx.ELet(_, attrs, body) => Nx.cpLet(attrs, body, sc, cx)
   case Nx.EWith(_, a, b) => Nx.CWith(Nx.cp(a, sc, cx), Nx.cp(b, Coll.Cons(Nx.ScWith, sc), cx))
   case Nx.EIf(_, c, t, f) => Nx.CIf(Nx.cp(c, sc, cx), Nx.cp(t, sc, cx), Nx.cp(f, sc, cx))
@@ -183,7 +189,7 @@ enum Nx.Sorted:
 def Nx.sortBinds(bs: Coll.List[Nx.Binding]): Nx.Sorted =
   val n = Coll.length(bs)
   val syms = Nx.arrNew(n)
-  val arr = Nx.arrNew(n)
+  val arr = Nx.tmpArr(n)
   Nx.fillBinds(bs, syms, arr, 0)
   Nx.sortPairs(syms, arr, n)
   Nx.Sorted(n, syms, arr)
@@ -197,7 +203,7 @@ def Nx.fillBinds(bs: Coll.List[Nx.Binding], syms: Ptr, arr: Ptr, i: I64): Unit =
 
 // a scope level whose names are the sorted syms, name i in slot i + 1
 def Nx.scOfSorted(n: I64, syms: Ptr): Nx.Sc =
-  val slots = Nx.arrNew(n)
+  val slots = Nx.tmpArr(n)
   Nx.fillSlots(slots, 0, n)
   Nx.ScLex(n, syms, slots)
 
@@ -230,21 +236,21 @@ def Nx.cpDyns(ds: Coll.List[Nx.DynBind], sc: Coll.List[Nx.Sc], cx: Nx.Cx, acc: C
 // { ... }: values in the current frame
 def Nx.cpAttrs(binds: Coll.List[Nx.Binding], dyns: Coll.List[Nx.DynBind], sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code =
   Nx.sortBinds(binds) match
-    case Nx.Sorted(n, syms, arr) => Nx.cpAttrsAt(syms, Nx.posOfBinds(cx, arr, n), Nx.CAttrs(n, syms, Nx.cpBinds(arr, Nx.arrNew(n), 0, n, sc, sc, cx), Nx.cpDyns(dyns, sc, cx, Coll.Nil)))
+    case Nx.Sorted(n, syms, arr) => Nx.cpAttrsAt(syms, Nx.posOfBinds(cx, arr, n), Nx.CAttrs(n, syms, Nx.cpBinds(arr, Nx.tmpArr(n), 0, n, sc, sc, cx), Nx.cpDyns(dyns, sc, cx, Coll.Nil)))
 
 // rec { ... }: a new frame of the names, slot i + 1 = attribute i (the set shares the frame's cells)
 def Nx.cpRec(binds: Coll.List[Nx.Binding], dyns: Coll.List[Nx.DynBind], sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code =
   Nx.sortBinds(binds) match
     case Nx.Sorted(n, syms, arr) =>
       val inner = Coll.Cons(Nx.scOfSorted(n, syms), sc)
-      Nx.cpAttrsAt(syms, Nx.posOfBinds(cx, arr, n), Nx.CRecAttrs(n, syms, Nx.cpBinds(arr, Nx.arrNew(n), 0, n, inner, Coll.Cons(Nx.ScAnon, sc), cx), Nx.cpDyns(dyns, inner, cx, Coll.Nil)))
+      Nx.cpAttrsAt(syms, Nx.posOfBinds(cx, arr, n), Nx.CRecAttrs(n, syms, Nx.cpBinds(arr, Nx.tmpArr(n), 0, n, inner, Coll.Cons(Nx.ScAnon, sc), cx), Nx.cpDyns(dyns, inner, cx, Coll.Nil)))
 
 // let: as rec, the body in the new frame (nixexpr.cc:505-525); a let has no dynamic attributes (the parser refuses them)
 def Nx.cpLet(attrs: Nx.Expr, body: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = attrs match
   case Nx.EAttrs(_, _, binds, _) => Nx.sortBinds(binds) match
     case Nx.Sorted(n, syms, arr) =>
       val inner = Coll.Cons(Nx.scOfSorted(n, syms), sc)
-      Nx.CLet(n, Nx.cpBinds(arr, Nx.arrNew(n), 0, n, inner, Coll.Cons(Nx.ScAnon, sc), cx), Nx.cp(body, inner, cx))
+      Nx.CLet(n, Nx.cpBinds(arr, Nx.tmpArr(n), 0, n, inner, Coll.Cons(Nx.ScAnon, sc), cx), Nx.cp(body, inner, cx))
   case _ => Nx.cp(body, Coll.Cons(Nx.ScAnon, sc), cx)
 
 // ---- lambdas --------------------------------------------------------------------------------------------------
@@ -259,7 +265,7 @@ def Nx.cpLam(arg: Coll.Option[Str], fms: Coll.Option[Nx.Formals], body: Nx.Expr,
     case Nx.Fms(ell, fs) => Nx.cpPattern(arg, ell, fs, body, sc, cx)
 
 def Nx.oneSym(v: I64): Ptr =
-  val a = Nx.arrNew(1)
+  val a = Nx.tmpArr(1)
   Nx.aseti(a, 0, v)
   a
 
@@ -275,16 +281,16 @@ def Nx.fillFormals(fs: Coll.List[Nx.Formal], syms: Ptr, arr: Ptr, i: I64): Unit 
 
 def Nx.cpPattern(arg: Coll.Option[Str], ell: Bool, fs: Coll.List[Nx.Formal], body: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code =
   val nf = Coll.length(fs)
-  val syms = Nx.arrNew(nf)
-  val arr = Nx.arrNew(nf)
+  val syms = Nx.tmpArr(nf)
+  val arr = Nx.tmpArr(nf)
   Nx.fillFormals(fs, syms, arr, 0)
   Nx.sortPairs(syms, arr, nf)
   // the scope: formal i in slot i + 2, the @ name in slot 1
   val n: I64 = arg match
     case Coll.Some(_) => nf + 1
     case Coll.None => nf
-  val ns = Nx.arrNew(n)
-  val nslot = Nx.arrNew(n)
+  val ns = Nx.tmpArr(n)
+  val nslot = Nx.tmpArr(n)
   Nx.fmScope(syms, ns, nslot, 0, nf)
   val named: Bool = arg match
     case Coll.Some(x) =>

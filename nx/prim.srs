@@ -153,10 +153,10 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PLength =>
       val l = Nx.force(a)
       l match
-        case Nx.VList(n, _) => Nx.VInt(n)
+        case Nx.VList(n, _) => Nx.int(n)
         case _ => Nx.typeErr("a list", l)
     case Nx.PElemAt => Nx.pElemAt(Nx.force(a), Nx.force(b))
-    case Nx.PHead => Nx.pElemAt(Nx.force(a), Nx.VInt(0))
+    case Nx.PHead => Nx.pElemAt(Nx.force(a), Nx.int(0))
     case Nx.PTail => Nx.pTail(Nx.force(a))
     case Nx.PAttrNames => Nx.pAttrNames(Nx.force(a), true)
     case Nx.PAttrValues => Nx.pAttrNames(Nx.force(a), false)
@@ -172,7 +172,7 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PStringLength =>
       val s = Nx.coerce(Nx.force(a), false, true)
       s match
-        case Nx.VStr(t, _) => Nx.VInt(Str.len(t))
+        case Nx.VStr(t, _) => Nx.int(Str.len(t))
         case _ => s
     case Nx.PSubstring => Nx.pSubstring(Nx.force(a), Nx.force(b), c)
     case Nx.PFunctionArgs => Nx.pFunctionArgs(Nx.force(a))
@@ -387,7 +387,7 @@ def Nx.pGenList(a: Ptr, nv: Nx.Val): Nx.Val = nv match
 
 def Nx.genCells(code: Nx.Code, out: Ptr, i: I64, n: I64): Ptr =
   if i < n then
-    Nx.aset[Ptr](out, i, Nx.app1(code, Nx.cell(Nx.VInt(i))))
+    Nx.aset[Ptr](out, i, Nx.app1(code, Nx.cell(Nx.int(i))))
     Nx.genCells(code, out, i + 1, n)
   else out
 
@@ -462,7 +462,7 @@ def Nx.elemGo(x: Ptr, xs: Ptr, i: I64, n: I64): Nx.Val =
 
 // the lists of l, each forced: their total length, or the error
 def Nx.listsLen(xs: Ptr, i: I64, n: I64, acc: I64): Nx.Val =
-  if i == n then Nx.VInt(acc)
+  if i == n then Nx.int(acc)
   else
     val v = Nx.force(Nx.aget[Ptr](xs, i))
     v match
@@ -713,22 +713,62 @@ def Nx.pGetAttr(nv: Nx.Val, sv: Nx.Val, has: Bool): Nx.Val = nv match
     case _ => Nx.typeErr("a set", sv)
   case _ => Nx.typeErr("a string", nv)
 
-// the names of the strings of a list as a set of null values (for membership), or the error
-def Nx.nameSet(xs: Ptr, i: I64, n: I64, acc: Coll.List[Nx.Pair]): Nx.Val =
-  if i == n then Nx.attrsOf(acc)
+// the symbols of the strings of list xs, from i on, into syms (removeAttrs' names, sorted after): Nx.VNull or the error
+def Nx.nameSyms(xs: Ptr, syms: Ptr, i: I64, n: I64): Nx.Val =
+  if i == n then Nx.VNull
   else
     val v = Nx.force(Nx.aget[Ptr](xs, i))
     v match
-      case Nx.VStr(s, _) => Nx.nameSet(xs, i + 1, n, Coll.Cons(Nx.Pair(Nx.intern(s), Nx.noFrame()), acc))
+      case Nx.VStr(s, _) =>
+        Nx.aseti(syms, i, Nx.intern(s))
+        Nx.nameSyms(xs, syms, i + 1, n)
       case _ => Nx.typeErr("a string", v)
+
+// a[0, n) ascending in place, for Nx.findSym: a heap sort, so no scratch words
+def Nx.symSort(a: Ptr, n: I64): Unit =
+  Nx.symHeapify(a, n / 2 - 1, n)
+  Nx.symPop(a, n - 1)
+
+def Nx.symHeapify(a: Ptr, i: I64, n: I64): Unit =
+  if i >= 0 then
+    Nx.symSift(a, i, n)
+    Nx.symHeapify(a, i - 1, n)
+  else ()
+
+// the largest of the heap a[0, e] moved to e, then the heap a[0, e) rebuilt
+def Nx.symPop(a: Ptr, e: I64): Unit =
+  if e > 0 then
+    Nx.symSwap(a, 0, e)
+    Nx.symSift(a, 0, e)
+    Nx.symPop(a, e - 1)
+  else ()
+
+// a[i] moved down the max-heap a[0, n) to its place
+def Nx.symSift(a: Ptr, i: I64, n: I64): Unit =
+  val l = 2 * i + 1
+  if l < n then
+    val c = if l + 1 < n && Nx.ageti(a, l + 1) > Nx.ageti(a, l) then l + 1 else l
+    if Nx.ageti(a, c) > Nx.ageti(a, i) then
+      Nx.symSwap(a, i, c)
+      Nx.symSift(a, c, n)
+    else ()
+  else ()
+
+def Nx.symSwap(a: Ptr, i: I64, j: I64): Unit =
+  val x = Nx.ageti(a, i)
+  Nx.aseti(a, i, Nx.ageti(a, j))
+  Nx.aseti(a, j, x)
 
 // the attributes of x whose names are (keep = true) or are not (keep = false) in the set m
 def Nx.filterAttrs(n: I64, syms: Ptr, vals: Ptr, m: Nx.Val, keep: Bool): Nx.Val = Nx.flat(m) match
-  case Nx.VAttrs(k, ks, _) =>
-    val os = Nx.arrNew(n)
-    val ov = Nx.arrNew(n)
-    Nx.VAttrs(Nx.filterGo2(n, syms, vals, k, ks, keep, os, ov, 0, 0), os, ov)
+  case Nx.VAttrs(k, ks, _) => Nx.filterSyms(n, syms, vals, k, ks, keep)
   case _ => m
+
+// the attributes of x whose names are (keep = true) or are not (keep = false) among the k sorted symbols ks
+def Nx.filterSyms(n: I64, syms: Ptr, vals: Ptr, k: I64, ks: Ptr, keep: Bool): Nx.Val =
+  val os = Nx.arrNew(n)
+  val ov = Nx.arrNew(n)
+  Nx.VAttrs(Nx.filterGo2(n, syms, vals, k, ks, keep, os, ov, 0, 0), os, ov)
 
 def Nx.filterGo2(n: I64, syms: Ptr, vals: Ptr, k: I64, ks: Ptr, keep: Bool, os: Ptr, ov: Ptr, i: I64, o: I64): I64 =
   if i == n then o
@@ -743,7 +783,13 @@ def Nx.filterGo2(n: I64, syms: Ptr, vals: Ptr, k: I64, ks: Ptr, keep: Bool, os: 
 
 def Nx.pRemoveAttrs(sv: Nx.Val, l: Nx.Val): Nx.Val = Nx.flat(sv) match
   case Nx.VAttrs(n, syms, vals) => l match
-    case Nx.VList(m, xs) => Nx.filterAttrs(n, syms, vals, Nx.nameSet(xs, 0, m, Coll.Nil), false)
+    case Nx.VList(m, xs) =>
+      val ks = Nx.arrNew(m)
+      val r = Nx.nameSyms(xs, ks, 0, m)
+      if Nx.isErr(r) then r
+      else
+        Nx.symSort(ks, m)
+        Nx.filterSyms(n, syms, vals, m, ks, false)
     case _ => Nx.typeErr("a list", l)
   case _ => Nx.typeErr("a set", sv)
 

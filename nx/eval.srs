@@ -171,7 +171,7 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
   case Nx.CWithVar(sym, ups, name) => Nx.withVar(env, sym, ups, name)
   case Nx.CCell(x) => Nx.force(x)
   case Nx.CCurPos(file, line, col) =>
-    Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.VStr(file, Coll.Nil)), Coll.Cons(Nx.pair("line", Nx.VInt(line)), Coll.Cons(Nx.pair("column", Nx.VInt(col)), Coll.Nil))))
+    Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.VStr(file, Coll.Nil)), Coll.Cons(Nx.pair("line", Nx.int(line)), Coll.Cons(Nx.pair("column", Nx.int(col)), Coll.Nil))))
   case Nx.CStr(s) => Nx.VStr(s, Coll.Nil)
   case Nx.CPath(s) => Nx.VPath(s)
   case Nx.CConcat(fs, n, parts) => Nx.concat(env, parts, 0, n, !fs, Nx.CatStr, 0, Nx.fOfInt(0), Nx.noFrame(), Coll.Nil)
@@ -279,16 +279,18 @@ def Nx.dynGo(env: Ptr, n: I64, syms: Ptr, vals: Ptr, ds: Coll.List[Nx.CDyn], acc
   case Coll.Cons(d, t) => d match
     case Nx.CDynBind(k, v) =>
       val kv = Nx.eval(env, k)
-      val ks = Nx.noCtx(kv)
       kv match
         case Nx.VNull => Nx.dynGo(env, n, syms, vals, t, acc, m)
-        case _ => ks match
-          case Nx.VStr(s, _) =>
-            val sym = Nx.intern(s)
-            if Nx.findSym(syms, n, sym) < n || Nx.inPairs(acc, sym) then
-              Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("dynamic attribute '", s), "' already defined"))
-            else Nx.dynGo(env, n, syms, vals, t, Coll.Cons(Nx.Pair(sym, Nx.thunk(env, v)), acc), m + 1)
-          case _ => ks
+        // the string check only past null: a null name skips the binding, and the check's error for it was thrown away
+        case _ =>
+          val ks = Nx.noCtx(kv)
+          ks match
+            case Nx.VStr(s, _) =>
+              val sym = Nx.intern(s)
+              if Nx.findSym(syms, n, sym) < n || Nx.inPairs(acc, sym) then
+                Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("dynamic attribute '", s), "' already defined"))
+              else Nx.dynGo(env, n, syms, vals, t, Coll.Cons(Nx.Pair(sym, Nx.thunk(env, v)), acc), m + 1)
+            case _ => ks
 
 def Nx.inPairs(ps: Coll.List[Nx.Pair], sym: I64): Bool = ps match
   case Coll.Nil => false
@@ -323,7 +325,7 @@ def Nx.overrides(f: Ptr, n: I64, syms: Ptr, ov: Nx.Val, dyn: Coll.List[Nx.CDyn])
 
 // replace the slots of the names the rec set has; the count of the others
 def Nx.overGo(f: Ptr, n: I64, syms: Ptr, osyms: Ptr, ovals: Ptr, j: I64, m: I64, k: I64): Nx.Val =
-  if j == m then Nx.VInt(k)
+  if j == m then Nx.int(k)
   else
     val i = Nx.findSym(syms, n, Nx.ageti(osyms, j))
     if i < n then

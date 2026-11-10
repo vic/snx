@@ -9,7 +9,7 @@ extern def Nx.roundInt(bits: I64, up: Bool): I64
 def Nx.pRound(v: Nx.Val, up: Bool): Nx.Val = v match
   case Nx.VInt(_) => v
   case Nx.VFloat(b) =>
-    if Nx.roundOk(b, up) then Nx.VInt(Nx.roundInt(b, up))
+    if Nx.roundOk(b, up) then Nx.int(Nx.roundInt(b, up))
     else Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("NixFloat argument ", Nx.floatShow(b)), " is not in the range of NixInt"))
   case _ => Nx.typeErr("a float", v)
 
@@ -168,7 +168,7 @@ def Nx.cmpVersions(a: Str, p1: I64, b: Str, p2: I64): I64 =
 
 def Nx.pCompareVersions(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case Nx.VStr(a, _) => y match
-    case Nx.VStr(b, _) => Nx.VInt(Nx.cmpVersions(a, 0, b, 0))
+    case Nx.VStr(b, _) => Nx.int(Nx.cmpVersions(a, 0, b, 0))
     case _ => Nx.typeErr("a string", y)
   case _ => Nx.typeErr("a string", x)
 
@@ -301,7 +301,7 @@ def Nx.pZipAttrsWith(a: Ptr, l: Nx.Val): Nx.Val = l match
 
 // sets[i] = element i forced and flat; the count of all their names (Nx.VInt), or the error of the first that is no set
 def Nx.zipSets(xs: Ptr, i: I64, n: I64, sets: Ptr, acc: I64): Nx.Val =
-  if i == n then Nx.VInt(acc)
+  if i == n then Nx.int(acc)
   else
     val e = Nx.force(Nx.aget[Ptr](xs, i))
     Nx.flat(e) match
@@ -438,4 +438,4 @@ def Nx.pAttrPos(nv: Nx.Val, sv: Nx.Val): Nx.Val = nv match
 def Nx.posVal(rec: Ptr, i: I64): Nx.Val =
   if Nx.ptrEq(rec, Nx.noFrame()) then Nx.VNull
   else Nx.lineCol(Nx.strOf(Nx.get(Nx.aget[Ptr](rec, 1))), Nx.ageti(rec, i + 2)) match
-    case Nx.LineCol(l, c) => Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.get(Nx.aget[Ptr](rec, 0))), Coll.Cons(Nx.pair("line", Nx.VInt(l)), Coll.Cons(Nx.pair("column", Nx.VInt(c)), Coll.Nil))))
+    case Nx.LineCol(l, c) => Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.get(Nx.aget[Ptr](rec, 0))), Coll.Cons(Nx.pair("line", Nx.int(l)), Coll.Cons(Nx.pair("column", Nx.int(c)), Coll.Nil))))

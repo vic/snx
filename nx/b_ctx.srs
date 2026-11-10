@@ -380,12 +380,52 @@ def Nx.filterSays(f: Nx.Val, p: Str, k: I64): Nx.Val =
     case Nx.VErr(_, _) => r
     case _ => Nx.typeErr("a Boolean", r)
 
-// dumpPath (archive.cc) of p into sb, the entries of directories that the filter keeps; Nx.VNull or the error
-def Nx.dumpNode(sb: Ptr, p: Str, filt: Coll.Option[Nx.Val]): Nx.Val =
+// the tree that dumpPath (archive.cc) writes for p: the entries of directories that the filter keeps, by name. It is
+// walked before the NAR is written, the filter's calls and the status reads in dumpPath's order, so nothing is
+// evaluated while the NAR is written
+enum Nx.NarKept:
+  case Nx.NkFile(p: Str)
+  case Nx.NkLink(p: Str)
+  case Nx.NkDir(p: Str, kids: Coll.List[Nx.NarKid])
+  case Nx.NkNone                                   // where the walk stopped: nothing is written
+
+enum Nx.NarKid:
+  case Nx.NarKid(name: Str, node: Nx.NarKept)
+
+// the walked tree, and Nx.VNull or the error that stopped the walk (a filter's, or a status read's)
+enum Nx.NarPlan:
+  case Nx.NarPlan(t: Nx.NarKept, stop: Nx.Val)
+
+def Nx.narPlan(p: Str, filt: Coll.Option[Nx.Val]): Nx.NarPlan =
   val k = Nx.fsKind(p, false)
-  Nx.narW(sb, "(")
-  Nx.narW(sb, "type")
-  if k == 1 then
+  if k == 1 then Nx.NarPlan(Nx.NkFile(p), Nx.VNull)
+  else if k == 3 then Nx.NarPlan(Nx.NkLink(p), Nx.VNull)
+  else if k == 2 then Nx.narPlanKids(p, Nx.dirSorted(p), filt, Coll.Nil)
+  else if k == 0 then Nx.NarPlan(Nx.NkNone, Nx.evalErr(Nx.cat(Nx.cat("getting status of '", p), "': No such file or directory")))
+  else Nx.NarPlan(Nx.NkNone, Nx.evalErr(Nx.cat(Nx.cat("file '", p), "' has an unsupported type")))
+
+def Nx.narPlanKids(dir: Str, names: Coll.List[Str], filt: Coll.Option[Nx.Val], acc: Coll.List[Nx.NarKid]): Nx.NarPlan = names match
+  case Coll.Nil => Nx.NarPlan(Nx.NkDir(dir, Coll.rev(acc)), Nx.VNull)
+  case Coll.Cons(nm, t) =>
+    val p = Nx.cat(Nx.cat(dir, "/"), nm)
+    val keep = filt match
+      case Coll.None => Nx.bool(true)
+      case Coll.Some(f) => Nx.filterSays(f, p, Nx.fsKind(p, false))
+    keep match
+      case Nx.VBool(yes) =>
+        if !yes then Nx.narPlanKids(dir, t, filt, acc)
+        else Nx.narPlan(p, filt) match
+          case Nx.NarPlan(c, stop) =>
+            val acc2 = Coll.Cons(Nx.NarKid(nm, c), acc)
+            if Nx.isErr(stop) then Nx.NarPlan(Nx.NkDir(dir, Coll.rev(acc2)), stop)
+            else Nx.narPlanKids(dir, t, filt, acc2)
+      case _ => Nx.NarPlan(Nx.NkDir(dir, Coll.rev(acc)), keep)
+
+// the NAR of a walked tree into sb: Nx.VNull, or the error of reading a file (dumpPath reads each file as it writes it)
+def Nx.dumpKept(sb: Ptr, t: Nx.NarKept): Nx.Val = t match
+  case Nx.NkFile(p) =>
+    Nx.narW(sb, "(")
+    Nx.narW(sb, "type")
     Nx.narW(sb, "regular")
     if Nx.fsExec(p) then
       Nx.narW(sb, "executable")
@@ -398,52 +438,53 @@ def Nx.dumpNode(sb: Ptr, p: Str, filt: Coll.Option[Nx.Val]): Nx.Val =
       Nx.narW(sb, b)
       Nx.narW(sb, ")")
       Nx.VNull
-  else if k == 3 then
+  case Nx.NkLink(p) =>
+    Nx.narW(sb, "(")
+    Nx.narW(sb, "type")
     Nx.narW(sb, "symlink")
     Nx.narW(sb, "target")
     Nx.narW(sb, Nx.readLink(p))
     Nx.narW(sb, ")")
     Nx.VNull
-  else if k == 2 then
+  case Nx.NkDir(_, kids) =>
+    Nx.narW(sb, "(")
+    Nx.narW(sb, "type")
     Nx.narW(sb, "directory")
-    val r = Nx.dumpEntries(sb, p, Nx.dirSorted(p), filt)
+    val r = Nx.dumpKids(sb, kids)
     if Nx.isErr(r) then r
     else
       Nx.narW(sb, ")")
       Nx.VNull
-  else if k == 0 then Nx.evalErr(Nx.cat(Nx.cat("getting status of '", p), "': No such file or directory"))
-  else Nx.evalErr(Nx.cat(Nx.cat("file '", p), "' has an unsupported type"))
+  case Nx.NkNone => Nx.VNull
 
-def Nx.dumpEntries(sb: Ptr, dir: Str, names: Coll.List[Str], filt: Coll.Option[Nx.Val]): Nx.Val = names match
+def Nx.dumpKids(sb: Ptr, kids: Coll.List[Nx.NarKid]): Nx.Val = kids match
   case Coll.Nil => Nx.VNull
-  case Coll.Cons(nm, t) =>
-    val p = Nx.cat(Nx.cat(dir, "/"), nm)
-    val keep = filt match
-      case Coll.None => Nx.bool(true)
-      case Coll.Some(f) => Nx.filterSays(f, p, Nx.fsKind(p, false))
-    keep match
-      case Nx.VBool(yes) =>
-        if !yes then Nx.dumpEntries(sb, dir, t, filt)
-        else
-          Nx.narW(sb, "entry")
-          Nx.narW(sb, "(")
-          Nx.narW(sb, "name")
-          Nx.narW(sb, nm)
-          Nx.narW(sb, "node")
-          val r = Nx.dumpNode(sb, p, filt)
-          if Nx.isErr(r) then r
-          else
-            Nx.narW(sb, ")")
-            Nx.dumpEntries(sb, dir, t, filt)
-      case _ => keep
+  case Coll.Cons(k, t) => k match
+    case Nx.NarKid(nm, c) =>
+      Nx.narW(sb, "entry")
+      Nx.narW(sb, "(")
+      Nx.narW(sb, "name")
+      Nx.narW(sb, nm)
+      Nx.narW(sb, "node")
+      val r = Nx.dumpKept(sb, c)
+      if Nx.isErr(r) then r
+      else
+        Nx.narW(sb, ")")
+        Nx.dumpKids(sb, t)
+
+// the SHA-256 of the NAR of a walked tree, or the error. Nothing is evaluated from here on, so the NAR goes into the
+// one reusable builder (as drvWrite) and none is kept once hashed. A file read that fails in the walked part came
+// first in dumpPath's order, so it wins over the error that stopped the walk
+def Nx.narDigest(pl: Nx.NarPlan): Nx.Val = pl match
+  case Nx.NarPlan(t, stop) =>
+    val sb = Nx.sbScratch()
+    Nx.narW(sb, "nix-archive-1")
+    val r = Nx.dumpKept(sb, t)
+    if Nx.isErr(r) then r else if Nx.isErr(stop) then stop else Nx.VStr(Nx.hashBytes(2, Nx.sbView(sb)), Coll.Nil)
 
 // the raw SHA-256 of p as a NAR (rec) or of its bytes (flat), in a Nx.VStr, or the error
 def Nx.pathDigest(p: Str, rec: Bool, filt: Coll.Option[Nx.Val]): Nx.Val =
-  if rec then
-    val sb = Nx.sbNew()
-    Nx.narW(sb, "nix-archive-1")
-    val r = Nx.dumpNode(sb, p, filt)
-    if Nx.isErr(r) then r else Nx.VStr(Nx.hashBytes(2, Nx.sbView(sb)), Coll.Nil)
+  if rec then Nx.narDigest(Nx.narPlan(p, filt))
   else if Nx.fsKind(p, true) != 1 then Nx.evalErr(Nx.cat(Nx.cat("file '", p), "' is not a regular file"))
   else Nx.VStr(Nx.hashBytes(2, Nx.fileBytes(p)), Coll.Nil)
 

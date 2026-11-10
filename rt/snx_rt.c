@@ -489,9 +489,9 @@ int64_t Nx__sbAdd(nx_sb* b, srs_str s) {
   memcpy(b->p + b->n, s.p, (size_t)s.n); b->n += s.n;
   return 0;
 }
-srs_str Nx__sbGet(nx_sb* b) { uint8_t* p = nx_alloc(b->n); memcpy(p, b->p, (size_t)b->n); return (srs_str){p, b->n}; }
 // the one reusable builder (snx is single-threaded), emptied on each call: one user at a time
 static nx_sb nx_scratch;
+srs_str Nx__sbGet(nx_sb* b) { int64_t n = b->n; if (b == &nx_scratch || n == 0) { uint8_t* p = nx_alloc(n); memcpy(p, b->p, (size_t)n); return (srs_str){p, n}; } uint8_t* p = realloc(b->p, (size_t)n); if (!p) { fputs("snx: out of memory\n", stderr); exit(70); } *b = (nx_sb){0}; return (srs_str){p, n}; }
 void* Nx__sbScratch(void) { nx_scratch.n = 0; return &nx_scratch; }
 // the bytes of b without a copy, valid until b is next changed
 srs_str Nx__sbView(nx_sb* b) { return (srs_str){b->p, b->n}; }

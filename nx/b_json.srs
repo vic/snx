@@ -122,7 +122,7 @@ def Nx.jExp(s: Str, i: I64): I64 =
   if e == a then 0 - 1 else e
 
 def Nx.jNumVal(t: Str, isInt: Bool, neg: Bool, e: I64, s: Str, st: Coll.List[Nx.JFrame]): Nx.JR =
-  if isInt && !Nx.intOverflows(t) then Nx.jDone(s, e, st, Nx.VInt(Nx.intValue(t)))
+  if isInt && !Nx.intOverflows(t) then Nx.jDone(s, e, st, Nx.int(Nx.intValue(t)))
   else if isInt && !neg && !Nx.jBeyondU64(t) then Nx.jBad("unsigned json number outside of Nix integer range")
   else Nx.jDone(s, e, st, Nx.VFloat(Nx.floatBits(t)))
 

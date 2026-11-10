@@ -36,6 +36,8 @@ extern def Nx.intStr(i: I64): Str
 extern def Nx.floatFixed(bits: I64): Str
 extern def Nx.sbNew(): Ptr
 extern def Nx.sbAdd(b: Ptr, s: Str): Unit
+// the bytes of b, the builder's last use: its buffer becomes the string (cut to size) and b is left empty, so no
+// builder outlives its string (the scratch builder keeps its buffer and gives a copy)
 extern def Nx.sbGet(b: Ptr): Str
 extern def Nx.sbScratch(): Ptr
 extern def Nx.sbView(b: Ptr): Str

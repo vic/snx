@@ -382,7 +382,7 @@ def Nx.desC(b: Ptr): Nx.Code =
 
 def Nx.desConst(b: Ptr): Nx.Val =
   val t = Nx.wbGet(b)
-  if t == 0 then Nx.VInt(Nx.wbGet(b))
+  if t == 0 then Nx.int(Nx.wbGet(b))
   else if t == 1 then Nx.VFloat(Nx.wbGet(b))
   else if t == 2 then Nx.VStr(Nx.wbGetS(b), Coll.Nil)
   else if t == 3 then Nx.VPath(Nx.wbGetS(b))

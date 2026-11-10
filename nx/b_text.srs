@@ -86,7 +86,7 @@ def Nx.tomlStamp(text: Str): Nx.Val =
   Nx.attrsOf(Coll.Cons(Nx.Pair(Nx.intern("_type"), Nx.strCell("timestamp")), Coll.Cons(Nx.Pair(Nx.intern("value"), Nx.strCell(text)), Coll.Nil)))
 
 def Nx.tomlVal(v: Nx.TVal): Nx.Val = v match
-  case Nx.TvInt(n) => Nx.VInt(n)
+  case Nx.TvInt(n) => Nx.int(n)
   case Nx.TvFloat(b) => Nx.VFloat(b)
   case Nx.TvStr(s) => Nx.VStr(s, Coll.Nil)
   case Nx.TvBool(b) => Nx.VBool(b)
