@@ -96,6 +96,20 @@ def Nx.bsPrimScope(b: Nx.BB, name: Str, arity: I64, k: Nx.Prim): Unit = b match
 // a primop of a later wave: it exists, and calling it fails honestly
 def Nx.bsTodo(b: Nx.BB, name: Str, arity: I64): Unit = Nx.bsPrim(b, name, arity, Nx.PTodo)
 
+// __currentTime: a thunk of the primop PCurrentTime, so the clock is read (and the run made uncacheable, rt/snx_trace.c)
+// only when a program uses it
+def Nx.bsTime(b: Nx.BB): Unit = b match
+  case Nx.BB(_, _, _, _, pk, pn, cnt) =>
+    val id = Nx.ageti(cnt, 2)
+    Nx.aset[Nx.Prim](pk, id, Nx.PCurrentTime)
+    Nx.aseti(pn, id, Nx.intern("currentTime"))
+    Nx.aseti(cnt, 2, id + 1)
+    val args = Nx.arrNew(1)
+    Nx.aset[Nx.Code](args, 0, Nx.CConst(Nx.VNull, Nx.cell(Nx.VNull)))
+    val c = Nx.lazy(Nx.noFrame(), Nx.CPrimCall(id, 1, args))
+    Nx.bbScope(b, Nx.intern("__currentTime"), c)
+    Nx.bbBuiltin(b, Nx.intern("currentTime"), c)
+
 def Nx.todoErr(name: Str): Nx.Val = Nx.VErr(Nx.KOther, Nx.cat("snx: not implemented: ", name))
 
 // the scope as a set: n names sorted by symbol id, their cells
@@ -141,7 +155,7 @@ def Nx.bsConsts(b: Nx.BB): Unit =
   Nx.bsConst(b, "true", Nx.bool(true))
   Nx.bsConst(b, "false", Nx.bool(false))
   Nx.bsConst(b, "null", Nx.VNull)
-  Nx.bsConst(b, "__currentTime", Nx.VInt(Nx.timeNow()))
+  Nx.bsTime(b)
   Nx.bsConst(b, "__currentSystem", Nx.VStr("x86_64-linux", Coll.Nil))
   Nx.bsConst(b, "__nixVersion", Nx.VStr("2.34.8", Coll.Nil))
   Nx.bsConst(b, "__storeDir", Nx.VStr("/nix/store", Coll.Nil))

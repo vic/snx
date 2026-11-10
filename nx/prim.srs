@@ -57,6 +57,7 @@ enum Nx.Prim:
   case Nx.PConcatMap
   case Nx.PAddErrorContext
   case Nx.PGetEnv
+  case Nx.PCurrentTime
   case Nx.PMatch
   case Nx.PSplit
   case Nx.PFromToml
@@ -230,6 +231,7 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PToFile => Nx.pToFile(Nx.force(a), Nx.force(b))
     case Nx.PFilterSource => Nx.pFilterSource(a, Nx.force(b))
     case Nx.PPath => Nx.pPath(Nx.force(a))
+    case Nx.PCurrentTime => Nx.VInt(Nx.timeNow())
     case Nx.PGetEnv =>
       val s = Nx.force(a)
       s match
