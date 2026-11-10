@@ -8,7 +8,7 @@ export SNX
 SNX=$("$here/tests/build.sh") || { echo "FAIL build"; exit 1; }
 fail=0
 for t in "$here"/tests/*.sh; do
-  case $t in */run.sh|*/build.sh|*/s2c.sh) continue ;; esac
+  case $t in */run.sh|*/build.sh|*/s2c.sh|*/gen-corepkgs.sh) continue ;; esac
   "$t" > "${SNX%/*}/$(basename "$t").log" 2>&1 && echo "ok $(basename "$t")" || { echo "FAIL $(basename "$t")"; fail=1; }
 done
 paths=("$@")

@@ -1,5 +1,6 @@
 // the virtual file system of corepkgs (<nix/fetchurl.nix>): /__corepkgs__/NAME. fetchurl.nix is libexpr/fetchurl.nix
 // and derivation.nix is libexpr/primops/derivation.nix, both without their comments.
+// Both strings are nx/corepkgs/NAME, written by tests/gen-corepkgs.sh: edit the .nix file, then run it.
 
 def Nx.corePrefix(): Str = "/__corepkgs__/"
 
