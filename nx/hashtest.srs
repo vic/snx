@@ -1,0 +1,38 @@
+// test driver for nx/hash.srs: hashtest hash ALGO FILE | enc KIND FILE | dec KIND FILE; prints base16 of the result,
+// or `invalid` when a decoder refuses. KIND 16, 32 or 64.
+def Nx.htEnc(kind: I64, s: Str): Str =
+  if kind == 16 then Nx.b16(s) else if kind == 32 then Nx.b32(s) else Nx.b64(s)
+
+def Nx.htDec(kind: I64, s: Str): Str =
+  if kind == 16 then Nx.unb16(s) else if kind == 32 then Nx.unb32(s) else Nx.unb64(s)
+
+def Nx.htNum(s: Str): I64 = Nx.intValue(s)
+
+def main(): I64 =
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  val src = Files.read(Args.at(3))
+  if Str.len(src) < 0 then
+    Console.print("hashtest: cannot read file\n")
+    2
+  else
+    val op = Args.at(1)
+    val n = Nx.htNum(Args.at(2))
+    if Str.eq(op, "hash") then
+      Console.print(Nx.b16(Nx.hashBytes(n, src)))
+      Console.print("\n")
+      0
+    else if Str.eq(op, "enc") then
+      Console.print(Nx.htEnc(n, src))
+      Console.print("\n")
+      0
+    else
+      val d = Nx.htDec(n, src)
+      if Str.len(d) < 0 then
+        Console.print("invalid\n")
+        0
+      else
+        Console.print(Nx.b16(d))
+        Console.print("\n")
+        0

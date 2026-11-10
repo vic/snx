@@ -1,0 +1,162 @@
+// snx nar: parseDump of src/libutil/archive.cc over a byte string, and the SHA-256 of the tree written out again.
+// Every string of a NAR is 8-byte length, bytes, zero padding to 8 (readString/readPadding, serialise.cc).
+// The bound of each string, the depth 64, the name rules and the strict byte order of entries are archive.cc's.
+// A NAR that parseDump accepts is canonical: dumpPath writes back the very bytes read (tags, padding, the empty
+// "executable" value, sorted names), so SHA256 is the hash of the consumed prefix.
+// shortcut: case hack (macOS only, archiveSettings.useCaseHack) is off, as on Linux.
+
+// where the parse stands after a piece, or that parseDump refuses
+enum Nx.NarPos:
+  case Nx.NpAt(next: I64)
+  case Nx.NpBad
+
+// a string read at a position: its bytes are s[b, b+len); next is the position after its padding
+enum Nx.NarStr:
+  case Nx.NsOk(b: I64, len: I64, next: I64)
+  case Nx.NsBad
+
+enum Nx.NarResult:
+  case Nx.NarOk(consumed: I64, sha: Str)
+  case Nx.NarBad
+
+// archive.cc: narMaxDepth, narMaxTag, narMaxName, narMaxTarget
+def Nx.narMaxDepth(): I64 = 64
+def Nx.narMaxTag(): I64 = 32
+def Nx.narMaxName(): I64 = 255
+def Nx.narMaxTarget(): I64 = 4095
+
+// the 64-bit little-endian integer at p; a value of 2^63 or more reads as negative (above every bound)
+def Nx.narWord(s: Str, p: I64, i: I64, v: I64): I64 =
+  if i < 0 then v else Nx.narWord(s, p, i - 1, v * 256 + Str.at(s, p + i))
+
+// every padding byte of s[p, e) is zero
+def Nx.narZeros(s: Str, p: I64, e: I64): Bool =
+  if p >= e then true else if Str.at(s, p) == 0 then Nx.narZeros(s, p + 1, e) else false
+
+def Nx.narPad(len: I64): I64 = (8 - len % 8) % 8
+
+// readString(source, max): length word <= max, the bytes, zero padding; all inside s
+def Nx.narStr(s: Str, p: I64, max: I64): Nx.NarStr =
+  if p + 8 > Str.len(s) then Nx.NsBad
+  else
+    val len = Nx.narWord(s, p, 7, 0)
+    val e = p + 8 + len
+    if len < 0 || len > max || e + Nx.narPad(len) > Str.len(s) then Nx.NsBad
+    else if Nx.narZeros(s, e, e + Nx.narPad(len)) then Nx.NsOk(p + 8, len, e + Nx.narPad(len))
+    else Nx.NsBad
+
+def Nx.narIs(s: Str, b: I64, len: I64, lit: Str): Bool =
+  len == Str.len(lit) && Str.eq(Str.slice(s, b, b + len), lit)
+
+// expectTag: a string of at most narMaxTag bytes that equals lit
+def Nx.narTag(s: Str, p: I64, lit: Str): Nx.NarPos = Nx.narStr(s, p, Nx.narMaxTag()) match
+  case Nx.NsOk(b, len, next) => if Nx.narIs(s, b, len, lit) then Nx.NpAt(next) else Nx.NpBad
+  case Nx.NsBad => Nx.NpBad
+
+// a chain of expectTag: lits are checked in order
+def Nx.narTag2(s: Str, p: I64, a: Str, b: Str): Nx.NarPos = Nx.narTag(s, p, a) match
+  case Nx.NpAt(q) => Nx.narTag(s, q, b)
+  case Nx.NpBad => Nx.NpBad
+
+def Nx.narHas(s: Str, b: I64, e: I64, c: I64): Bool =
+  if b >= e then false else if Str.at(s, b) == c then true else Nx.narHas(s, b + 1, e, c)
+
+// the name s[b, b+len) is not "", ".", "..", and holds no '/' and no NUL
+def Nx.narNameOk(s: Str, b: I64, len: I64): Bool =
+  len > 0 && !Nx.narIs(s, b, len, ".") && !Nx.narIs(s, b, len, "..") && !Nx.narHas(s, b, b + len, '/') && !Nx.narHas(s, b, b + len, 0)
+
+// name a <= name b, as byte strings (std::string order)
+def Nx.narLe(s: Str, a: I64, la: I64, b: I64, lb: I64, i: I64): Bool =
+  if i >= la then true
+  else if i >= lb then false
+  else if Str.at(s, a + i) < Str.at(s, b + i) then true
+  else if Str.at(s, a + i) > Str.at(s, b + i) then false
+  else Nx.narLe(s, a, la, b, lb, i + 1)
+
+// parseContents then expectTag(")"): p is after the "contents" tag
+def Nx.narContents(s: Str, p: I64): Nx.NarPos =
+  if p + 8 > Str.len(s) then Nx.NpBad
+  else
+    val size = Nx.narWord(s, p, 7, 0)
+    val e = p + 8 + size
+    if size < 0 || size > Str.len(s) - p - 8 || e + Nx.narPad(size) > Str.len(s) then Nx.NpBad
+    else if Nx.narZeros(s, e, e + Nx.narPad(size)) then Nx.narTag(s, e + Nx.narPad(size), ")")
+    else Nx.NpBad
+
+// type "regular": [executable ""] contents ...
+def Nx.narRegular(s: Str, p: I64): Nx.NarPos = Nx.narStr(s, p, Nx.narMaxTag()) match
+  case Nx.NsBad => Nx.NpBad
+  case Nx.NsOk(b, len, next) =>
+    if Nx.narIs(s, b, len, "executable") then Nx.narExec(s, next)
+    else if Nx.narIs(s, b, len, "contents") then Nx.narContents(s, next)
+    else Nx.NpBad
+
+def Nx.narExec(s: Str, p: I64): Nx.NarPos = Nx.narStr(s, p, 0) match
+  case Nx.NsBad => Nx.NpBad
+  case Nx.NsOk(b, len, next) => Nx.narTag(s, next, "contents") match
+    case Nx.NpBad => Nx.NpBad
+    case Nx.NpAt(q) => Nx.narContents(s, q)
+
+// type "symlink": target T ")"
+def Nx.narSymlink(s: Str, p: I64): Nx.NarPos = Nx.narTag(s, p, "target") match
+  case Nx.NpBad => Nx.NpBad
+  case Nx.NpAt(q) => Nx.narStr(s, q, Nx.narMaxTarget()) match
+    case Nx.NsBad => Nx.NpBad
+    case Nx.NsOk(b, len, next) =>
+      if len == 0 || Nx.narHas(s, b, b + len, 0) then Nx.NpBad else Nx.narTag(s, next, ")")
+
+// one step of a directory: the closing ")", or one entry (its name, node and ")") parsed
+enum Nx.NarStep:
+  case Nx.StEnd(next: I64)
+  case Nx.StEntry(next: I64, nb: I64, nl: I64)
+  case Nx.StBad
+
+// ("entry" "(" "name" N "node" NODE ")" | ")") at p; (pb, pl) = previous name
+def Nx.narStep(s: Str, p: I64, depth: I64, pb: I64, pl: I64): Nx.NarStep = Nx.narStr(s, p, Nx.narMaxTag()) match
+  case Nx.NsBad => Nx.StBad
+  case Nx.NsOk(b, len, next) =>
+    if Nx.narIs(s, b, len, ")") then Nx.StEnd(next)
+    else if Nx.narIs(s, b, len, "entry") then Nx.narEntry(s, next, depth, pb, pl)
+    else Nx.StBad
+
+def Nx.narEntry(s: Str, p: I64, depth: I64, pb: I64, pl: I64): Nx.NarStep = Nx.narTag2(s, p, "(", "name") match
+  case Nx.NpBad => Nx.StBad
+  case Nx.NpAt(q) => Nx.narStr(s, q, Nx.narMaxName()) match
+    case Nx.NsBad => Nx.StBad
+    case Nx.NsOk(nb, nl, next) =>
+      if !Nx.narNameOk(s, nb, nl) || Nx.narLe(s, nb, nl, pb, pl, 0) then Nx.StBad
+      else Nx.narEntryNode(s, next, depth, nb, nl)
+
+def Nx.narEntryNode(s: Str, p: I64, depth: I64, nb: I64, nl: I64): Nx.NarStep = Nx.narTag(s, p, "node") match
+  case Nx.NpBad => Nx.StBad
+  case Nx.NpAt(q) => Nx.narNode(s, q, depth + 1) match
+    case Nx.NpBad => Nx.StBad
+    case Nx.NpAt(r) => Nx.narTag(s, r, ")") match
+      case Nx.NpBad => Nx.StBad
+      case Nx.NpAt(t) => Nx.StEntry(t, nb, nl)
+
+// the entries of a directory up to its ")": a self tail call, so a flat directory costs no stack
+def Nx.narEntries(s: Str, p: I64, depth: I64, pb: I64, pl: I64): Nx.NarPos = Nx.narStep(s, p, depth, pb, pl) match
+  case Nx.StBad => Nx.NpBad
+  case Nx.StEnd(next) => Nx.NpAt(next)
+  case Nx.StEntry(next, nb, nl) => Nx.narEntries(s, next, depth, nb, nl)
+
+
+// "(" "type" T ... ")" at the given depth
+def Nx.narNode(s: Str, p: I64, depth: I64): Nx.NarPos =
+  if depth >= Nx.narMaxDepth() then Nx.NpBad
+  else Nx.narTag2(s, p, "(", "type") match
+    case Nx.NpBad => Nx.NpBad
+    case Nx.NpAt(q) => Nx.narStr(s, q, Nx.narMaxTag()) match
+      case Nx.NsBad => Nx.NpBad
+      case Nx.NsOk(b, len, next) =>
+        if Nx.narIs(s, b, len, "regular") then Nx.narRegular(s, next)
+        else if Nx.narIs(s, b, len, "directory") then Nx.narEntries(s, next, depth, 0, 0)
+        else if Nx.narIs(s, b, len, "symlink") then Nx.narSymlink(s, next)
+        else Nx.NpBad
+
+def Nx.narCheck(bytes: Str): Nx.NarResult = Nx.narTag(bytes, 0, "nix-archive-1") match
+  case Nx.NpBad => Nx.NarBad
+  case Nx.NpAt(p) => Nx.narNode(bytes, p, 0) match
+    case Nx.NpBad => Nx.NarBad
+    case Nx.NpAt(e) => Nx.NarOk(e, Nx.b16(Nx.hashBytes(2, Str.slice(bytes, 0, e))))

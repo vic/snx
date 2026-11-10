@@ -1,0 +1,10 @@
+// the C services of rt/snx_hash.c. Pure: each result depends only on the arguments.
+// hashBytes: raw digest, algo 0 md5, 1 sha1, 2 sha256, 3 sha512. b16/b32/b64 encode raw bytes (b32 is Nix's base32).
+// unb16/unb32/unb64 decode as Nix's base16/BaseNix32/base64 do; invalid input gives a string of length -1 (Str.len < 0).
+extern def Nx.hashBytes(algo: I64, s: Str): Str
+extern def Nx.b16(raw: Str): Str
+extern def Nx.b32(raw: Str): Str
+extern def Nx.b64(raw: Str): Str
+extern def Nx.unb16(s: Str): Str
+extern def Nx.unb32(s: Str): Str
+extern def Nx.unb64(s: Str): Str

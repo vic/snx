@@ -13,5 +13,5 @@ done
 srcs+=("$here"/nx/main.srs)
 cd "$SRS"
 timeout 60 "$S2C" lib/prelude.srs s2/coll.srs "${srcs[@]}" > "$B/snx.c"
-timeout 120 zig cc -std=gnu11 -O2 -w -o "$B/snx" "$B/snx.c" "$SRS/rt/srs_rt.c" "$here/rt/snx_rt.c"
+timeout 120 zig cc -std=gnu11 -O2 -w -o "$B/snx" "$B/snx.c" "$SRS/rt/srs_rt.c" "$here/rt/snx_rt.c" "$here/rt/snx_hash.c"
 echo "$B/snx"

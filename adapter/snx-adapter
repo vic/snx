@@ -6,5 +6,6 @@ shift 2
 snx=${SNX:-${XDG_RUNTIME_DIR:-/tmp}/snx-build/snx}
 case $op in
   parse) exec timeout 5 "$snx" parse "$file" ;;
+  nar) exec timeout 5 "$snx" nar "$file" ;;
   *) exit 3 ;;
 esac

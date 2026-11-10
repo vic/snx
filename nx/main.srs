@@ -3,9 +3,11 @@
 
 enum Nx.Op:
   case Nx.OpParse
+  case Nx.OpNar
   case Nx.OpUnknown
 
-def Nx.op(s: Str): Nx.Op = if Str.eq(s, "parse") then Nx.OpParse else Nx.OpUnknown
+def Nx.op(s: Str): Nx.Op =
+  if Str.eq(s, "parse") then Nx.OpParse else if Str.eq(s, "nar") then Nx.OpNar else Nx.OpUnknown
 
 def Nx.answerParse(src: Str): I64 =
   Nx.parse(src, "/case", "/home/case") match
@@ -24,13 +26,27 @@ def Nx.answerParse(src: Str): I64 =
           Console.print("\n")
           0
 
+// SPEC.md "nar": `ok CONSUMED SHA256` or `error`
+def Nx.answerNar(src: Str): I64 =
+  Nx.narCheck(src) match
+    case Nx.NarOk(n, sha) =>
+      Console.print("ok ")
+      Console.printI64(n)
+      Console.print(" ")
+      Console.print(sha)
+      Console.print("\n")
+      0
+    case Nx.NarBad =>
+      Console.print("error\n")
+      0
+
 def main(): I64 =
   handle r = Srs.Arena()
   handle c = Srs.Console()
   handle a = Srs.Args()
   handle f = Srs.Files()
   if Args.count() < 3 then
-    Console.eprint("usage: snx parse FILE\n")
+    Console.eprint("usage: snx parse|nar FILE\n")
     2
   else
     val src = Files.read(Args.at(2))
@@ -40,4 +56,5 @@ def main(): I64 =
     else
       Nx.op(Args.at(1)) match
         case Nx.OpParse => Nx.answerParse(src)
+        case Nx.OpNar => Nx.answerNar(src)
         case Nx.OpUnknown => 3
