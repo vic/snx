@@ -296,6 +296,10 @@ int64_t Nx__mergeLeaves(int64_t k, const int64_t* t, int64_t* out) {
 // re-exec once, since the main thread stack size is fixed at exec time
 #include <sys/resource.h>
 #include <unistd.h>
+#include <malloc.h>
+// the srs arenas take 1 MB chunks and a file's arena is freed once it is loaded: kept in the heap (no mmap per chunk,
+// no trim), the next file's chunks reuse those pages instead of faulting in fresh ones
+__attribute__((constructor)) static void nx_malloc_keep(void) { mallopt(M_MMAP_THRESHOLD, 64 << 20); mallopt(M_TRIM_THRESHOLD, 256 << 20); }
 __attribute__((constructor)) static void nx_big_stack(int argc, char** argv) {
   struct rlimit r;
   const rlim_t want = (rlim_t)4 << 30;
