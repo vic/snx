@@ -730,7 +730,13 @@ def Nx.drJNum(s: Str, i: I64): Nx.Dp[Nx.DrJson] =
     val f = Str.at(s, e)
     val t = Str.slice(s, i, e)
     val big = if a > i then Nx.intOverflows(t) else e - a > 20 || (e - a == 20 && Nx.strLess("18446744073709551615", t))
-    if f == '.' || f == 'e' || f == 'E' || big then Nx.DpNo
+    // a fraction needs a digit after the point, an exponent a digit after its optional sign
+    val fe = if f == '.' then (if Nx.jDigit(Str.at(s, e + 1)) then Nx.drJDigits(s, e + 2) else -1) else e
+    val g = Str.at(s, fe)
+    val xs = if g == 'e' || g == 'E' then fe + (if Str.at(s, fe + 1) == '+' || Str.at(s, fe + 1) == '-' then 2 else 1) else -1
+    val xe = if xs < 0 then fe else if Nx.jDigit(Str.at(s, xs)) then Nx.drJDigits(s, xs + 1) else -1
+    if fe < 0 || xe < 0 then Nx.DpNo
+    else if xe > e || big then Nx.DpAt(Nx.DrJLit(Nx.jsonFloat(Nx.floatBits(Str.slice(s, i, xe)))), xe)
     else if Str.eq(t, "-0") then Nx.DpAt(Nx.DrJLit("0"), e)
     else Nx.DpAt(Nx.DrJLit(t), e)
 

@@ -206,8 +206,8 @@ srs_str Nx__jsonFloat(int64_t bits) {
   while (nd > 1 && dg[nd - 1] == '0') nd--;
   int k = nd, nn = ex + 1, n = 0;   // value = 0.dg * 10^nn
   if (neg) o[n++] = '-';
-  if (k <= nn && nn <= 16) { memcpy(o + n, dg, (size_t)k); n += k; for (int i = 0; i < nn - k; i++) o[n++] = '0'; o[n++] = '.'; o[n++] = '0'; }
-  else if (0 < nn && nn <= 16) { memcpy(o + n, dg, (size_t)nn); n += nn; o[n++] = '.'; memcpy(o + n, dg + nn, (size_t)(k - nn)); n += k - nn; }
+  if (k <= nn && nn <= 15) { memcpy(o + n, dg, (size_t)k); n += k; for (int i = 0; i < nn - k; i++) o[n++] = '0'; o[n++] = '.'; o[n++] = '0'; }
+  else if (0 < nn && nn <= 15) { memcpy(o + n, dg, (size_t)nn); n += nn; o[n++] = '.'; memcpy(o + n, dg + nn, (size_t)(k - nn)); n += k - nn; }
   else if (-5 < nn && nn <= 0) { o[n++] = '0'; o[n++] = '.'; for (int i = 0; i < -nn; i++) o[n++] = '0'; memcpy(o + n, dg, (size_t)k); n += k; }
   else {
     o[n++] = dg[0];

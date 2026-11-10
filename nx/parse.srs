@@ -527,7 +527,8 @@ def Nx.psSimple(cx: Nx.PCx, ts: Coll.List[Nx.Tok]): Nx.PR[Nx.PE] = Nx.psPeek(ts)
     else Nx.POk(Nx.PExpr(Nx.EVar(p, x)), t1)
   case Nx.TInt(v, p) => Nx.POk(Nx.PExpr(Nx.EInt(p, v)), Nx.psNext(ts))
   case Nx.TFloat(b, p) => Nx.POk(Nx.PExpr(Nx.EFloat(p, b)), Nx.psNext(ts))
-  case Nx.TUri(s, p) => Nx.POk(Nx.PExpr(Nx.EStr(p, s)), Nx.psNext(ts))
+  case Nx.TUri(s, p) =>
+    if Nx.lintFatal(16) then Nx.PBad(Nx.At(p)) else Nx.POk(Nx.PExpr(Nx.EStr(p, s)), Nx.psNext(ts))
   case Nx.TSPath(s, p) =>
     val args = Coll.Cons(Nx.EVar(p, "__nixPath"), Coll.Cons(Nx.EStr(p, s), Coll.Nil))
     Nx.POk(Nx.PExpr(Nx.ECall(p, Nx.EVar(p, "__findFile"), args)), Nx.psNext(ts))
@@ -726,16 +727,27 @@ def Nx.psPath(cx: Nx.PCx, ts: Coll.List[Nx.Tok], p: I64): Nx.PR[Nx.PE] = Nx.psPe
   case Nx.TPathPart(lit, _) =>
     val start = Nx.EPath(p, Nx.psPathValue(cx, lit))
     val t1 = Nx.psNext(ts)
-    Nx.psPeek(t1) match
-      case Nx.TPathClose(_) => Nx.POk(Nx.PExpr(start), Nx.psNext(t1))
-      case Nx.TDollarCurly(_) => Nx.psPathInterp(cx, t1, p, Coll.Cons(start, Coll.Nil))
-      case Nx.TPathPart(s, q) =>
-        val t2 = Nx.psNext(t1)
-        Nx.psPeek(t2) match
-          case Nx.TDollarCurly(_) => Nx.psPathInterp(cx, t2, p, Coll.Cons(Nx.EStr(q, s), Coll.Cons(start, Coll.Nil)))
-          case _ => Nx.PBad(Nx.psAtW(t2))
-      case _ => Nx.PBad(Nx.psAtW(t1))
+    if Nx.psPathLintFatal(lit) then Nx.PBad(Nx.At(p))
+    else Nx.psPath1(cx, t1, p, start)
   case _ => Nx.PBad(Nx.psAtW(ts))
+
+def Nx.psPath1(cx: Nx.PCx, t1: Coll.List[Nx.Tok], p: I64, start: Nx.Expr): Nx.PR[Nx.PE] = Nx.psPeek(t1) match
+  case Nx.TPathClose(_) => Nx.POk(Nx.PExpr(start), Nx.psNext(t1))
+  case Nx.TDollarCurly(_) => Nx.psPathInterp(cx, t1, p, Coll.Cons(start, Coll.Nil))
+  case Nx.TPathPart(s, q) =>
+    val t2 = Nx.psNext(t1)
+    Nx.psPeek(t2) match
+      case Nx.TDollarCurly(_) => Nx.psPathInterp(cx, t2, p, Coll.Cons(Nx.EStr(q, s), Coll.Cons(start, Coll.Nil)))
+      case _ => Nx.PBad(Nx.psAtW(t2))
+  case _ => Nx.PBad(Nx.psAtW(t1))
+
+// --lint-absolute-path-literals (/a and ~/a) and --lint-short-path-literals (a/b) fatal (parser.y:419-466)
+def Nx.psPathLintFatal(lit: Str): Bool =
+  val c = Str.at(lit, 0)
+  if c == '/' || c == '~' then Nx.lintFatal(1) else if c != '.' then Nx.lintFatal(4) else false
+
+// the lint whose 2 bits sit at the digit `unit` (1, 4 or 16) of Nx.gLint is fatal
+def Nx.lintFatal(unit: I64): Bool = (Nx.ageti(Nx.globals(), Nx.gLint()) / unit) % 4 == 2
 
 def Nx.psPathInterp(cx: Nx.PCx, ts: Coll.List[Nx.Tok], p: I64, acc: Coll.List[Nx.Expr]): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
   case Nx.TDollarCurly(_) => Nx.psExprE(cx, Nx.psNext(ts)) match

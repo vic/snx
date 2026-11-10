@@ -18,6 +18,8 @@ def Nx.gInts(): I64 = 11
 def Nx.gIncl(): I64 = 12
 def Nx.gStore(): I64 = 13
 def Nx.gSrcs(): I64 = 14
+// the --lint-* settings, a base-4 digit each (0 off, 1 warn, 2 fatal): absolute-path-literals at unit 1, short-path-literals 4, url-literals 16
+def Nx.gLint(): I64 = 15
 
 // the integers 0 until Nx.smallInts() are made once, as the Booleans
 def Nx.smallInts(): I64 = 256

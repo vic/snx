@@ -115,12 +115,112 @@ def Nx.flagsOk(i: I64): Bool =
     else if Str.eq(f, "--max-call-depth") && i + 1 < Args.count() then
       Nx.aseti(Nx.globals(), Nx.gMaxDepth(), Nx.intValue(Args.at(i + 1)))
       Nx.flagsOk(i + 2)
+    else if Str.eq(f, "--impure") then Nx.flagsOk(i + 1)
+    else if (Str.eq(f, "-A") || Str.eq(f, "--attr")) && i + 1 < Args.count() then Nx.flagsOk(i + 2)
+    else if (Str.eq(f, "--arg") || Str.eq(f, "--argstr")) && i + 2 < Args.count() then Nx.flagsOk(i + 3)
+    else if Str.eq(f, "--lint-absolute-path-literals") && i + 1 < Args.count() then Nx.lintSet(1, Args.at(i + 1)) && Nx.flagsOk(i + 2)
+    else if Str.eq(f, "--lint-short-path-literals") && i + 1 < Args.count() then Nx.lintSet(4, Args.at(i + 1)) && Nx.flagsOk(i + 2)
+    else if Str.eq(f, "--lint-url-literals") && i + 1 < Args.count() then Nx.lintSet(16, Args.at(i + 1)) && Nx.flagsOk(i + 2)
     else false
 
-def Nx.answerEval(path: Str): I64 =
-  if !Nx.flagsOk(3) then 3
+// the lint at `unit` of Nx.gLint set to warn or fatal; false for a mode snx does not know. A warning is not printed
+// (nix-conformance compares stdout and the exit code only).
+def Nx.lintSet(unit: I64, mode: Str): Bool =
+  val g = Nx.globals()
+  if Str.eq(mode, "warn") then
+    Nx.aseti(g, Nx.gLint(), Nx.ageti(g, Nx.gLint()) + unit)
+    true
+  else if Str.eq(mode, "fatal") then
+    Nx.aseti(g, Nx.gLint(), Nx.ageti(g, Nx.gLint()) + 2 * unit)
+    true
+  else false
+
+// ---- auto arguments (nix-instantiate.cc, attr-path.cc findAlongAttrPath, get-drvs autoCallFunction) --------------------
+// --arg/--argstr/-A are done by evaluating a wrapper expression around `import FILE`.
+// shortcut: a function written `{ ... }:` with no named formals is not auto-called (the wrapper cannot tell it from `x:`),
+// and the 2nd and later -A are refused (exit 3); upgrade with a primop that tests for formals
+
+// the flag `f` among Args from i on, counted
+def Nx.flagCount(i: I64, f: Str, g: Str): I64 =
+  if i >= Args.count() then 0
+  else (if Str.eq(Args.at(i), f) || Str.eq(Args.at(i), g) then 1 else 0) + Nx.flagCount(i + 1, f, g)
+
+def Nx.hasAuto(i: I64): Bool =
+  if i >= Args.count() then false
+  else if Str.eq(Args.at(i), "--arg") || Str.eq(Args.at(i), "--argstr") || Str.eq(Args.at(i), "-A") || Str.eq(Args.at(i), "--attr") then true
+  else Nx.hasAuto(i + 1)
+
+// s as a Nix string literal
+def Nx.nixStr(s: Str): Str =
+  val sb = Nx.sbNew()
+  Nx.sbAdd(sb, "\"")
+  var i = 0
+  while i < Str.len(s) do
+    val c = Str.at(s, i)
+    if c == '"' || c == '\\' || c == '$' then Nx.sbAdd(sb, "\\") else ()
+    if c == '\n' then Nx.sbAdd(sb, "\\n") else Nx.sbAdd(sb, Nx.byte(c))
+    i = i + 1
+  Nx.sbAdd(sb, "\"")
+  Nx.sbGet(sb)
+
+// the `name = value;` bindings of the --arg and --argstr flags
+def Nx.autoBinds(i: I64, sb: Ptr): Unit =
+  if i < Args.count() then
+    val f = Args.at(i)
+    if Str.eq(f, "--arg") then
+      Nx.sbAdd(sb, Nx.nixStr(Args.at(i + 1)))
+      Nx.sbAdd(sb, " = (")
+      Nx.sbAdd(sb, Args.at(i + 2))
+      Nx.sbAdd(sb, "\n);\n")
+      Nx.autoBinds(i + 3, sb)
+    else if Str.eq(f, "--argstr") then
+      Nx.sbAdd(sb, Nx.nixStr(Args.at(i + 1)))
+      Nx.sbAdd(sb, " = ")
+      Nx.sbAdd(sb, Nx.nixStr(Args.at(i + 2)))
+      Nx.sbAdd(sb, ";\n")
+      Nx.autoBinds(i + 3, sb)
+    else Nx.autoBinds(i + 1, sb)
+  else ()
+
+// the attribute path of -A (a dotted name): each component selected after an auto call
+def Nx.autoSel(acc: Str, p: Str, b: I64, i: I64): Str =
+  if i >= Str.len(p) then (if b < i then Nx.autoStep(acc, Str.slice(p, b, i)) else acc)
+  else if Str.at(p, i) == '.' then Nx.autoSel(if b < i then Nx.autoStep(acc, Str.slice(p, b, i)) else acc, p, i + 1, i + 1)
+  else Nx.autoSel(acc, p, b, i + 1)
+
+def Nx.autoStep(acc: Str, k: Str): Str = Nx.cat(Nx.cat(Nx.cat(Nx.cat("(__s (__auto ", acc), ") "), Nx.nixStr(k)), ")")
+
+def Nx.autoPath(i: I64): Str =
+  if i >= Args.count() then ""
+  else if (Str.eq(Args.at(i), "-A") || Str.eq(Args.at(i), "--attr")) && i + 1 < Args.count() then Args.at(i + 1)
+  else Nx.autoPath(i + 1)
+
+def Nx.autoSrc(path: Str): Str =
+  val sb = Nx.sbNew()
+  Nx.sbAdd(sb, "let\n__args = {\n")
+  Nx.autoBinds(3, sb)
+  Nx.sbAdd(sb, "};\n__auto = f: if builtins.isFunction f && builtins.functionArgs f != {} then f (builtins.intersectAttrs (builtins.functionArgs f) __args) else f;\n")
+  Nx.sbAdd(sb, "__s = v: k: if builtins.isList v && builtins.match \"[0-9]+\" k != null then builtins.elemAt v (builtins.fromJSON k) else v.${k};\nin __auto ")
+  val root = Nx.cat(Nx.cat("(import (builtins.toPath ", Nx.nixStr(path)), "))")
+  Nx.sbAdd(sb, Nx.autoSel(root, Nx.autoPath(3), 0, 0))
+  Nx.sbGet(sb)
+
+// the value of the file, through the auto-argument wrapper when a flag asks for it
+def Nx.evalTop(path: Str): Nx.Val =
+  if !Nx.hasAuto(3) then Nx.importFile(path)
   else
-    val v = Nx.importFile(path)
+    val src = Nx.autoSrc(path)
+    val b = Nx.baseEnv() match
+      case _ => 0
+    Nx.loadFile(src, Nx.getEnv("PWD"), Nx.getEnv("HOME"), "(auto arguments)") match
+      case Nx.Loaded(code) => Nx.force(Nx.lazy(Nx.noFrame(), code))
+      case Nx.LoadUndefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
+      case Nx.LoadBad => Nx.VErr(Nx.KOther, "syntax error in an --arg expression")
+
+def Nx.answerEval(path: Str): I64 =
+  if !Nx.flagsOk(3) || Nx.flagCount(3, "-A", "--attr") > 1 then 3
+  else
+    val v = Nx.evalTop(path)
     val r = if Nx.isErr(v) then v else Nx.deepForce(v, Nx.seenNew())
     r match
       case Nx.VErr(_, msg) =>
@@ -135,9 +235,9 @@ def Nx.answerEval(path: Str): I64 =
 
 // `snx eval-xml FILE`: nix-instantiate --eval --strict --xml --no-location (value-to-xml.cc)
 def Nx.answerEvalXml(path: Str): I64 =
-  if !Nx.flagsOk(3) then 3
+  if !Nx.flagsOk(3) || Nx.flagCount(3, "-A", "--attr") > 1 then 3
   else
-    val v = Nx.importFile(path)
+    val v = Nx.evalTop(path)
     val r = if Nx.isErr(v) then v else Nx.xmlDoc(v)
     r match
       case Nx.VErr(_, msg) =>
