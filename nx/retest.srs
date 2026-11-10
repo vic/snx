@@ -1,0 +1,113 @@
+// test main for nx/regex.srs: argv[1] = lines `RE<TAB>S` (Nix-escaped string bodies); each line answers as an
+// eval-okay-regex-*.exp of nix-conformance: { m = ..; re = ..; s = ..; sp = ..; }. With argv[2] = "bad", each line is
+// one pattern instead and answers `bad` when Nx.reCompile rejects it, else `ok`.
+
+// the body of a Nix string literal, decoded: \\ \" \n \t \r \$ (any other escaped char stands for itself)
+def Nx.rtDecode(t: Str, i: I64, from: I64, acc: Str): Str =
+  if i >= Str.len(t) then Nx.cat(acc, Str.slice(t, from, i))
+  else if Str.at(t, i) != '\\' || i + 1 >= Str.len(t) then Nx.rtDecode(t, i + 1, from, acc)
+  else
+    val c = Str.at(t, i + 1)
+    val d = if c == 'n' then 10 else if c == 't' then 9 else if c == 'r' then 13 else c
+    Nx.rtDecode(t, i + 2, i + 2, Nx.cat(Nx.cat(acc, Str.slice(t, from, i)), Nx.byte(d)))
+
+// a string as Nix prints it (print-ambiguous: printLiteralString)
+def Nx.rtStrFrom(s: Str, i: I64): Unit =
+  if i < Str.len(s) then
+    val c = Str.at(s, i)
+    if c == '"' || c == '\\' then
+      Console.printChar('\\')
+      Console.printChar(c)
+    else if c == 10 then Console.print("\\n")
+    else if c == 13 then Console.print("\\r")
+    else if c == 9 then Console.print("\\t")
+    else if c == '$' && Str.at(s, i + 1) == '{' then Console.print("\\$")
+    else Console.printChar(c)
+    Nx.rtStrFrom(s, i + 1)
+  else ()
+
+def Nx.rtStr(s: Str): Unit =
+  Console.printChar('"')
+  Nx.rtStrFrom(s, 0)
+  Console.printChar('"')
+
+def Nx.rtGroups(gs: Coll.List[Coll.Option[Str]]): Unit = gs match
+  case Coll.Nil => ()
+  case Coll.Cons(g, t) =>
+    g match
+      case Coll.None => Console.print("null ")
+      case Coll.Some(v) =>
+        Nx.rtStr(v)
+        Console.print(" ")
+    Nx.rtGroups(t)
+
+def Nx.rtList(gs: Coll.List[Coll.Option[Str]]): Unit =
+  Console.print("[ ")
+  Nx.rtGroups(gs)
+  Console.print("]")
+
+def Nx.rtParts(ps: Coll.List[Nx.SplitPart]): Unit = ps match
+  case Coll.Nil => ()
+  case Coll.Cons(p, t) =>
+    p match
+      case Nx.SpStr(v) => Nx.rtStr(v)
+      case Nx.SpMatch(gs) => Nx.rtList(gs)
+    Console.print(" ")
+    Nx.rtParts(t)
+
+def Nx.rtCase(re: Str, s: Str): Unit =
+  Console.print("{ m = ")
+  val c = Nx.reCompile(re)
+  c match
+    case Nx.ReBad => Console.print("{ err = true; }")
+    case Nx.ReOk(r) =>
+      Console.print("{ ok = ")
+      Nx.reMatch(r, s) match
+        case Coll.None => Console.print("null")
+        case Coll.Some(gs) => Nx.rtList(gs)
+      Console.print("; }")
+  Console.print("; re = ")
+  Nx.rtStr(re)
+  Console.print("; s = ")
+  Nx.rtStr(s)
+  Console.print("; sp = ")
+  c match
+    case Nx.ReBad => Console.print("{ err = true; }")
+    case Nx.ReOk(r) =>
+      Console.print("{ ok = [ ")
+      Nx.rtParts(Nx.reSplit(r, s))
+      Console.print("]; }")
+  Console.print("; }\n")
+
+def Nx.rtBad(re: Str): Unit = Nx.reCompile(re) match
+  case Nx.ReBad => Console.print("bad\n")
+  case Nx.ReOk(_) => Console.print("ok\n")
+
+// the lines of t from i; bad = each line is one pattern
+def Nx.rtLines(t: Str, i: I64, bad: Bool): Unit =
+  if i < Str.len(t) then
+    val e = Nx.reFind(t, i, 10)
+    val tab = Nx.reFind(t, i, 9)
+    if bad then Nx.rtBad(Nx.rtDecode(Str.slice(t, i, e), 0, 0, ""))
+    else if tab < e then Nx.rtCase(Nx.rtDecode(Str.slice(t, i, tab), 0, 0, ""), Nx.rtDecode(Str.slice(t, tab + 1, e), 0, 0, ""))
+    else Console.print("FAIL no tab\n")
+    Nx.rtLines(t, e + 1, bad)
+  else ()
+
+def main(): I64 =
+  handle r = Srs.Arena()
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  if Args.count() < 2 then
+    Console.eprint("usage: retest FILE [bad]\n")
+    2
+  else
+    val t = Files.read(Args.at(1))
+    if Str.len(t) < 0 then
+      Console.eprint("retest: cannot read the file\n")
+      2
+    else
+      val bad = Args.count() > 2 && Str.eq(Args.at(2), "bad")
+      Nx.rtLines(t, 0, bad)
+      0

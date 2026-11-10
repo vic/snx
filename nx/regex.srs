@@ -1,0 +1,735 @@
+// builtins.match and builtins.split: std::regex(re, std::regex::extended) of libstdc++, as Nix 2.34 builds it
+// (src/libexpr/primops.cc RegexCache, prim_match, prim_split). Law = libstdc++ 15 bits/regex_*.{h,tcc}:
+// - the parser and the NFA it builds mirror regex_compiler.tcc (_M_disjunction, _M_alternative, _M_quantifier,
+//   _M_expression_term) and regex_scanner.tcc (extended: special chars ".[\\()*+?{|^$", `]` and `}` are ordinary,
+//   a `\` escapes only a special char, no backrefs, no `\n` or `\w`);
+// - the matcher is the DFS executor (regex.tcc picks it: no __polynomial flag) in POSIX mode
+//   (regex_executor.tcc): an alternative tries both sides and keeps the longest accept, a greedy repeat skips its
+//   exit once its body found a solution, and _M_rep_once_more enters a repeat at the same position at most twice.
+//   The recursion runs here as a loop over an explicit undo stack (as libstdc++ 16 does), so long inputs keep the
+//   C stack flat;
+// - more than _GLIBCXX_REGEX_STATE_LIMIT (100000) NFA states, counted as libstdc++ inserts them (dummies and the
+//   originals that an interval clones included), is error_space.
+// Bytes are chars in the classic "C" locale; a range compares chars signed, as x86_64 does.
+
+// ── the parsed pattern
+enum Nx.ReAst:
+  case Nx.RChar(c: I64)
+  case Nx.RAny
+  case Nx.RSet(tbl: Ptr)                             // 256 words: 1 = the byte matches
+  case Nx.RBol
+  case Nx.REol
+  case Nx.RGroup(g: I64, body: Nx.ReAst)
+  case Nx.RCat(rev: Coll.List[Nx.ReAst])             // the terms of one alternative, last first
+  case Nx.RAlt(l: Nx.ReAst, r: Nx.ReAst)
+  case Nx.RStar(e: Nx.ReAst)
+  case Nx.RPlus(e: Nx.ReAst)
+  case Nx.ROpt(e: Nx.ReAst)
+  case Nx.RRepInf(e: Nx.ReAst, min: I64)             // e{min,}
+  case Nx.RRepFin(e: Nx.ReAst, min: I64, more: I64)  // e{min,min+more}
+
+// a parse step: the node, the next pattern index and the next group number
+enum Nx.RePart:
+  case Nx.RPOk(e: Nx.ReAst, i: I64, ng: I64)
+  case Nx.RPNone
+  case Nx.RPBad
+
+enum Nx.ReNum:
+  case Nx.RNum(v: I64, i: I64)
+  case Nx.RNumBad
+
+// a compiled regex: n states of 4 words (op, next, alt, arg) in st, the byte table of each set state in sets,
+// ng groups (group 0 = the whole match), and the matcher's scratch (reset or restored by every run):
+// rep = 2n words (position and count of each repeat), caps = 6 ng words (current, then best: first, second,
+// matched), stk = a 1-slot array holding the undo stack (word 0 = its capacity)
+enum Nx.Regex:
+  case Nx.Regex(n: I64, start: I64, st: Ptr, sets: Ptr, ng: I64, rep: Ptr, caps: Ptr, stk: Ptr)
+
+enum Nx.ReResult:
+  case Nx.ReOk(re: Nx.Regex)
+  case Nx.ReBad
+
+enum Nx.SplitPart:
+  case Nx.SpStr(s: Str)
+  case Nx.SpMatch(groups: Coll.List[Coll.Option[Str]])
+
+// state opcodes (word 0 of a state)
+def Nx.reOpChar(): I64 = 0
+def Nx.reOpAny(): I64 = 1
+def Nx.reOpSet(): I64 = 2
+def Nx.reOpBol(): I64 = 3
+def Nx.reOpEol(): I64 = 4
+def Nx.reOpBegin(): I64 = 5
+def Nx.reOpEnd(): I64 = 6
+def Nx.reOpAlt(): I64 = 7
+def Nx.reOpRep(): I64 = 8
+def Nx.reOpAccept(): I64 = 9
+
+// undo frame opcodes (word 0 of a 4-word frame)
+def Nx.reFrPos(): I64 = 0       // a: the position to restore
+def Nx.reFrFirst(): I64 = 1     // a: group, b: its first
+def Nx.reFrRes(): I64 = 2       // a: group, b: its second, c: its matched
+def Nx.reFrRep(): I64 = 3       // a: repeat state, b: its position, c: its count
+def Nx.reFrAlt2(): I64 = 4      // a: the right side, run after the left one
+def Nx.reFrMerge(): I64 = 5     // a: 1 when the left side had a solution
+def Nx.reFrRepNext(): I64 = 6   // a: repeat state whose exit runs when no solution was found
+
+def Nx.reLimit(): I64 = 100000
+
+def Nx.reAt(p: Str, i: I64): I64 = Str.at(p, i)
+
+// ── bytes in the classic "C" locale
+def Nx.reLower(c: I64): I64 = if c >= 'A' && c <= 'Z' then c + 32 else c
+def Nx.reIsDigit(c: I64): Bool = c >= '0' && c <= '9'
+def Nx.reIsUpper(c: I64): Bool = c >= 'A' && c <= 'Z'
+def Nx.reIsLower(c: I64): Bool = c >= 'a' && c <= 'z'
+def Nx.reIsAlpha(c: I64): Bool = Nx.reIsUpper(c) || Nx.reIsLower(c)
+def Nx.reIsAlnum(c: I64): Bool = Nx.reIsAlpha(c) || Nx.reIsDigit(c)
+def Nx.reIsSpace(c: I64): Bool = c == ' ' || (c >= 9 && c <= 13)
+def Nx.reIsGraph(c: I64): Bool = c >= 33 && c <= 126
+def Nx.reSigned(c: I64): I64 = if c >= 128 then c - 256 else c
+
+// ── character classes: regex.tcc lookup_classname (the name is lowered first)
+enum Nx.ReCls:
+  case Nx.RcAlnum
+  case Nx.RcAlpha
+  case Nx.RcBlank
+  case Nx.RcCntrl
+  case Nx.RcDigit
+  case Nx.RcGraph
+  case Nx.RcLower
+  case Nx.RcPrint
+  case Nx.RcPunct
+  case Nx.RcSpace
+  case Nx.RcUpper
+  case Nx.RcXdigit
+  case Nx.RcWord
+
+def Nx.reEqLowerFrom(a: Str, b: Str, i: I64): Bool =
+  if i >= Str.len(a) then true
+  else if Nx.reLower(Str.at(a, i)) != Str.at(b, i) then false
+  else Nx.reEqLowerFrom(a, b, i + 1)
+
+// a lowered equals b
+def Nx.reEqLower(a: Str, b: Str): Bool = Str.len(a) == Str.len(b) && Nx.reEqLowerFrom(a, b, 0)
+
+def Nx.reClass(v: Str): Coll.Option[Nx.ReCls] =
+  if Nx.reEqLower(v, "d") || Nx.reEqLower(v, "digit") then Coll.Some(Nx.RcDigit)
+  else if Nx.reEqLower(v, "w") then Coll.Some(Nx.RcWord)
+  else if Nx.reEqLower(v, "s") || Nx.reEqLower(v, "space") then Coll.Some(Nx.RcSpace)
+  else if Nx.reEqLower(v, "alnum") then Coll.Some(Nx.RcAlnum)
+  else if Nx.reEqLower(v, "alpha") then Coll.Some(Nx.RcAlpha)
+  else if Nx.reEqLower(v, "blank") then Coll.Some(Nx.RcBlank)
+  else if Nx.reEqLower(v, "cntrl") then Coll.Some(Nx.RcCntrl)
+  else if Nx.reEqLower(v, "graph") then Coll.Some(Nx.RcGraph)
+  else if Nx.reEqLower(v, "lower") then Coll.Some(Nx.RcLower)
+  else if Nx.reEqLower(v, "print") then Coll.Some(Nx.RcPrint)
+  else if Nx.reEqLower(v, "punct") then Coll.Some(Nx.RcPunct)
+  else if Nx.reEqLower(v, "upper") then Coll.Some(Nx.RcUpper)
+  else if Nx.reEqLower(v, "xdigit") then Coll.Some(Nx.RcXdigit)
+  else Coll.None
+
+def Nx.reInClass(k: Nx.ReCls, c: I64): Bool = k match
+  case Nx.RcAlnum => Nx.reIsAlnum(c)
+  case Nx.RcAlpha => Nx.reIsAlpha(c)
+  case Nx.RcBlank => c == ' ' || c == 9
+  case Nx.RcCntrl => c < 32 || c == 127
+  case Nx.RcDigit => Nx.reIsDigit(c)
+  case Nx.RcGraph => Nx.reIsGraph(c)
+  case Nx.RcLower => Nx.reIsLower(c)
+  case Nx.RcPrint => c >= 32 && c <= 126
+  case Nx.RcPunct => Nx.reIsGraph(c) && !Nx.reIsAlnum(c)
+  case Nx.RcSpace => Nx.reIsSpace(c)
+  case Nx.RcUpper => Nx.reIsUpper(c)
+  case Nx.RcXdigit => Nx.reIsDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+  case Nx.RcWord => Nx.reIsAlnum(c) || c == '_'
+
+// ── collating names: regex.tcc lookup_collatename, the name of char i is word i
+def Nx.reCollNames(): Str =
+  "NUL SOH STX ETX EOT ENQ ACK alert backspace tab newline vertical-tab form-feed carriage-return SO SI DLE DC1 DC2 DC3 DC4 NAK SYN ETB CAN EM SUB ESC IS4 IS3 IS2 IS1 space exclamation-mark quotation-mark number-sign dollar-sign percent-sign ampersand apostrophe left-parenthesis right-parenthesis asterisk plus-sign comma hyphen period slash zero one two three four five six seven eight nine colon semicolon less-than-sign equals-sign greater-than-sign question-mark commercial-at A B C D E F G H I J K L M N O P Q R S T U V W X Y Z left-square-bracket backslash right-square-bracket circumflex underscore grave-accent a b c d e f g h i j k l m n o p q r s t u v w x y z left-curly-bracket vertical-line right-curly-bracket tilde DEL"
+
+// the end of the word of names that starts at i
+def Nx.reWordEnd(t: Str, i: I64): I64 = if i >= Str.len(t) || Str.at(t, i) == ' ' then i else Nx.reWordEnd(t, i + 1)
+
+def Nx.reCollFrom(t: Str, v: Str, i: I64, k: I64): Coll.Option[I64] =
+  if i >= Str.len(t) then Coll.None
+  else
+    val e = Nx.reWordEnd(t, i)
+    if Str.eq(Str.slice(t, i, e), v) then Coll.Some(k) else Nx.reCollFrom(t, v, e + 1, k + 1)
+
+def Nx.reColl(v: Str): Coll.Option[I64] = Nx.reCollFrom(Nx.reCollNames(), v, 0, 0)
+
+// ── bracket expressions: regex_scanner.tcc _M_scan_in_bracket, regex_compiler.tcc _M_expression_term
+enum Nx.BTok:
+  case Nx.BEnd(i: I64)
+  case Nx.BDash(i: I64)
+  case Nx.BOrd(c: I64, i: I64)
+  case Nx.BColl(v: Str, i: I64)
+  case Nx.BClass(v: Str, i: I64)
+  case Nx.BEquiv(v: Str, i: I64)
+  case Nx.BBad
+
+enum Nx.BLast:
+  case Nx.BLNone
+  case Nx.BLChar(c: I64)
+  case Nx.BLClass
+
+def Nx.reFind(p: Str, i: I64, c: I64): I64 = if i >= Str.len(p) || Str.at(p, i) == c then i else Nx.reFind(p, i + 1, c)
+
+// `[.`, `[:` or `[=` read up to the first ch, which `]` must follow (_M_eat_class)
+def Nx.reEatClass(p: Str, i: I64, ch: I64): Nx.BTok =
+  val j = Nx.reFind(p, i, ch)
+  if j + 1 >= Str.len(p) || Str.at(p, j + 1) != ']' then Nx.BBad
+  else if ch == '.' then Nx.BColl(Str.slice(p, i, j), j + 2)
+  else if ch == ':' then Nx.BClass(Str.slice(p, i, j), j + 2)
+  else Nx.BEquiv(Str.slice(p, i, j), j + 2)
+
+def Nx.reBTok(p: Str, i: I64, atStart: Bool): Nx.BTok =
+  val c = Nx.reAt(p, i)
+  if i >= Str.len(p) then Nx.BBad
+  else if c == '-' then Nx.BDash(i + 1)
+  else if c == '[' then
+    val d = Nx.reAt(p, i + 1)
+    if i + 1 >= Str.len(p) then Nx.BBad
+    else if d == '.' || d == ':' || d == '=' then Nx.reEatClass(p, i + 2, d)
+    else Nx.BOrd(c, i + 1)
+  else if c == ']' && !atStart then Nx.BEnd(i + 1)
+  else Nx.BOrd(c, i + 1)
+
+def Nx.reMarkFrom(t: Ptr, b: I64): Unit =
+  if b < 256 then
+    Nx.aseti(t, b, 0)
+    Nx.reMarkFrom(t, b + 1)
+  else ()
+
+def Nx.reMark(t: Ptr, c: I64): Unit = Nx.aseti(t, c, 1)
+
+def Nx.reMarkRange(t: Ptr, l: I64, r: I64, b: I64): Unit =
+  if b < 256 then
+    val v = Nx.reSigned(b)
+    if v >= l && v <= r then Nx.reMark(t, b) else ()
+    Nx.reMarkRange(t, l, r, b + 1)
+  else ()
+
+def Nx.reMarkClass(t: Ptr, k: Nx.ReCls, b: I64): Unit =
+  if b < 256 then
+    if Nx.reInClass(k, b) then Nx.reMark(t, b) else ()
+    Nx.reMarkClass(t, k, b + 1)
+  else ()
+
+// transform_primary in "C" = the lowered char
+def Nx.reMarkEquiv(t: Ptr, c: I64, b: I64): Unit =
+  if b < 256 then
+    if Nx.reLower(b) == Nx.reLower(c) then Nx.reMark(t, b) else ()
+    Nx.reMarkEquiv(t, c, b + 1)
+  else ()
+
+def Nx.reFlush(t: Ptr, last: Nx.BLast): Unit = last match
+  case Nx.BLChar(c) => Nx.reMark(t, c)
+  case _ => ()
+
+def Nx.reNegate(t: Ptr, b: I64): Unit =
+  if b < 256 then
+    Nx.aseti(t, b, 1 - Nx.ageti(t, b))
+    Nx.reNegate(t, b + 1)
+  else ()
+
+// the end of the bracket: its index after `]`, or -1 when libstdc++ rejects it
+def Nx.reBracketDone(t: Ptr, last: Nx.BLast, i: I64): I64 =
+  Nx.reFlush(t, last)
+  i
+
+def Nx.reBracketRange(p: Str, t: Ptr, l: I64, tok: Nx.BTok): I64 = tok match
+  case Nx.BOrd(c, j) =>
+    if Nx.reSigned(l) > Nx.reSigned(c) then -1
+    else
+      Nx.reMarkRange(t, Nx.reSigned(l), Nx.reSigned(c), 0)
+      Nx.reBracketTerm(p, t, Nx.BLNone, Nx.reBTok(p, j, false))
+  case Nx.BDash(j) =>
+    if Nx.reSigned(l) > '-' then -1
+    else
+      Nx.reMarkRange(t, Nx.reSigned(l), '-', 0)
+      Nx.reBracketTerm(p, t, Nx.BLNone, Nx.reBTok(p, j, false))
+  case _ => -1
+
+def Nx.reBracketDash(p: Str, t: Ptr, last: Nx.BLast, tok: Nx.BTok): I64 = tok match
+  case Nx.BEnd(j) =>
+    Nx.reFlush(t, last)
+    Nx.reBracketDone(t, Nx.BLChar('-'), j)
+  case Nx.BBad => -1
+  case _ =>
+    last match
+      case Nx.BLChar(l) => Nx.reBracketRange(p, t, l, tok)
+      case _ => -1
+
+def Nx.reBracketTerm(p: Str, t: Ptr, last: Nx.BLast, tok: Nx.BTok): I64 = tok match
+  case Nx.BEnd(j) => Nx.reBracketDone(t, last, j)
+  case Nx.BBad => -1
+  case Nx.BOrd(c, j) =>
+    Nx.reFlush(t, last)
+    Nx.reBracketTerm(p, t, Nx.BLChar(c), Nx.reBTok(p, j, false))
+  case Nx.BDash(j) => Nx.reBracketDash(p, t, last, Nx.reBTok(p, j, false))
+  case Nx.BColl(v, j) =>
+    Nx.reColl(v) match
+      case Coll.None => -1
+      case Coll.Some(c) =>
+        Nx.reMark(t, c)
+        Nx.reFlush(t, last)
+        Nx.reBracketTerm(p, t, Nx.BLChar(c), Nx.reBTok(p, j, false))
+  case Nx.BEquiv(v, j) =>
+    Nx.reFlush(t, last)
+    Nx.reColl(v) match
+      case Coll.None => -1
+      case Coll.Some(c) =>
+        Nx.reMarkEquiv(t, c, 0)
+        Nx.reBracketTerm(p, t, Nx.BLClass, Nx.reBTok(p, j, false))
+  case Nx.BClass(v, j) =>
+    Nx.reFlush(t, last)
+    Nx.reClass(v) match
+      case Coll.None => -1
+      case Coll.Some(k) =>
+        Nx.reMarkClass(t, k, 0)
+        Nx.reBracketTerm(p, t, Nx.BLClass, Nx.reBTok(p, j, false))
+
+// i = the index after `[`: _M_insert_bracket_matcher (a first `-` or char starts as the last char)
+def Nx.reBracket(p: Str, i: I64, ng: I64): Nx.RePart =
+  val neg = Nx.reAt(p, i) == '^'
+  val i1 = if neg then i + 1 else i
+  val t = Nx.arrNew(256)
+  Nx.reMarkFrom(t, 0)
+  val tok = Nx.reBTok(p, i1, true)
+  val e: I64 = tok match
+    case Nx.BOrd(c, j) => Nx.reBracketTerm(p, t, Nx.BLChar(c), Nx.reBTok(p, j, false))
+    case Nx.BDash(j) => Nx.reBracketTerm(p, t, Nx.BLChar('-'), Nx.reBTok(p, j, false))
+    case _ => Nx.reBracketTerm(p, t, Nx.BLNone, tok)
+  if e < 0 then Nx.RPBad
+  else
+    if neg then Nx.reNegate(t, 0) else ()
+    Nx.RPOk(Nx.RSet(t), e, ng)
+
+// ── the pattern: regex_compiler.tcc
+def Nx.reNumFrom(p: Str, i: I64, v: I64): Nx.ReNum =
+  val c = Nx.reAt(p, i)
+  if v > 2147483647 then Nx.RNumBad
+  else if Nx.reIsDigit(c) then Nx.reNumFrom(p, i + 1, v * 10 + c - '0')
+  else Nx.RNum(v, i)
+
+// a dup count (an int; _M_cur_int_value rejects an overflow)
+def Nx.reNum(p: Str, i: I64): Nx.ReNum = if Nx.reIsDigit(Nx.reAt(p, i)) then Nx.reNumFrom(p, i, 0) else Nx.RNumBad
+
+def Nx.reIntervalMax(p: Str, e: Nx.ReAst, min: I64, i: I64, ng: I64): Nx.RePart =
+  Nx.reNum(p, i) match
+    case Nx.RNumBad => Nx.RPBad
+    case Nx.RNum(max, j) =>
+      if Nx.reAt(p, j) != '}' || max < min then Nx.RPBad else Nx.reQuant(p, Nx.RRepFin(e, min, max - min), j + 1, ng)
+
+// i = the index after `{`
+def Nx.reInterval(p: Str, e: Nx.ReAst, i: I64, ng: I64): Nx.RePart =
+  Nx.reNum(p, i) match
+    case Nx.RNumBad => Nx.RPBad
+    case Nx.RNum(min, j) =>
+      val c = Nx.reAt(p, j)
+      if c == '}' then Nx.reQuant(p, Nx.RRepFin(e, min, 0), j + 1, ng)
+      else if c != ',' then Nx.RPBad
+      else if Nx.reAt(p, j + 1) == '}' then Nx.reQuant(p, Nx.RRepInf(e, min), j + 2, ng)
+      else Nx.reIntervalMax(p, e, min, j + 1, ng)
+
+def Nx.reQuant(p: Str, e: Nx.ReAst, i: I64, ng: I64): Nx.RePart =
+  val c = Nx.reAt(p, i)
+  if c == '*' then Nx.reQuant(p, Nx.RStar(e), i + 1, ng)
+  else if c == '+' then Nx.reQuant(p, Nx.RPlus(e), i + 1, ng)
+  else if c == '?' then Nx.reQuant(p, Nx.ROpt(e), i + 1, ng)
+  else if c == '{' then Nx.reInterval(p, e, i + 1, ng)
+  else Nx.RPOk(e, i, ng)
+
+// i = the index after `(`; the group number is taken at `(`
+def Nx.reGroup(p: Str, i: I64, ng: I64): Nx.RePart =
+  Nx.reDisj(p, i, ng + 1) match
+    case Nx.RPOk(b, j, ng2) => if Nx.reAt(p, j) == ')' then Nx.RPOk(Nx.RGroup(ng, b), j + 1, ng2) else Nx.RPBad
+    case _ => Nx.RPBad
+
+// an escape: only the special chars of extended (_M_eat_escape_posix)
+def Nx.reEscape(p: Str, i: I64, ng: I64): Nx.RePart =
+  val c = Nx.reAt(p, i)
+  if c == '.' || c == '[' || c == '\\' || c == '(' || c == ')' || c == '*' || c == '+' || c == '?' || c == '{' || c == '|' || c == '^' || c == '$' then
+    Nx.RPOk(Nx.RChar(c), i + 1, ng)
+  else Nx.RPBad
+
+def Nx.reAtom(p: Str, i: I64, ng: I64): Nx.RePart =
+  val c = Nx.reAt(p, i)
+  if i >= Str.len(p) then Nx.RPNone
+  else if c == '.' then Nx.RPOk(Nx.RAny, i + 1, ng)
+  else if c == '\\' then Nx.reEscape(p, i + 1, ng)
+  else if c == '(' then Nx.reGroup(p, i + 1, ng)
+  else if c == '[' then Nx.reBracket(p, i + 1, ng)
+  else if c == '*' || c == '+' || c == '?' || c == '{' || c == '|' || c == ')' then Nx.RPNone
+  else if c == 0 then Nx.RPBad
+  else Nx.RPOk(Nx.RChar(c), i + 1, ng)
+
+// a term: an assertion (no quantifier may follow it) or an atom with its quantifiers
+def Nx.reTerm(p: Str, i: I64, ng: I64): Nx.RePart =
+  val c = Nx.reAt(p, i)
+  if i < Str.len(p) && c == '^' then Nx.RPOk(Nx.RBol, i + 1, ng)
+  else if i < Str.len(p) && c == '$' then Nx.RPOk(Nx.REol, i + 1, ng)
+  else
+    Nx.reAtom(p, i, ng) match
+      case Nx.RPOk(a, j, ng2) => Nx.reQuant(p, a, j, ng2)
+      case Nx.RPNone => Nx.RPNone
+      case Nx.RPBad => Nx.RPBad
+
+def Nx.reAlternative(p: Str, i: I64, ng: I64, acc: Coll.List[Nx.ReAst]): Nx.RePart =
+  Nx.reTerm(p, i, ng) match
+    case Nx.RPOk(t, j, ng2) => Nx.reAlternative(p, j, ng2, Coll.Cons(t, acc))
+    case Nx.RPNone => Nx.RPOk(Nx.RCat(acc), i, ng)
+    case Nx.RPBad => Nx.RPBad
+
+def Nx.reDisjMore(p: Str, l: Nx.ReAst, i: I64, ng: I64): Nx.RePart =
+  if Nx.reAt(p, i) == '|' then
+    Nx.reAlternative(p, i + 1, ng, Coll.Nil) match
+      case Nx.RPOk(r, j, ng2) => Nx.reDisjMore(p, Nx.RAlt(l, r), j, ng2)
+      case _ => Nx.RPBad
+  else Nx.RPOk(l, i, ng)
+
+def Nx.reDisj(p: Str, i: I64, ng: I64): Nx.RePart =
+  Nx.reAlternative(p, i, ng, Coll.Nil) match
+    case Nx.RPOk(l, j, ng2) => Nx.reDisjMore(p, l, j, ng2)
+    case _ => Nx.RPBad
+
+// ── state counts as libstdc++ inserts them: R = the states a clone copies, T = all states inserted (saturated)
+enum Nx.ReCount:
+  case Nx.RC(r: I64, t: I64)
+
+def Nx.reSat(x: I64): I64 = if x > Nx.reLimit() + 1 then Nx.reLimit() + 1 else x
+
+def Nx.reRC(r: I64, t: I64): Nx.ReCount = Nx.RC(Nx.reSat(r), Nx.reSat(t))
+
+def Nx.reCountCat(xs: Coll.List[Nx.ReAst], r: I64, t: I64): Nx.ReCount = xs match
+  case Coll.Nil => Nx.reRC(r + 1, t + 1)
+  case Coll.Cons(h, tl) =>
+    Nx.reCount(h) match
+      case Nx.RC(r1, t1) => Nx.reCountCat(tl, Nx.reSat(r + r1), Nx.reSat(t + t1))
+
+// e{min,...}: a dummy head, min clones, then a cloned star (r + 1) or more optional clones (r + 1 each) and a dummy
+def Nx.reCountRep(e: Nx.ReAst, min: I64, more: I64, inf: Bool): Nx.ReCount =
+  Nx.reCount(e) match
+    case Nx.RC(r, t) =>
+      val tail = if inf then r + 1 else 1 + more * (r + 1)
+      val rr = Nx.reSat(1 + min * r + Nx.reSat(tail))
+      Nx.reRC(rr, t + rr)
+
+def Nx.reCount(e: Nx.ReAst): Nx.ReCount = e match
+  case Nx.RGroup(_, b) =>
+    Nx.reCount(b) match
+      case Nx.RC(r, t) => Nx.reRC(r + 2, t + 2)
+  case Nx.RCat(xs) => Nx.reCountCat(xs, 0, 0)
+  case Nx.RAlt(l, r0) =>
+    Nx.reCount(l) match
+      case Nx.RC(r1, t1) =>
+        Nx.reCount(r0) match
+          case Nx.RC(r2, t2) => Nx.reRC(r1 + r2 + 2, t1 + t2 + 2)
+  case Nx.RStar(b) =>
+    Nx.reCount(b) match
+      case Nx.RC(r, t) => Nx.reRC(r + 1, t + 1)
+  case Nx.RPlus(b) =>
+    Nx.reCount(b) match
+      case Nx.RC(r, t) => Nx.reRC(r + 1, t + 1)
+  case Nx.ROpt(b) =>
+    Nx.reCount(b) match
+      case Nx.RC(r, t) => Nx.reRC(r + 2, t + 2)
+  case Nx.RRepInf(b, min) => Nx.reCountRep(b, min, 0, true)
+  case Nx.RRepFin(b, min, more) => Nx.reCountRep(b, min, more, false)
+  case _ => Nx.RC(1, 1)
+
+// ── the NFA: emit(e, k) builds e in front of state k and answers e's first state (no dummies: they only pass on)
+def Nx.reNew(st: Ptr, ctr: Ptr, op: I64, next: I64, alt: I64, arg: I64): I64 =
+  val id = Nx.ageti(ctr, 0)
+  Nx.aseti(ctr, 0, id + 1)
+  Nx.aseti(st, id * 4, op)
+  Nx.aseti(st, id * 4 + 1, next)
+  Nx.aseti(st, id * 4 + 2, alt)
+  Nx.aseti(st, id * 4 + 3, arg)
+  id
+
+def Nx.reEmitCat(xs: Coll.List[Nx.ReAst], k: I64, st: Ptr, sets: Ptr, ctr: Ptr): I64 = xs match
+  case Coll.Nil => k
+  case Coll.Cons(h, t) => Nx.reEmitCat(t, Nx.reEmit(h, k, st, sets, ctr), st, sets, ctr)
+
+def Nx.reEmitN(e: Nx.ReAst, n: I64, k: I64, st: Ptr, sets: Ptr, ctr: Ptr): I64 =
+  if n == 0 then k else Nx.reEmitN(e, n - 1, Nx.reEmit(e, k, st, sets, ctr), st, sets, ctr)
+
+// the optional clones of e{min,min+n}: each repeat tries its clone, else jumps to end (the swapped _M_insert_repeat)
+def Nx.reEmitOpt(e: Nx.ReAst, n: I64, k: I64, end: I64, st: Ptr, sets: Ptr, ctr: Ptr): I64 =
+  if n == 0 then k
+  else
+    val b = Nx.reEmit(e, k, st, sets, ctr)
+    Nx.reEmitOpt(e, n - 1, Nx.reNew(st, ctr, Nx.reOpRep(), end, b, 0), end, st, sets, ctr)
+
+def Nx.reEmitStar(e: Nx.ReAst, k: I64, st: Ptr, sets: Ptr, ctr: Ptr): I64 =
+  val rep = Nx.reNew(st, ctr, Nx.reOpRep(), k, 0, 0)
+  Nx.aseti(st, rep * 4 + 2, Nx.reEmit(e, rep, st, sets, ctr))
+  rep
+
+def Nx.reEmit(e: Nx.ReAst, k: I64, st: Ptr, sets: Ptr, ctr: Ptr): I64 = e match
+  case Nx.RChar(c) => Nx.reNew(st, ctr, Nx.reOpChar(), k, 0, c)
+  case Nx.RAny => Nx.reNew(st, ctr, Nx.reOpAny(), k, 0, 0)
+  case Nx.RSet(t) =>
+    val id = Nx.reNew(st, ctr, Nx.reOpSet(), k, 0, 0)
+    Nx.aset(sets, id, t)
+    id
+  case Nx.RBol => Nx.reNew(st, ctr, Nx.reOpBol(), k, 0, 0)
+  case Nx.REol => Nx.reNew(st, ctr, Nx.reOpEol(), k, 0, 0)
+  case Nx.RGroup(g, b) =>
+    val en = Nx.reNew(st, ctr, Nx.reOpEnd(), k, 0, g)
+    Nx.reNew(st, ctr, Nx.reOpBegin(), Nx.reEmit(b, en, st, sets, ctr), 0, g)
+  case Nx.RCat(xs) => Nx.reEmitCat(xs, k, st, sets, ctr)
+  case Nx.RAlt(l, r) =>
+    val ls = Nx.reEmit(l, k, st, sets, ctr)
+    val rs = Nx.reEmit(r, k, st, sets, ctr)
+    Nx.reNew(st, ctr, Nx.reOpAlt(), rs, ls, 0)
+  case Nx.RStar(b) => Nx.reEmitStar(b, k, st, sets, ctr)
+  case Nx.RPlus(b) =>
+    val rep = Nx.reNew(st, ctr, Nx.reOpRep(), k, 0, 0)
+    val bs = Nx.reEmit(b, rep, st, sets, ctr)
+    Nx.aseti(st, rep * 4 + 2, bs)
+    bs
+  case Nx.ROpt(b) => Nx.reNew(st, ctr, Nx.reOpRep(), k, Nx.reEmit(b, k, st, sets, ctr), 0)
+  case Nx.RRepInf(b, min) => Nx.reEmitN(b, min, Nx.reEmitStar(b, k, st, sets, ctr), st, sets, ctr)
+  case Nx.RRepFin(b, min, more) => Nx.reEmitN(b, min, Nx.reEmitOpt(b, more, k, k, st, sets, ctr), st, sets, ctr)
+
+def Nx.reZero(a: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.aseti(a, i, 0)
+    Nx.reZero(a, i + 1, n)
+  else ()
+
+// the root: group 0 around the disjunction, then accept
+def Nx.reBuild(e: Nx.ReAst, ng: I64, total: I64): Nx.Regex =
+  val st = Nx.arrNew(total * 4)
+  val sets = Nx.arrNew(total)
+  val ctr = Nx.arrNew(1)
+  Nx.aseti(ctr, 0, 0)
+  val acc = Nx.reNew(st, ctr, Nx.reOpAccept(), 0, 0, 0)
+  val en = Nx.reNew(st, ctr, Nx.reOpEnd(), acc, 0, 0)
+  val start = Nx.reNew(st, ctr, Nx.reOpBegin(), Nx.reEmit(e, en, st, sets, ctr), 0, 0)
+  val n = Nx.ageti(ctr, 0)
+  val rep = Nx.arrNew(2 * n)
+  Nx.reZero(rep, 0, 2 * n)
+  val stack = Nx.arrNew(1024)
+  Nx.aseti(stack, 0, 1024)
+  val stk = Nx.arrNew(1)
+  Nx.aset(stk, 0, stack)
+  Nx.Regex(n, start, st, sets, ng, rep, Nx.arrNew(6 * ng), stk)
+
+def Nx.reCompile(pat: Str): Nx.ReResult =
+  Nx.reDisj(pat, 0, 1) match
+    case Nx.RPOk(e, i, ng) =>
+      if i < Str.len(pat) then Nx.ReBad
+      else
+        Nx.reCount(e) match
+          case Nx.RC(_, t) => if t + 3 > Nx.reLimit() then Nx.ReBad else Nx.ReOk(Nx.reBuild(e, ng, t + 3))
+    case _ => Nx.ReBad
+
+// ── the matcher: regex_executor.tcc _M_dfs in POSIX mode, as a loop over the undo stack
+def Nx.reCopy(a: Ptr, b: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.aseti(b, i, Nx.ageti(a, i))
+    Nx.reCopy(a, b, i + 1, n)
+  else ()
+
+// words from.. of a to words to.. of a
+def Nx.reCopyAt(a: Ptr, from: I64, to: I64, n: I64): Unit =
+  if n > 0 then
+    Nx.aseti(a, to, Nx.ageti(a, from))
+    Nx.reCopyAt(a, from + 1, to + 1, n - 1)
+  else ()
+
+def Nx.reGrow(stk: Ptr, used: I64): Ptr =
+  val old: Ptr = Nx.aget(stk, 0)
+  val cap = Nx.ageti(old, 0)
+  if used + 8 <= cap then old
+  else
+    val nw = Nx.arrNew(cap * 2)
+    Nx.reCopy(old, nw, 0, used)
+    Nx.aseti(nw, 0, cap * 2)
+    Nx.aset(stk, 0, nw)
+    nw
+
+def Nx.rePush(s: Ptr, sp: I64, op: I64, a: I64, b: I64, c: I64): I64 =
+  Nx.aseti(s, sp, op)
+  Nx.aseti(s, sp + 1, a)
+  Nx.aseti(s, sp + 2, b)
+  Nx.aseti(s, sp + 3, c)
+  sp + 4
+
+def Nx.reCapsReset(caps: Ptr, ng: I64, g: I64): Unit =
+  if g < ng then
+    Nx.aseti(caps, g, 0 - 1)
+    Nx.aseti(caps, ng + g, 0 - 1)
+    Nx.aseti(caps, 2 * ng + g, 0)
+    Nx.reCapsReset(caps, ng, g + 1)
+  else ()
+
+// one _M_main from begin: exact = regex_match (_Match_mode::_Exact), else a prefix; the best accept goes to the
+// best half of caps. Answers _M_has_sol.
+def Nx.reExec(re: Nx.Regex, s: Str, begin: I64, exact: Bool, notNull: Bool, prevAvail: Bool): Bool = re match
+  case Nx.Regex(n, start, st, sets, ng, rep, caps, stk) =>
+    val end = Str.len(s)
+    Nx.reCapsReset(caps, ng, 0)
+    var stack: Ptr = Nx.aget(stk, 0)
+    var pos = begin
+    var cur = start
+    var sp = 1
+    var hasSol = false
+    var found = false
+    var solPos = 0
+    var done = false
+    var running = true
+    while running do
+      stack = Nx.reGrow(stk, sp)
+      if cur >= 0 then
+        val b = cur * 4
+        val op = Nx.ageti(st, b)
+        val next = Nx.ageti(st, b + 1)
+        if op == Nx.reOpChar() then
+          if pos < end && Str.at(s, pos) == Nx.ageti(st, b + 3) then
+            sp = Nx.rePush(stack, sp, Nx.reFrPos(), pos, 0, 0)
+            pos = pos + 1
+            cur = next
+          else cur = 0 - 1
+        else if op == Nx.reOpAny() then
+          if pos < end && Str.at(s, pos) != 0 then
+            sp = Nx.rePush(stack, sp, Nx.reFrPos(), pos, 0, 0)
+            pos = pos + 1
+            cur = next
+          else cur = 0 - 1
+        else if op == Nx.reOpSet() then
+          val tbl: Ptr = Nx.aget(sets, cur)
+          if pos < end && Nx.ageti(tbl, Str.at(s, pos)) == 1 then
+            sp = Nx.rePush(stack, sp, Nx.reFrPos(), pos, 0, 0)
+            pos = pos + 1
+            cur = next
+          else cur = 0 - 1
+        else if op == Nx.reOpBol() then
+          cur = if pos == begin && !prevAvail then next else 0 - 1
+        else if op == Nx.reOpEol() then
+          cur = if pos == end then next else 0 - 1
+        else if op == Nx.reOpBegin() then
+          val g = Nx.ageti(st, b + 3)
+          sp = Nx.rePush(stack, sp, Nx.reFrFirst(), g, Nx.ageti(caps, g), 0)
+          Nx.aseti(caps, g, pos)
+          cur = next
+        else if op == Nx.reOpEnd() then
+          val g = Nx.ageti(st, b + 3)
+          sp = Nx.rePush(stack, sp, Nx.reFrRes(), g, Nx.ageti(caps, ng + g), Nx.ageti(caps, 2 * ng + g))
+          Nx.aseti(caps, ng + g, pos)
+          Nx.aseti(caps, 2 * ng + g, 1)
+          cur = next
+        else if op == Nx.reOpAlt() then
+          sp = Nx.rePush(stack, sp, Nx.reFrAlt2(), next, 0, 0)
+          cur = Nx.ageti(st, b + 2)
+        else if op == Nx.reOpRep() then
+          // _M_handle_repeat (greedy) and _M_rep_once_more
+          sp = Nx.rePush(stack, sp, Nx.reFrRepNext(), cur, 0, 0)
+          val rpos = Nx.ageti(rep, 2 * cur)
+          val rcnt = Nx.ageti(rep, 2 * cur + 1)
+          if rcnt == 0 || rpos != pos then
+            sp = Nx.rePush(stack, sp, Nx.reFrRep(), cur, rpos, rcnt)
+            Nx.aseti(rep, 2 * cur, pos)
+            Nx.aseti(rep, 2 * cur + 1, 1)
+            cur = Nx.ageti(st, b + 2)
+          else if rcnt < 2 then
+            sp = Nx.rePush(stack, sp, Nx.reFrRep(), cur, rpos, rcnt)
+            Nx.aseti(rep, 2 * cur + 1, rcnt + 1)
+            cur = Nx.ageti(st, b + 2)
+          else cur = 0 - 1
+        else
+          // _M_handle_accept, POSIX: keep the longest
+          val whole = if exact then pos == end else true
+          hasSol = whole && !(pos == begin && notNull)
+          if hasSol && (!found || solPos < pos) then
+            found = true
+            solPos = pos
+            Nx.reCopyAt(caps, 0, 3 * ng, 3 * ng)
+            // no later accept can be longer: skip the rest of the search, only undo (hasSol stays true to the end)
+            done = pos == end
+          else ()
+          cur = 0 - 1
+      else if sp == 1 then running = false
+      else
+        sp = sp - 4
+        val fop = Nx.ageti(stack, sp)
+        val a = Nx.ageti(stack, sp + 1)
+        if fop == Nx.reFrPos() then pos = a
+        else if fop == Nx.reFrFirst() then Nx.aseti(caps, a, Nx.ageti(stack, sp + 2))
+        else if fop == Nx.reFrRes() then
+          Nx.aseti(caps, ng + a, Nx.ageti(stack, sp + 2))
+          Nx.aseti(caps, 2 * ng + a, Nx.ageti(stack, sp + 3))
+        else if fop == Nx.reFrRep() then
+          Nx.aseti(rep, 2 * a, Nx.ageti(stack, sp + 2))
+          Nx.aseti(rep, 2 * a + 1, Nx.ageti(stack, sp + 3))
+        else if fop == Nx.reFrAlt2() then
+          if done then ()
+          else
+            sp = Nx.rePush(stack, sp, Nx.reFrMerge(), if hasSol then 1 else 0, 0, 0)
+            hasSol = false
+            cur = a
+        else if fop == Nx.reFrMerge() then hasSol = hasSol || a == 1
+        else if !hasSol then cur = Nx.ageti(st, a * 4 + 1)
+        else ()
+    hasSol
+
+def Nx.reBestOk(re: Nx.Regex, g: I64): Bool = re match
+  case Nx.Regex(_, _, _, _, ng, _, caps, _) => Nx.ageti(caps, 5 * ng + g) == 1
+
+def Nx.reBestFirst(re: Nx.Regex, g: I64): I64 = re match
+  case Nx.Regex(_, _, _, _, ng, _, caps, _) => Nx.ageti(caps, 3 * ng + g)
+
+def Nx.reBestSecond(re: Nx.Regex, g: I64): I64 = re match
+  case Nx.Regex(_, _, _, _, ng, _, caps, _) => Nx.ageti(caps, 4 * ng + g)
+
+def Nx.reGroupCount(re: Nx.Regex): I64 = re match
+  case Nx.Regex(_, _, _, _, ng, _, _, _) => ng
+
+// groups g..ng-1 of the best accept, onto acc (built from the last)
+def Nx.reGroups(re: Nx.Regex, s: Str, g: I64, acc: Coll.List[Coll.Option[Str]]): Coll.List[Coll.Option[Str]] =
+  if g < 1 then acc
+  else
+    val v: Coll.Option[Str] = if Nx.reBestOk(re, g) then Coll.Some(Str.slice(s, Nx.reBestFirst(re, g), Nx.reBestSecond(re, g))) else Coll.None
+    Nx.reGroups(re, s, g - 1, Coll.Cons(v, acc))
+
+def Nx.reAllGroups(re: Nx.Regex, s: Str): Coll.List[Coll.Option[Str]] = Nx.reGroups(re, s, Nx.reGroupCount(re) - 1, Coll.Nil)
+
+// std::regex_match: groups 1.. (None = did not take part), or None when s does not match as a whole
+def Nx.reMatch(re: Nx.Regex, s: Str): Coll.Option[Coll.List[Coll.Option[Str]]] =
+  if Nx.reExec(re, s, 0, true, false, false) then Coll.Some(Nx.reAllGroups(re, s)) else Coll.None
+
+// _Executor::_M_search: from b on, each later start with match_prev_avail
+def Nx.reSearchFrom(re: Nx.Regex, s: Str, b: I64, notNull: Bool): Bool =
+  if Nx.reExec(re, s, b, false, notNull, true) then true
+  else if b >= Str.len(s) then false
+  else Nx.reSearchFrom(re, s, b + 1, notNull)
+
+def Nx.reSearch(re: Nx.Regex, s: Str, b: I64, notNull: Bool, continuous: Bool, prevAvail: Bool): Bool =
+  if Nx.reExec(re, s, b, false, notNull, prevAvail) then true
+  else if continuous || b >= Str.len(s) then false
+  else Nx.reSearchFrom(re, s, b + 1, notNull)
+
+def Nx.reSplitEnd(s: Str, from: I64, acc: Coll.List[Nx.SplitPart]): Coll.List[Nx.SplitPart] =
+  Coll.rev(Coll.Cons(Nx.SpStr(Str.slice(s, from, Str.len(s))), acc))
+
+// regex_iterator::operator++ after the match in best: an empty match first retries at its end with
+// match_not_null | match_continuous, then the search goes on one char later with match_prev_avail
+def Nx.reSplitLoop(re: Nx.Regex, s: Str, prefix: I64, prevAvail: Bool, acc: Coll.List[Nx.SplitPart]): Coll.List[Nx.SplitPart] =
+  val mb = Nx.reBestFirst(re, 0)
+  val me = Nx.reBestSecond(re, 0)
+  val acc2 = Coll.Cons(Nx.SpMatch(Nx.reAllGroups(re, s)), Coll.Cons(Nx.SpStr(Str.slice(s, prefix, mb)), acc))
+  if mb == me && me == Str.len(s) then Nx.reSplitEnd(s, me, acc2)
+  else if mb == me && Nx.reSearch(re, s, me, true, true, prevAvail) then Nx.reSplitLoop(re, s, me, prevAvail, acc2)
+  else
+    val from = if mb == me then me + 1 else me
+    if Nx.reSearch(re, s, from, false, false, true) then Nx.reSplitLoop(re, s, me, true, acc2) else Nx.reSplitEnd(s, me, acc2)
+
+// builtins.split: the text between matches interleaved with each match's groups
+def Nx.reSplit(re: Nx.Regex, s: Str): Coll.List[Nx.SplitPart] =
+  if Nx.reSearch(re, s, 0, false, false, false) then Nx.reSplitLoop(re, s, 0, false, Coll.Nil)
+  else Coll.Cons(Nx.SpStr(s), Coll.Nil)
