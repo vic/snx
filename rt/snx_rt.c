@@ -179,7 +179,9 @@ int64_t Nx__intern(srs_str s) {
 srs_str Nx__symName(int64_t id) { return (id >= 0 && id < g_nsyms) ? g_names[id] : (srs_str){(const uint8_t*)"", 0}; }
 int64_t Nx__findSym(const int64_t* syms, int64_t n, int64_t sym) {
   int64_t lo = 0, hi = n;
-  while (lo < hi) { int64_t m = (lo + hi) >> 1; if (syms[m] < sym) lo = m + 1; else hi = m; }
+  // halve down to eight names, then walk them: sorted, so the first not below sym is its place
+  while (hi - lo > 8) { int64_t m = (lo + hi) >> 1; if (syms[m] < sym) lo = m + 1; else hi = m; }
+  while (lo < hi && syms[lo] < sym) lo++;
   return (lo < n && syms[lo] == sym) ? lo : n;
 }
 

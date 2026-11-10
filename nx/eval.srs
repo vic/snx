@@ -29,23 +29,27 @@ def Nx.up(env: Ptr, n: I64): Ptr = if n == 0 then env else Nx.up(Nx.parent(env),
 // ---- cells ----------------------------------------------------------------------------------------------------
 
 // [L:B4,B5]: a thunk is busy while it runs; meeting it again is infinite recursion. Its result, an error included,
-// replaces it [L:B V1]
+// replaces it [L:B V1]. Small, so the C compiler inlines it: a forced cell costs a load and two tests, no call
 def Nx.force(c: Ptr): Nx.Val =
-  if Nx.isLazy(c) then
-    Nx.put(c, Nx.VBusy)
-    if Nx.probe(2) == 1 then Nx.trPush(c) else ()
-    val r = Nx.eval(Nx.aget[Ptr](c, 1), Nx.aget[Nx.Code](c, 2))
-    if Nx.probe(2) == 1 then Nx.trPop() else ()
-    Nx.put(c, r)
-    Nx.leakIf(r)
-    r
+  if Nx.isLazy(c) then Nx.forceRun(c)
   else
     val v = Nx.get(c)
     v match
-      case Nx.VBusy =>
-        if Nx.probe(2) == 1 then Nx.trDump(Nx.trBusy(c) * (1 - Nx.probe(3)), Nx.trTop()) else ()
-        Nx.VErr(Nx.KInfRec, "infinite recursion encountered")
+      case Nx.VBusy => Nx.forceBusy(c)
       case _ => v
+
+def Nx.forceRun(c: Ptr): Nx.Val =
+  Nx.put(c, Nx.VBusy)
+  if Nx.probe(2) == 1 then Nx.trPush(c) else ()
+  val r = Nx.eval(Nx.aget[Ptr](c, 1), Nx.aget[Nx.Code](c, 2))
+  if Nx.probe(2) == 1 then Nx.trPop() else ()
+  Nx.put(c, r)
+  Nx.leakIf(r)
+  r
+
+def Nx.forceBusy(c: Ptr): Nx.Val =
+  if Nx.probe(2) == 1 then Nx.trDump(Nx.trBusy(c) * (1 - Nx.probe(3)), Nx.trTop()) else ()
+  Nx.VErr(Nx.KInfRec, "infinite recursion encountered")
 
 // the value in cell c without running it: Nx.VPending for a thunk not run yet
 def Nx.peek(c: Ptr): Nx.Val = if Nx.isLazy(c) then Nx.VPending else Nx.get(c)
