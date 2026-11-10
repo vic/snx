@@ -8,3 +8,5 @@ extern def Nx.b64(raw: Str): Str
 extern def Nx.unb16(s: Str): Str
 extern def Nx.unb32(s: Str): Str
 extern def Nx.unb64(s: Str): Str
+// compressHash: the raw digest h folded to n bytes by XOR
+extern def Nx.foldHash(h: Str, n: I64): Str

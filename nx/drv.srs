@@ -1,0 +1,878 @@
+// snx drv: store derivations as src/libstore/derivations.cc reads and writes them (parseDerivation with ca-derivations,
+// dynamic-derivations, impure-derivations and git-hashing on; Derivation::unparse; computeStorePath), and the store
+// paths of store-dir-config.cc (makeStorePath, makeFixedOutputPath, makeFixedOutputPathFromCA).
+// A parsed Nx.Drv is canonical, as "Canonical form" of the derivation-aterm.md of Nix after 2.34.8 asks: each set and
+// map of the ATerm is strictly ascending, each list has its commas and nothing follows the last ")". Nix 2.34.8 also
+// reads unsorted or repeated entries, a missing or leading comma, trailing bytes and a non-canonical store path; snx
+// refuses them (SPEC.md "drv": nix-bugs/drv-canonical may go either way).
+// The "__json" env value (structured attrs) is read and written again as StructuredAttrs::parse and unparse do
+// (nlohmann::json::parse, then dump()): a JSON object, keys ascending, a repeated key keeping its last value.
+// shortcut: a JSON number with a fraction or exponent (a double) is refused, as dump()'s shortest double spelling is
+// not written yet; add it with builtins.toJSON's float printing.
+
+// HashAlgorithm without blake3 (blake3-hashes is off)
+enum Nx.HashAlgo:
+  case Nx.HaMd5
+  case Nx.HaSha1
+  case Nx.HaSha256
+  case Nx.HaSha512
+
+// ContentAddressMethod
+enum Nx.CaMethod:
+  case Nx.CaFlat
+  case Nx.CaNar
+  case Nx.CaGit
+  case Nx.CaText
+
+enum Nx.MethodAlgo:
+  case Nx.MethodAlgo(m: Nx.CaMethod, a: Nx.HashAlgo)
+
+// DerivationOutput. A fixed output keeps its raw digest; its path is computed (CAFixed::path), never stored.
+enum Nx.DrvOut:
+  case Nx.OutInput(path: Str)
+  case Nx.OutFixed(m: Nx.CaMethod, a: Nx.HashAlgo, digest: Str)
+  case Nx.OutFloating(m: Nx.CaMethod, a: Nx.HashAlgo)
+  case Nx.OutDeferred
+  case Nx.OutImpure(m: Nx.CaMethod, a: Nx.HashAlgo)
+
+enum Nx.DrvOutput:
+  case Nx.DrvOutput(name: Str, out: Nx.DrvOut)
+
+// DerivedPathMap<StringSet>::ChildNode: the outputs wanted, and those of the derivations that outputs build
+enum Nx.DrvNode:
+  case Nx.DrvNode(outs: Coll.List[Str], kids: Coll.List[Nx.DrvKid])
+
+enum Nx.DrvKid:
+  case Nx.DrvKid(output: Str, node: Nx.DrvNode)
+
+enum Nx.DrvInput:
+  case Nx.DrvInput(path: Str, node: Nx.DrvNode)
+
+enum Nx.DrvEnv:
+  case Nx.DrvEnv(name: Str, value: Str)
+
+enum Nx.Drv:
+  case Nx.Drv(name: Str, outputs: Coll.List[Nx.DrvOutput], inputDrvs: Coll.List[Nx.DrvInput], inputSrcs: Coll.List[Str], system: Str, builder: Str, args: Coll.List[Str], env: Coll.List[Nx.DrvEnv])
+
+enum Nx.DrvResult:
+  case Nx.DrvOk(d: Nx.Drv)
+  case Nx.DrvBad
+
+// a parse step: the value and the position after it, or a refusal
+enum Nx.Dp [A: Type]:
+  case Nx.DpAt(v: A, i: I64)
+  case Nx.DpNo
+
+// ---- hashes and store paths ------------------------------------------------------------------------------------
+
+def Nx.hashAlgo(s: Str): Coll.Option[Nx.HashAlgo] =
+  if Str.eq(s, "md5") then Coll.Some(Nx.HaMd5)
+  else if Str.eq(s, "sha1") then Coll.Some(Nx.HaSha1)
+  else if Str.eq(s, "sha256") then Coll.Some(Nx.HaSha256)
+  else if Str.eq(s, "sha512") then Coll.Some(Nx.HaSha512)
+  else Coll.None
+
+def Nx.algoName(a: Nx.HashAlgo): Str = a match
+  case Nx.HaMd5 => "md5"
+  case Nx.HaSha1 => "sha1"
+  case Nx.HaSha256 => "sha256"
+  case Nx.HaSha512 => "sha512"
+
+def Nx.algoSize(a: Nx.HashAlgo): I64 = a match
+  case Nx.HaMd5 => 16
+  case Nx.HaSha1 => 20
+  case Nx.HaSha256 => 32
+  case Nx.HaSha512 => 64
+
+// ContentAddressMethod::renderPrefix
+def Nx.methodPrefix(m: Nx.CaMethod): Str = m match
+  case Nx.CaFlat => ""
+  case Nx.CaNar => "r:"
+  case Nx.CaGit => "git:"
+  case Nx.CaText => "text:"
+
+def Nx.drvHasPrefix(s: Str, p: Str): Bool = Str.len(s) >= Str.len(p) && Str.eq(Str.slice(s, 0, Str.len(p)), p)
+
+def Nx.drvAfter(s: Str, n: I64): Str = Str.slice(s, n, Str.len(s))
+
+def Nx.withAlgo(m: Nx.CaMethod, s: Str): Coll.Option[Nx.MethodAlgo] = Nx.hashAlgo(s) match
+  case Coll.Some(a) => Coll.Some(Nx.MethodAlgo(m, a))
+  case Coll.None => Coll.None
+
+// ContentAddressMethod::parsePrefix, then parseHashAlgo
+def Nx.methodAlgo(s: Str): Coll.Option[Nx.MethodAlgo] =
+  if Nx.drvHasPrefix(s, "r:") then Nx.withAlgo(Nx.CaNar, Nx.drvAfter(s, 2))
+  else if Nx.drvHasPrefix(s, "git:") then Nx.withAlgo(Nx.CaGit, Nx.drvAfter(s, 4))
+  else if Nx.drvHasPrefix(s, "text:") then Nx.withAlgo(Nx.CaText, Nx.drvAfter(s, 5))
+  else Nx.withAlgo(Nx.CaFlat, s)
+
+def Nx.decoded(d: Str, n: I64): Coll.Option[Str] = if Str.len(d) == n then Coll.Some(d) else Coll.None
+
+// Hash::parseNonSRIUnprefixed: base16, nix32 or base64, told apart by length
+def Nx.parseDigest(a: Nx.HashAlgo, s: Str): Coll.Option[Str] =
+  val n = Nx.algoSize(a)
+  val l = Str.len(s)
+  if l == 2 * n then Nx.decoded(Nx.unb16(s), n)
+  else if l == (n * 8 - 1) / 5 + 1 then Nx.decoded(Nx.unb32(s), n)
+  else if l == 4 * ((n + 2) / 3) then Nx.decoded(Nx.unb64(s), n)
+  else Coll.None
+
+// makeStorePath: the SHA-256 (hex) of "type:sha256:HASH:/nix/store:name", compressed to 20 bytes, in nix32
+def Nx.storePath(type: Str, hashHex: Str, name: Str): Str =
+  val fp = Nx.cat(Nx.cat(Nx.cat(type, ":sha256:"), hashHex), Nx.cat(":/nix/store:", name))
+  Nx.cat(Nx.cat("/nix/store/", Nx.b32(Nx.foldHash(Nx.hashBytes(2, fp), 20))), Nx.cat("-", name))
+
+def Nx.sha256Hex(s: Str): Str = Nx.b16(Nx.hashBytes(2, s))
+
+// outputPathName
+def Nx.outputPathName(drvName: Str, output: Str): Str =
+  if Str.eq(output, "out") then drvName else Nx.cat(Nx.cat(drvName, "-"), output)
+
+// CAFixed::path = makeFixedOutputPathFromCA without references: text (SHA-256 only), source (NAR SHA-256), or
+// output:out of "fixed:out:METHOD:ALGO:HEX:"
+def Nx.fixedPath(drvName: Str, output: Str, m: Nx.CaMethod, a: Nx.HashAlgo, digest: Str): Str =
+  val pn = Nx.outputPathName(drvName, output)
+  val hex = Nx.b16(digest)
+  val sha = a match
+    case Nx.HaSha256 => true
+    case _ => false
+  m match
+    case Nx.CaText => Nx.storePath("text", hex, pn)
+    case Nx.CaNar => if sha then Nx.storePath("source", hex, pn) else Nx.fixedOut(m, a, hex, pn)
+    case _ => Nx.fixedOut(m, a, hex, pn)
+
+def Nx.fixedOut(m: Nx.CaMethod, a: Nx.HashAlgo, hex: Str, pn: Str): Str =
+  val payload = Nx.cat(Nx.cat(Nx.cat("fixed:out:", Nx.methodPrefix(m)), Nx.cat(Nx.algoName(a), ":")), Nx.cat(hex, ":"))
+  Nx.storePath("output:out", Nx.sha256Hex(payload), pn)
+
+// a fixed output that makeFixedOutputPathFromCA can name: text takes SHA-256 only (Nix asserts it), git SHA-1 or
+// SHA-256 (makeFixedOutputPath throws)
+def Nx.fixedOk(m: Nx.CaMethod, a: Nx.HashAlgo): Bool = m match
+  case Nx.CaText => a match
+    case Nx.HaSha256 => true
+    case _ => false
+  case Nx.CaGit => a match
+    case Nx.HaSha1 => true
+    case Nx.HaSha256 => true
+    case _ => false
+  case _ => true
+
+// ---- names (path.cc) -------------------------------------------------------------------------------------------
+
+def Nx.nix32Char(c: I64): Bool =
+  (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z' && c != 'e' && c != 'o' && c != 'u' && c != 't')
+
+def Nx.nix32Run(s: Str, i: I64, e: I64): Bool =
+  if i >= e then true else if Nx.nix32Char(Str.at(s, i)) then Nx.nix32Run(s, i + 1, e) else false
+
+def Nx.nameChar(c: I64): Bool =
+  (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '+' || c == '-' || c == '.' || c == '_' || c == '?' || c == '='
+
+def Nx.nameChars(s: Str, i: I64): Bool =
+  if i >= Str.len(s) then true else if Nx.nameChar(Str.at(s, i)) then Nx.nameChars(s, i + 1) else false
+
+// checkName: 1 to 211 bytes of [0-9a-zA-Z+._?=-], and "." or ".." is not the first dash-separated component
+def Nx.storeNameOk(s: Str): Bool =
+  val c0 = Str.at(s, 0)
+  val c1 = Str.at(s, 1)
+  val c2 = Str.at(s, 2)
+  val dots = c0 == '.' && (c1 < 0 || c1 == '-' || (c1 == '.' && (c2 < 0 || c2 == '-')))
+  Str.len(s) > 0 && Str.len(s) <= 211 && !dots && Nx.nameChars(s, 0)
+
+// parseStorePath in its canonical spelling: /nix/store/, 32 nix32 characters, "-", a valid name
+def Nx.isStorePath(p: Str): Bool =
+  Str.len(p) > 44 && Nx.drvHasPrefix(p, "/nix/store/") && Nx.nix32Run(p, 11, 43) && Str.at(p, 43) == '-' && Nx.storeNameOk(Nx.drvAfter(p, 44))
+
+def Nx.allStorePaths(xs: Coll.List[Str]): Bool = xs match
+  case Coll.Nil => true
+  case Coll.Cons(p, t) => if Nx.isStorePath(p) then Nx.allStorePaths(t) else false
+
+// the derivation name of a file: its base name without ".drv" and without a leading store path hash and "-"
+def Nx.lastSlash(s: Str, i: I64): I64 = if i < 0 || Str.at(s, i) == '/' then i else Nx.lastSlash(s, i - 1)
+
+def Nx.drvFileName(path: Str): Str =
+  val base = Nx.drvAfter(path, Nx.lastSlash(path, Str.len(path) - 1) + 1)
+  val l = Str.len(base)
+  val n = if l >= 4 && Str.eq(Str.slice(base, l - 4, l), ".drv") then Str.slice(base, 0, l - 4) else base
+  if Str.len(n) >= 33 && Str.at(n, 32) == '-' && Nx.nix32Run(n, 0, 32) then Nx.drvAfter(n, 33) else n
+
+// ---- parse -----------------------------------------------------------------------------------------------------
+
+def Nx.drvIs(s: Str, i: I64, w: Str): Bool = i + Str.len(w) <= Str.len(s) && Str.eq(Str.slice(s, i, i + Str.len(w)), w)
+
+// parseString escapes: \n \r \t, and a backslash before any other byte is that byte
+def Nx.unescape(c: I64): I64 = if c == 'n' then 10 else if c == 'r' then 13 else if c == 't' then 9 else c
+
+// the bytes of a quoted string from j, the run since b not yet copied into sb
+def Nx.dpStrRun(s: Str, b: I64, j: I64, sb: Ptr): Nx.Dp[Str] =
+  val c = Str.at(s, j)
+  if c == '"' then
+    Nx.sbAdd(sb, Str.slice(s, b, j))
+    Nx.DpAt(Nx.sbGet(sb), j + 1)
+  else if c == '\\' then
+    val e = Str.at(s, j + 1)
+    if e < 0 then Nx.DpNo
+    else
+      Nx.sbAdd(sb, Str.slice(s, b, j))
+      Nx.sbAdd(sb, Nx.byte(Nx.unescape(e)))
+      Nx.dpStrRun(s, j + 2, j + 2, sb)
+  else if c < 0 then Nx.DpNo
+  else Nx.dpStrRun(s, b, j + 1, sb)
+
+// parseString at i
+def Nx.dpStr(s: Str, i: I64): Nx.Dp[Str] = if Str.at(s, i) == '"' then Nx.dpStrRun(s, i + 1, i + 1, Nx.sbNew()) else Nx.DpNo
+
+// the byte c at i, then a string
+def Nx.dpStrAfter(s: Str, i: I64, c: I64): Nx.Dp[Str] = if Str.at(s, i) == c then Nx.dpStr(s, i + 1) else Nx.DpNo
+
+// v is above the previous entry (the head of acc), so the list is strictly ascending
+def Nx.aboveStr(v: Str, acc: Coll.List[Str]): Bool = acc match
+  case Coll.Nil => true
+  case Coll.Cons(p, _) => Nx.strLess(p, v)
+
+// a list of strings: "[" "]" or "[" S ("," S)* "]"; asc = a set, strictly ascending
+def Nx.dpStrs(s: Str, i: I64, asc: Bool): Nx.Dp[Coll.List[Str]] =
+  if Str.at(s, i) != '[' then Nx.DpNo
+  else if Str.at(s, i + 1) == ']' then Nx.DpAt(Coll.Nil, i + 2)
+  else Nx.dpStrsFrom(s, i + 1, asc, Coll.Nil)
+
+def Nx.dpStrsFrom(s: Str, i: I64, asc: Bool, acc: Coll.List[Str]): Nx.Dp[Coll.List[Str]] = Nx.dpStr(s, i) match
+  case Nx.DpNo => Nx.DpNo
+  case Nx.DpAt(v, j) =>
+    val c = Str.at(s, j)
+    if asc && !Nx.aboveStr(v, acc) then Nx.DpNo
+    else if c == ',' then Nx.dpStrsFrom(s, j + 1, asc, Coll.Cons(v, acc))
+    else if c == ']' then Nx.DpAt(Coll.rev(Coll.Cons(v, acc)), j + 1)
+    else Nx.DpNo
+
+// parseDerivationOutput(path, hashAlgo, hash)
+def Nx.outKind(path: Str, algo: Str, hash: Str): Coll.Option[Nx.DrvOut] =
+  if Str.len(algo) == 0 then
+    if Str.len(path) == 0 then Coll.Some(Nx.OutDeferred)
+    else if Nx.isStorePath(path) then Coll.Some(Nx.OutInput(path))
+    else Coll.None
+  else
+    Nx.methodAlgo(algo) match
+      case Coll.None => Coll.None
+      case Coll.Some(ma) => ma match
+        case Nx.MethodAlgo(m, a) =>
+          if Str.eq(hash, "impure") then
+            if Str.len(path) == 0 then Coll.Some(Nx.OutImpure(m, a)) else Coll.None
+          else if Str.len(hash) > 0 then
+            if Str.at(path, 0) == '/' && Nx.fixedOk(m, a) then Nx.outFixed(m, a, Nx.parseDigest(a, hash)) else Coll.None
+          else if Str.len(path) == 0 then Coll.Some(Nx.OutFloating(m, a))
+          else Coll.None
+
+def Nx.outFixed(m: Nx.CaMethod, a: Nx.HashAlgo, d: Coll.Option[Str]): Coll.Option[Nx.DrvOut] = d match
+  case Coll.Some(digest) => Coll.Some(Nx.OutFixed(m, a, digest))
+  case Coll.None => Coll.None
+
+// the store path of a fixed output must have a valid name
+def Nx.outNameOk(drvName: Str, name: Str, o: Nx.DrvOut): Bool = o match
+  case Nx.OutFixed(_, _, _) => Nx.storeNameOk(Nx.outputPathName(drvName, name))
+  case _ => true
+
+// ( "name" , "path" , "algo" , "hash" ) at i
+def Nx.dpOutput(s: Str, i: I64, drvName: Str): Nx.Dp[Nx.DrvOutput] = Nx.dpStrAfter(s, i, '(') match
+  case Nx.DpNo => Nx.DpNo
+  case Nx.DpAt(name, j) => Nx.dpStrAfter(s, j, ',') match
+    case Nx.DpNo => Nx.DpNo
+    case Nx.DpAt(path, k) => Nx.dpStrAfter(s, k, ',') match
+      case Nx.DpNo => Nx.DpNo
+      case Nx.DpAt(algo, l) => Nx.dpStrAfter(s, l, ',') match
+        case Nx.DpNo => Nx.DpNo
+        case Nx.DpAt(hash, m) =>
+          val kind = Nx.outKind(path, algo, hash)
+          kind match
+            case Coll.None => Nx.DpNo
+            case Coll.Some(o) =>
+              if Str.at(s, m) == ')' && Nx.outNameOk(drvName, name, o) then Nx.DpAt(Nx.DrvOutput(name, o), m + 1) else Nx.DpNo
+
+def Nx.aboveOutput(v: Nx.DrvOutput, acc: Coll.List[Nx.DrvOutput]): Bool = acc match
+  case Coll.Nil => true
+  case Coll.Cons(p, _) => p match
+    case Nx.DrvOutput(pn, _) => v match
+      case Nx.DrvOutput(vn, _) => Nx.strLess(pn, vn)
+
+def Nx.dpOutputs(s: Str, i: I64, drvName: Str): Nx.Dp[Coll.List[Nx.DrvOutput]] =
+  if Str.at(s, i) != '[' then Nx.DpNo
+  else if Str.at(s, i + 1) == ']' then Nx.DpAt(Coll.Nil, i + 2)
+  else Nx.dpOutputsFrom(s, i + 1, drvName, Coll.Nil)
+
+def Nx.dpOutputsFrom(s: Str, i: I64, drvName: Str, acc: Coll.List[Nx.DrvOutput]): Nx.Dp[Coll.List[Nx.DrvOutput]] =
+  Nx.dpOutput(s, i, drvName) match
+    case Nx.DpNo => Nx.DpNo
+    case Nx.DpAt(v, j) =>
+      val c = Str.at(s, j)
+      if !Nx.aboveOutput(v, acc) then Nx.DpNo
+      else if c == ',' then Nx.dpOutputsFrom(s, j + 1, drvName, Coll.Cons(v, acc))
+      else if c == ']' then Nx.DpAt(Coll.rev(Coll.Cons(v, acc)), j + 1)
+      else Nx.DpNo
+
+// parseDerivedPathMapNode: a set of outputs, or with dyn (xp-dyn-drv) also ( SET , [ ( "output" , NODE ) ... ] )
+def Nx.dpNode(s: Str, i: I64, dyn: Bool): Nx.Dp[Nx.DrvNode] =
+  val c = Str.at(s, i)
+  if c == '[' then
+    val r = Nx.dpStrs(s, i, true)
+    r match
+      case Nx.DpNo => Nx.DpNo
+      case Nx.DpAt(xs, j) => Nx.DpAt(Nx.DrvNode(xs, Coll.Nil), j)
+  else if c == '(' && dyn then
+    val r = Nx.dpStrs(s, i + 1, true)
+    r match
+      case Nx.DpNo => Nx.DpNo
+      case Nx.DpAt(xs, j) =>
+        if !Nx.drvIs(s, j, ",[") then Nx.DpNo
+        else if Str.at(s, j + 2) == ']' then Nx.dpNodeEnd(s, j + 3, xs, Coll.Nil)
+        else Nx.dpKids(s, j + 2, xs, Coll.Nil)
+  else Nx.DpNo
+
+def Nx.dpNodeEnd(s: Str, i: I64, xs: Coll.List[Str], kids: Coll.List[Nx.DrvKid]): Nx.Dp[Nx.DrvNode] =
+  if Str.at(s, i) == ')' then Nx.DpAt(Nx.DrvNode(xs, kids), i + 1) else Nx.DpNo
+
+def Nx.aboveKid(v: Str, acc: Coll.List[Nx.DrvKid]): Bool = acc match
+  case Coll.Nil => true
+  case Coll.Cons(p, _) => p match
+    case Nx.DrvKid(pn, _) => Nx.strLess(pn, v)
+
+def Nx.dpKids(s: Str, i: I64, xs: Coll.List[Str], acc: Coll.List[Nx.DrvKid]): Nx.Dp[Nx.DrvNode] = Nx.dpStrAfter(s, i, '(') match
+  case Nx.DpNo => Nx.DpNo
+  case Nx.DpAt(name, j) =>
+    if Str.at(s, j) != ',' || !Nx.aboveKid(name, acc) then Nx.DpNo
+    else
+      val r = Nx.dpNode(s, j + 1, true)
+      r match
+        case Nx.DpNo => Nx.DpNo
+        case Nx.DpAt(node, k) =>
+          val acc2 = Coll.Cons(Nx.DrvKid(name, node), acc)
+          if !Nx.drvIs(s, k, ")") then Nx.DpNo
+          else if Str.at(s, k + 1) == ',' then Nx.dpKids(s, k + 2, xs, acc2)
+          else if Str.at(s, k + 1) == ']' then Nx.dpNodeEnd(s, k + 2, xs, Coll.rev(acc2))
+          else Nx.DpNo
+
+def Nx.aboveInput(v: Str, acc: Coll.List[Nx.DrvInput]): Bool = acc match
+  case Coll.Nil => true
+  case Coll.Cons(p, _) => p match
+    case Nx.DrvInput(pp, _) => Nx.strLess(pp, v)
+
+def Nx.dpInputs(s: Str, i: I64, dyn: Bool): Nx.Dp[Coll.List[Nx.DrvInput]] =
+  if Str.at(s, i) != '[' then Nx.DpNo
+  else if Str.at(s, i + 1) == ']' then Nx.DpAt(Coll.Nil, i + 2)
+  else Nx.dpInputsFrom(s, i + 1, dyn, Coll.Nil)
+
+def Nx.dpInputsFrom(s: Str, i: I64, dyn: Bool, acc: Coll.List[Nx.DrvInput]): Nx.Dp[Coll.List[Nx.DrvInput]] =
+  Nx.dpStrAfter(s, i, '(') match
+    case Nx.DpNo => Nx.DpNo
+    case Nx.DpAt(path, j) =>
+      if Str.at(s, j) != ',' || !Nx.isStorePath(path) || !Nx.aboveInput(path, acc) then Nx.DpNo
+      else
+        val r = Nx.dpNode(s, j + 1, dyn)
+        r match
+          case Nx.DpNo => Nx.DpNo
+          case Nx.DpAt(node, k) =>
+            val acc2 = Coll.Cons(Nx.DrvInput(path, node), acc)
+            if !Nx.drvIs(s, k, ")") then Nx.DpNo
+            else if Str.at(s, k + 1) == ',' then Nx.dpInputsFrom(s, k + 2, dyn, acc2)
+            else if Str.at(s, k + 1) == ']' then Nx.DpAt(Coll.rev(acc2), k + 2)
+            else Nx.DpNo
+
+def Nx.aboveEnv(v: Str, acc: Coll.List[Nx.DrvEnv]): Bool = acc match
+  case Coll.Nil => true
+  case Coll.Cons(p, _) => p match
+    case Nx.DrvEnv(pn, _) => Nx.strLess(pn, v)
+
+def Nx.dpEnv(s: Str, i: I64): Nx.Dp[Coll.List[Nx.DrvEnv]] =
+  if Str.at(s, i) != '[' then Nx.DpNo
+  else if Str.at(s, i + 1) == ']' then Nx.DpAt(Coll.Nil, i + 2)
+  else Nx.dpEnvFrom(s, i + 1, Coll.Nil)
+
+def Nx.dpEnvFrom(s: Str, i: I64, acc: Coll.List[Nx.DrvEnv]): Nx.Dp[Coll.List[Nx.DrvEnv]] = Nx.dpStrAfter(s, i, '(') match
+  case Nx.DpNo => Nx.DpNo
+  case Nx.DpAt(name, j) =>
+    if !Nx.aboveEnv(name, acc) then Nx.DpNo
+    else
+      val r = Nx.dpStrAfter(s, j, ',')
+      r match
+        case Nx.DpNo => Nx.DpNo
+        case Nx.DpAt(raw, k) =>
+          val value = if Str.eq(name, "__json") then Nx.jNormal(raw) else Coll.Some(raw)
+          value match
+            case Coll.None => Nx.DpNo
+            case Coll.Some(v) => Nx.dpEnvNext(s, k, Coll.Cons(Nx.DrvEnv(name, v), acc))
+
+// after an env entry's value: ")" then "," or "]"
+def Nx.dpEnvNext(s: Str, k: I64, acc: Coll.List[Nx.DrvEnv]): Nx.Dp[Coll.List[Nx.DrvEnv]] =
+  if !Nx.drvIs(s, k, ")") then Nx.DpNo
+  else if Str.at(s, k + 1) == ',' then Nx.dpEnvFrom(s, k + 2, acc)
+  else if Str.at(s, k + 1) == ']' then Nx.DpAt(Coll.rev(acc), k + 2)
+  else Nx.DpNo
+
+// the fields after the outputs and their ","
+def Nx.dpRest(s: Str, i: I64, name: Str, outs: Coll.List[Nx.DrvOutput], dyn: Bool): Nx.DrvResult = Nx.dpInputs(s, i, dyn) match
+  case Nx.DpNo => Nx.DrvBad
+  case Nx.DpAt(ins, j) =>
+    val srcs = if Str.at(s, j) == ',' then Nx.dpStrs(s, j + 1, true) else Nx.DpNo
+    srcs match
+      case Nx.DpNo => Nx.DrvBad
+      case Nx.DpAt(src, k) =>
+        if !Nx.allStorePaths(src) then Nx.DrvBad
+        else Nx.dpStrAfter(s, k, ',') match
+          case Nx.DpNo => Nx.DrvBad
+          case Nx.DpAt(sys, l) => Nx.dpStrAfter(s, l, ',') match
+            case Nx.DpNo => Nx.DrvBad
+            case Nx.DpAt(builder, m) => Nx.dpTail(s, m, Nx.Drv(name, outs, ins, src, sys, builder, Coll.Nil, Coll.Nil))
+
+// , ARGS , ENV ) and the end of the input
+def Nx.dpTail(s: Str, i: I64, d: Nx.Drv): Nx.DrvResult =
+  val args = if Str.at(s, i) == ',' then Nx.dpStrs(s, i + 1, false) else Nx.DpNo
+  args match
+    case Nx.DpNo => Nx.DrvBad
+    case Nx.DpAt(xs, j) =>
+      val env = if Str.at(s, j) == ',' then Nx.dpEnv(s, j + 1) else Nx.DpNo
+      env match
+        case Nx.DpNo => Nx.DrvBad
+        case Nx.DpAt(es, k) =>
+          if k + 1 != Str.len(s) || Str.at(s, k) != ')' then Nx.DrvBad
+          else d match
+            case Nx.Drv(n, o, ins, src, sys, b, _, _) => Nx.DrvOk(Nx.Drv(n, o, ins, src, sys, b, xs, es))
+
+def Nx.dpBody(s: Str, i: I64, name: Str, dyn: Bool): Nx.DrvResult = Nx.dpOutputs(s, i, name) match
+  case Nx.DpNo => Nx.DrvBad
+  case Nx.DpAt(outs, j) => if Str.at(s, j) == ',' then Nx.dpRest(s, j + 1, name, outs, dyn) else Nx.DrvBad
+
+// parseDerivation: Derive( or DrvWithVersion("xp-dyn-drv", then the fields; name is the derivation's name
+def Nx.drvParse(bytes: Str, name: Str): Nx.DrvResult =
+  if !Nx.storeNameOk(Nx.cat(name, ".drv")) then Nx.DrvBad
+  else if Nx.drvIs(bytes, 0, "Derive(") then Nx.dpBody(bytes, 7, name, false)
+  else if Nx.drvIs(bytes, 0, "DrvWithVersion(") then
+    val v = Nx.dpStr(bytes, 15)
+    v match
+      case Nx.DpNo => Nx.DrvBad
+      case Nx.DpAt(ver, j) => if Str.eq(ver, "xp-dyn-drv") && Str.at(bytes, j) == ',' then Nx.dpBody(bytes, j + 1, name, true) else Nx.DrvBad
+  else Nx.DrvBad
+
+// ---- unparse ---------------------------------------------------------------------------------------------------
+
+// printUnquotedString
+def Nx.dwRaw(sb: Ptr, s: Str): Unit =
+  Nx.sbAdd(sb, "\"")
+  Nx.sbAdd(sb, s)
+  Nx.sbAdd(sb, "\"")
+
+def Nx.escapes(c: I64): Bool = c == '"' || c == '\\' || c == 10 || c == 13 || c == 9
+
+def Nx.escape(c: I64): Str = if c == 10 then "\\n" else if c == 13 then "\\r" else if c == 9 then "\\t" else Nx.cat("\\", Nx.byte(c))
+
+def Nx.dwEscRun(sb: Ptr, s: Str, b: I64, i: I64): Unit =
+  if i >= Str.len(s) then Nx.sbAdd(sb, Str.slice(s, b, i))
+  else if Nx.escapes(Str.at(s, i)) then
+    Nx.sbAdd(sb, Str.slice(s, b, i))
+    Nx.sbAdd(sb, Nx.escape(Str.at(s, i)))
+    Nx.dwEscRun(sb, s, i + 1, i + 1)
+  else Nx.dwEscRun(sb, s, b, i + 1)
+
+// printString: " \ newline CR tab escaped, every other byte as it is
+def Nx.dwEsc(sb: Ptr, s: Str): Unit =
+  Nx.sbAdd(sb, "\"")
+  Nx.dwEscRun(sb, s, 0, 0)
+  Nx.sbAdd(sb, "\"")
+
+def Nx.dwSep(sb: Ptr, first: Bool): Unit = if first then () else Nx.sbAdd(sb, ",")
+
+// the items of a list, escaped or not, then "]"
+def Nx.dwStrs(sb: Ptr, xs: Coll.List[Str], esc: Bool, first: Bool): Unit = xs match
+  case Coll.Nil => Nx.sbAdd(sb, "]")
+  case Coll.Cons(h, t) =>
+    Nx.dwSep(sb, first)
+    if esc then Nx.dwEsc(sb, h) else Nx.dwRaw(sb, h)
+    Nx.dwStrs(sb, t, esc, false)
+
+def Nx.dwOut3(sb: Ptr, a: Str, b: Str, c: Str): Unit =
+  Nx.sbAdd(sb, ",")
+  Nx.dwRaw(sb, a)
+  Nx.sbAdd(sb, ",")
+  Nx.dwRaw(sb, b)
+  Nx.sbAdd(sb, ",")
+  Nx.dwRaw(sb, c)
+
+def Nx.dwOut(sb: Ptr, drvName: Str, o: Nx.DrvOutput, mask: Bool): Unit = o match
+  case Nx.DrvOutput(name, kind) =>
+    Nx.sbAdd(sb, "(")
+    Nx.dwRaw(sb, name)
+    kind match
+      case Nx.OutInput(p) => Nx.dwOut3(sb, if mask then "" else p, "", "")
+      case Nx.OutFixed(m, a, dg) =>
+        val p = if mask then "" else Nx.fixedPath(drvName, name, m, a, dg)
+        Nx.dwOut3(sb, p, Nx.cat(Nx.methodPrefix(m), Nx.algoName(a)), Nx.b16(dg))
+      case Nx.OutFloating(m, a) => Nx.dwOut3(sb, "", Nx.cat(Nx.methodPrefix(m), Nx.algoName(a)), "")
+      case Nx.OutDeferred => Nx.dwOut3(sb, "", "", "")
+      case Nx.OutImpure(m, a) => Nx.dwOut3(sb, "", Nx.cat(Nx.methodPrefix(m), Nx.algoName(a)), "impure")
+    Nx.sbAdd(sb, ")")
+
+def Nx.dwOuts(sb: Ptr, drvName: Str, xs: Coll.List[Nx.DrvOutput], mask: Bool, first: Bool): Unit = xs match
+  case Coll.Nil => Nx.sbAdd(sb, "]")
+  case Coll.Cons(h, t) =>
+    Nx.dwSep(sb, first)
+    Nx.dwOut(sb, drvName, h, mask)
+    Nx.dwOuts(sb, drvName, t, mask, false)
+
+// unparseDerivedPathMapNode without its leading ","
+def Nx.dwNode(sb: Ptr, n: Nx.DrvNode): Unit = n match
+  case Nx.DrvNode(outs, kids) => kids match
+    case Coll.Nil =>
+      Nx.sbAdd(sb, "[")
+      Nx.dwStrs(sb, outs, false, true)
+    case _ =>
+      Nx.sbAdd(sb, "([")
+      Nx.dwStrs(sb, outs, false, true)
+      Nx.sbAdd(sb, ",[")
+      Nx.dwKids(sb, kids, true)
+      Nx.sbAdd(sb, "])")
+
+def Nx.dwKids(sb: Ptr, xs: Coll.List[Nx.DrvKid], first: Bool): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.dwSep(sb, first)
+    h match
+      case Nx.DrvKid(name, node) =>
+        Nx.sbAdd(sb, "(")
+        Nx.dwRaw(sb, name)
+        Nx.sbAdd(sb, ",")
+        Nx.dwNode(sb, node)
+        Nx.sbAdd(sb, ")")
+    Nx.dwKids(sb, t, false)
+
+def Nx.dwInputs(sb: Ptr, xs: Coll.List[Nx.DrvInput], first: Bool): Unit = xs match
+  case Coll.Nil => Nx.sbAdd(sb, "]")
+  case Coll.Cons(h, t) =>
+    Nx.dwSep(sb, first)
+    h match
+      case Nx.DrvInput(path, node) =>
+        Nx.sbAdd(sb, "(")
+        Nx.dwRaw(sb, path)
+        Nx.sbAdd(sb, ",")
+        Nx.dwNode(sb, node)
+        Nx.sbAdd(sb, ")")
+    Nx.dwInputs(sb, t, false)
+
+def Nx.isOutput(name: Str, xs: Coll.List[Nx.DrvOutput]): Bool = xs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvOutput(n, _) => if Str.eq(n, name) then true else Nx.isOutput(name, t)
+
+// env, the value of an output's name blank when masking
+def Nx.dwEnv(sb: Ptr, xs: Coll.List[Nx.DrvEnv], outs: Coll.List[Nx.DrvOutput], mask: Bool, first: Bool): Unit = xs match
+  case Coll.Nil => Nx.sbAdd(sb, "]")
+  case Coll.Cons(h, t) =>
+    Nx.dwSep(sb, first)
+    h match
+      case Nx.DrvEnv(name, value) =>
+        Nx.sbAdd(sb, "(")
+        Nx.dwEsc(sb, name)
+        Nx.sbAdd(sb, ",")
+        Nx.dwEsc(sb, if mask && Nx.isOutput(name, outs) then "" else value)
+        Nx.sbAdd(sb, ")")
+    Nx.dwEnv(sb, t, outs, mask, false)
+
+// hasDynamicDrvDep
+def Nx.hasDynDep(xs: Coll.List[Nx.DrvInput]): Bool = xs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvInput(_, node) => node match
+      case Nx.DrvNode(_, kids) => kids match
+        case Coll.Nil => Nx.hasDynDep(t)
+        case _ => true
+
+// Derivation::unparse (no actualInputs)
+def Nx.drvUnparse(d: Nx.Drv, maskOutputs: Bool): Str = d match
+  case Nx.Drv(name, outs, ins, srcs, sys, builder, args, env) =>
+    val sb = Nx.sbNew()
+    Nx.sbAdd(sb, if Nx.hasDynDep(ins) then "DrvWithVersion(\"xp-dyn-drv\",[" else "Derive([")
+    Nx.dwOuts(sb, name, outs, maskOutputs, true)
+    Nx.sbAdd(sb, ",[")
+    Nx.dwInputs(sb, ins, true)
+    Nx.sbAdd(sb, ",[")
+    Nx.dwStrs(sb, srcs, false, true)
+    Nx.sbAdd(sb, ",")
+    Nx.dwRaw(sb, sys)
+    Nx.sbAdd(sb, ",")
+    Nx.dwEsc(sb, builder)
+    Nx.sbAdd(sb, ",[")
+    Nx.dwStrs(sb, args, true, true)
+    Nx.sbAdd(sb, ",[")
+    Nx.dwEnv(sb, env, outs, maskOutputs, true)
+    Nx.sbAdd(sb, ")")
+    Nx.sbGet(sb)
+
+// ---- the path of a derivation ----------------------------------------------------------------------------------
+
+// ":PATH" for each reference: the union of the input derivations and sources, both ascending, in order
+def Nx.dwRefs(sb: Ptr, ins: Coll.List[Nx.DrvInput], srcs: Coll.List[Str]): Unit = ins match
+  case Coll.Nil => Nx.dwSrcRefs(sb, srcs)
+  case Coll.Cons(h, it) => h match
+    case Nx.DrvInput(p, _) => srcs match
+      case Coll.Nil => Nx.dwRef(sb, p, it, srcs)
+      case Coll.Cons(q, st) =>
+        if Nx.strLess(q, p) then Nx.dwRef(sb, q, ins, st)
+        else if Nx.strLess(p, q) then Nx.dwRef(sb, p, it, srcs)
+        else Nx.dwRef(sb, p, it, st)
+
+def Nx.dwRef(sb: Ptr, p: Str, ins: Coll.List[Nx.DrvInput], srcs: Coll.List[Str]): Unit =
+  Nx.sbAdd(sb, ":")
+  Nx.sbAdd(sb, p)
+  Nx.dwRefs(sb, ins, srcs)
+
+def Nx.dwSrcRefs(sb: Ptr, srcs: Coll.List[Str]): Unit = srcs match
+  case Coll.Nil => ()
+  case Coll.Cons(q, st) =>
+    Nx.sbAdd(sb, ":")
+    Nx.sbAdd(sb, q)
+    Nx.dwSrcRefs(sb, st)
+
+// computeStorePath given the ATerm: the text path of NAME.drv with the input derivations and sources as references
+def Nx.drvTextPath(d: Nx.Drv, aterm: Str): Str = d match
+  case Nx.Drv(name, _, ins, srcs, _, _, _, _) =>
+    val sb = Nx.sbNew()
+    Nx.sbAdd(sb, "text")
+    Nx.dwRefs(sb, ins, srcs)
+    Nx.storePath(Nx.sbGet(sb), Nx.sha256Hex(aterm), Nx.cat(name, ".drv"))
+
+def Nx.drvPath(d: Nx.Drv): Str = Nx.drvTextPath(d, Nx.drvUnparse(d, false))
+
+// the raw SHA-256 of the ATerm
+def Nx.drvHash(d: Nx.Drv): Str = Nx.hashBytes(2, Nx.drvUnparse(d, false))
+
+// ---- structured attrs: __json as nlohmann::json::parse reads it and dump() writes it ------------------------------
+
+enum Nx.Json:
+  case Nx.JLit(text: Str)
+  case Nx.JStr(s: Str)
+  case Nx.JArr(xs: Coll.List[Nx.Json])
+  case Nx.JObj(kvs: Coll.List[Nx.JKv])
+
+// a member of an object; an object's members are ascending by key, each key once
+enum Nx.JKv:
+  case Nx.JKv(k: Str, v: Nx.Json)
+
+def Nx.jWs(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if c == 32 || c == 9 || c == 10 || c == 13 then Nx.jWs(s, i + 1) else i
+
+def Nx.jDigit(c: I64): Bool = c >= '0' && c <= '9'
+
+def Nx.jDigits(s: Str, i: I64): I64 = if Nx.jDigit(Str.at(s, i)) then Nx.jDigits(s, i + 1) else i
+
+def Nx.jCont(c: I64): Bool = c >= 128 && c <= 191
+
+def Nx.jIn(c: I64, lo: I64, hi: I64): Bool = c >= lo && c <= hi
+
+// the length of the well-formed UTF-8 sequence at j that starts with a byte >= 0x80, 0 when there is none
+def Nx.utf8Len(s: Str, j: I64): I64 =
+  val c = Str.at(s, j)
+  val d = Str.at(s, j + 1)
+  if Nx.jIn(c, 194, 223) && Nx.jCont(d) then 2
+  else if (c == 224 && Nx.jIn(d, 160, 191)) || ((Nx.jIn(c, 225, 236) || c == 238 || c == 239) && Nx.jCont(d)) || (c == 237 && Nx.jIn(d, 128, 159)) then
+    if Nx.jCont(Str.at(s, j + 2)) then 3 else 0
+  else if (c == 240 && Nx.jIn(d, 144, 191)) || (Nx.jIn(c, 241, 243) && Nx.jCont(d)) || (c == 244 && Nx.jIn(d, 128, 143)) then
+    if Nx.jCont(Str.at(s, j + 2)) && Nx.jCont(Str.at(s, j + 3)) then 4 else 0
+  else 0
+
+// the code point cp in UTF-8
+def Nx.utf8(cp: I64): Str =
+  if cp < 128 then Nx.byte(cp)
+  else if cp < 2048 then Nx.cat(Nx.byte(192 + cp / 64), Nx.byte(128 + cp % 64))
+  else if cp < 65536 then Nx.cat(Nx.byte(224 + cp / 4096), Nx.cat(Nx.byte(128 + cp / 64 % 64), Nx.byte(128 + cp % 64)))
+  else Nx.cat(Nx.cat(Nx.byte(240 + cp / 262144), Nx.byte(128 + cp / 4096 % 64)), Nx.cat(Nx.byte(128 + cp / 64 % 64), Nx.byte(128 + cp % 64)))
+
+// four hex digits at i
+def Nx.jHex4(s: Str, i: I64, n: I64, acc: I64): Nx.Dp[I64] =
+  if n == 0 then Nx.DpAt(acc, i)
+  else
+    val h = Nx.tmHex(Str.at(s, i))
+    if h < 0 then Nx.DpNo else Nx.jHex4(s, i + 1, n - 1, acc * 16 + h)
+
+// \uXXXX at i (after the "u"); a high surrogate needs a low one after it
+def Nx.jUni(s: Str, i: I64): Nx.Dp[Str] = Nx.jHex4(s, i, 4, 0) match
+  case Nx.DpNo => Nx.DpNo
+  case Nx.DpAt(hi, j) =>
+    if Nx.jIn(hi, 56320, 57343) then Nx.DpNo
+    else if !Nx.jIn(hi, 55296, 56319) then Nx.DpAt(Nx.utf8(hi), j)
+    else if !Nx.drvIs(s, j, "\\u") then Nx.DpNo
+    else
+      val r = Nx.jHex4(s, j + 2, 4, 0)
+      r match
+        case Nx.DpNo => Nx.DpNo
+        case Nx.DpAt(lo, k) =>
+          if Nx.jIn(lo, 56320, 57343) then Nx.DpAt(Nx.utf8(65536 + (hi - 55296) * 1024 + lo - 56320), k) else Nx.DpNo
+
+// the escape at i (after the backslash)
+def Nx.jEsc(s: Str, i: I64): Nx.Dp[Str] =
+  val e = Str.at(s, i)
+  if e == '"' || e == '\\' || e == '/' then Nx.DpAt(Nx.byte(e), i + 1)
+  else if e == 'b' then Nx.DpAt(Nx.byte(8), i + 1)
+  else if e == 'f' then Nx.DpAt(Nx.byte(12), i + 1)
+  else if e == 'n' then Nx.DpAt(Nx.byte(10), i + 1)
+  else if e == 'r' then Nx.DpAt(Nx.byte(13), i + 1)
+  else if e == 't' then Nx.DpAt(Nx.byte(9), i + 1)
+  else if e == 'u' then Nx.jUni(s, i + 1)
+  else Nx.DpNo
+
+// a string from j, the run since b not yet copied into sb: no control byte, valid UTF-8
+def Nx.jStrRun(s: Str, b: I64, j: I64, sb: Ptr): Nx.Dp[Str] =
+  val c = Str.at(s, j)
+  if c == '"' then
+    Nx.sbAdd(sb, Str.slice(s, b, j))
+    Nx.DpAt(Nx.sbGet(sb), j + 1)
+  else if c == '\\' then
+    Nx.sbAdd(sb, Str.slice(s, b, j))
+    val r = Nx.jEsc(s, j + 1)
+    r match
+      case Nx.DpNo => Nx.DpNo
+      case Nx.DpAt(e, k) =>
+        Nx.sbAdd(sb, e)
+        Nx.jStrRun(s, k, k, sb)
+  else if c < 32 then Nx.DpNo
+  else if c < 128 then Nx.jStrRun(s, b, j + 1, sb)
+  else
+    val n = Nx.utf8Len(s, j)
+    if n == 0 then Nx.DpNo else Nx.jStrRun(s, b, j + n, sb)
+
+// an integer from i, as dump() writes it: -0 is 0; beyond int64 below and uint64 above it is a double
+def Nx.jNum(s: Str, i: I64): Nx.Dp[Nx.Json] =
+  val a = if Str.at(s, i) == '-' then i + 1 else i
+  val c = Str.at(s, a)
+  if !Nx.jDigit(c) then Nx.DpNo
+  else
+    val e = if c == '0' then a + 1 else Nx.jDigits(s, a + 1)
+    val f = Str.at(s, e)
+    val t = Str.slice(s, i, e)
+    val big = if a > i then Nx.intOverflows(t) else e - a > 20 || (e - a == 20 && Nx.strLess("18446744073709551615", t))
+    if f == '.' || f == 'e' || f == 'E' || big then Nx.DpNo
+    else if Str.eq(t, "-0") then Nx.DpAt(Nx.JLit("0"), e)
+    else Nx.DpAt(Nx.JLit(t), e)
+
+def Nx.jValue(s: Str, i: I64): Nx.Dp[Nx.Json] =
+  val j = Nx.jWs(s, i)
+  val c = Str.at(s, j)
+  if c == '{' then Nx.jObj(s, Nx.jWs(s, j + 1))
+  else if c == '[' then Nx.jArr(s, Nx.jWs(s, j + 1))
+  else if c == '"' then
+    val r = Nx.jStrRun(s, j + 1, j + 1, Nx.sbNew())
+    r match
+      case Nx.DpNo => Nx.DpNo
+      case Nx.DpAt(v, k) => Nx.DpAt(Nx.JStr(v), k)
+  else if Nx.drvIs(s, j, "true") then Nx.DpAt(Nx.JLit("true"), j + 4)
+  else if Nx.drvIs(s, j, "false") then Nx.DpAt(Nx.JLit("false"), j + 5)
+  else if Nx.drvIs(s, j, "null") then Nx.DpAt(Nx.JLit("null"), j + 4)
+  else Nx.jNum(s, j)
+
+def Nx.jArr(s: Str, i: I64): Nx.Dp[Nx.Json] =
+  if Str.at(s, i) == ']' then Nx.DpAt(Nx.JArr(Coll.Nil), i + 1) else Nx.jItems(s, i, Coll.Nil)
+
+def Nx.jItems(s: Str, i: I64, acc: Coll.List[Nx.Json]): Nx.Dp[Nx.Json] = Nx.jValue(s, i) match
+  case Nx.DpNo => Nx.DpNo
+  case Nx.DpAt(v, j) =>
+    val k = Nx.jWs(s, j)
+    val c = Str.at(s, k)
+    if c == ',' then Nx.jItems(s, k + 1, Coll.Cons(v, acc))
+    else if c == ']' then Nx.DpAt(Nx.JArr(Coll.rev(Coll.Cons(v, acc))), k + 1)
+    else Nx.DpNo
+
+// k := v in the ascending members xs (object_t is a std::map; the parser assigns each key, so the last one stays)
+def Nx.jPut(xs: Coll.List[Nx.JKv], k: Str, v: Nx.Json): Coll.List[Nx.JKv] = xs match
+  case Coll.Nil => Coll.Cons(Nx.JKv(k, v), Coll.Nil)
+  case Coll.Cons(h, t) => h match
+    case Nx.JKv(hk, _) =>
+      if Nx.strLess(k, hk) then Coll.Cons(Nx.JKv(k, v), xs)
+      else if Str.eq(k, hk) then Coll.Cons(Nx.JKv(k, v), t)
+      else Coll.Cons(h, Nx.jPut(t, k, v))
+
+def Nx.jObj(s: Str, i: I64): Nx.Dp[Nx.Json] =
+  if Str.at(s, i) == '}' then Nx.DpAt(Nx.JObj(Coll.Nil), i + 1) else Nx.jMembers(s, i, Coll.Nil)
+
+// "key" : value at i (after blanks), then "," or "}"
+def Nx.jMembers(s: Str, i: I64, acc: Coll.List[Nx.JKv]): Nx.Dp[Nx.Json] =
+  val r = if Str.at(s, i) == '"' then Nx.jStrRun(s, i + 1, i + 1, Nx.sbNew()) else Nx.DpNo
+  r match
+    case Nx.DpNo => Nx.DpNo
+    case Nx.DpAt(k, j) =>
+      val l = Nx.jWs(s, j)
+      val v = if Str.at(s, l) == ':' then Nx.jValue(s, l + 1) else Nx.DpNo
+      v match
+        case Nx.DpNo => Nx.DpNo
+        case Nx.DpAt(x, m) =>
+          val n = Nx.jWs(s, m)
+          val c = Str.at(s, n)
+          if c == ',' then Nx.jMembers(s, Nx.jWs(s, n + 1), Nx.jPut(acc, k, x))
+          else if c == '}' then Nx.DpAt(Nx.JObj(Nx.jPut(acc, k, x)), n + 1)
+          else Nx.DpNo
+
+// dump(): " \ and bytes below 0x20 escaped (\b \t \n \f \r or \u00xx), every other byte as it is
+def Nx.jEscapes(c: I64): Bool = c == '"' || c == '\\' || c < 32
+
+def Nx.jEscape(c: I64): Str =
+  if c == '"' then "\\\""
+  else if c == '\\' then "\\\\"
+  else if c == 8 then "\\b"
+  else if c == 9 then "\\t"
+  else if c == 10 then "\\n"
+  else if c == 12 then "\\f"
+  else if c == 13 then "\\r"
+  else Nx.cat("\\u00", Nx.b16(Nx.byte(c)))
+
+def Nx.jDumpRun(sb: Ptr, s: Str, b: I64, i: I64): Unit =
+  if i >= Str.len(s) then Nx.sbAdd(sb, Str.slice(s, b, i))
+  else if Nx.jEscapes(Str.at(s, i)) then
+    Nx.sbAdd(sb, Str.slice(s, b, i))
+    Nx.sbAdd(sb, Nx.jEscape(Str.at(s, i)))
+    Nx.jDumpRun(sb, s, i + 1, i + 1)
+  else Nx.jDumpRun(sb, s, b, i + 1)
+
+def Nx.jDumpStr(sb: Ptr, s: Str): Unit =
+  Nx.sbAdd(sb, "\"")
+  Nx.jDumpRun(sb, s, 0, 0)
+  Nx.sbAdd(sb, "\"")
+
+def Nx.jDump(sb: Ptr, v: Nx.Json): Unit = v match
+  case Nx.JLit(t) => Nx.sbAdd(sb, t)
+  case Nx.JStr(s) => Nx.jDumpStr(sb, s)
+  case Nx.JArr(xs) =>
+    Nx.sbAdd(sb, "[")
+    Nx.jDumpItems(sb, xs, true)
+    Nx.sbAdd(sb, "]")
+  case Nx.JObj(kvs) =>
+    Nx.sbAdd(sb, "{")
+    Nx.jDumpMembers(sb, kvs, true)
+    Nx.sbAdd(sb, "}")
+
+def Nx.jDumpItems(sb: Ptr, xs: Coll.List[Nx.Json], first: Bool): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.dwSep(sb, first)
+    Nx.jDump(sb, h)
+    Nx.jDumpItems(sb, t, false)
+
+def Nx.jDumpMembers(sb: Ptr, xs: Coll.List[Nx.JKv], first: Bool): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.dwSep(sb, first)
+    h match
+      case Nx.JKv(k, v) =>
+        Nx.jDumpStr(sb, k)
+        Nx.sbAdd(sb, ":")
+        Nx.jDump(sb, v)
+    Nx.jDumpMembers(sb, t, false)
+
+// StructuredAttrs::parse then unparse: s holds one JSON object (after a UTF-8 BOM, blanks around it)
+def Nx.jNormal(s: Str): Coll.Option[Str] =
+  val start = if Nx.drvIs(s, 0, Nx.utf8(65279)) then 3 else 0
+  Nx.jValue(s, start) match
+    case Nx.DpNo => Coll.None
+    case Nx.DpAt(v, i) =>
+      if Nx.jWs(s, i) != Str.len(s) then Coll.None
+      else v match
+        case Nx.JObj(_) =>
+          val sb = Nx.sbNew()
+          Nx.jDump(sb, v)
+          Coll.Some(Nx.sbGet(sb))
+        case _ => Coll.None

@@ -7,6 +7,7 @@
 enum Nx.Op:
   case Nx.OpParse
   case Nx.OpNar
+  case Nx.OpDrv
   case Nx.OpCheck
   case Nx.OpEval
   case Nx.OpUnknown
@@ -14,6 +15,7 @@ enum Nx.Op:
 def Nx.op(s: Str): Nx.Op =
   if Str.eq(s, "parse") then Nx.OpParse
   else if Str.eq(s, "nar") then Nx.OpNar
+  else if Str.eq(s, "drv") then Nx.OpDrv
   else if Str.eq(s, "check") then Nx.OpCheck
   else if Str.eq(s, "eval") then Nx.OpEval
   else Nx.OpUnknown
@@ -49,6 +51,21 @@ def Nx.answerNar(src: Str): I64 =
       Console.print("\n")
       0
     case Nx.NarBad =>
+      Console.print("error\n")
+      0
+
+// SPEC.md "drv": `ok DRVPATH SHA256` or `error`; the name comes from the file name
+def Nx.answerDrv(path: Str, src: Str): I64 =
+  Nx.drvParse(src, Nx.drvFileName(path)) match
+    case Nx.DrvOk(d) =>
+      val aterm = Nx.drvUnparse(d, false)
+      Console.print("ok ")
+      Console.print(Nx.drvTextPath(d, aterm))
+      Console.print(" ")
+      Console.print(Nx.sha256Hex(aterm))
+      Console.print("\n")
+      0
+    case Nx.DrvBad =>
       Console.print("error\n")
       0
 
@@ -115,7 +132,7 @@ def main(): I64 =
   handle a = Srs.Args()
   handle f = Srs.Files()
   if Args.count() < 3 then
-    Console.eprint("usage: snx parse|nar|check|eval FILE\n")
+    Console.eprint("usage: snx parse|nar|drv|check|eval FILE\n")
     2
   else
     val src = Files.read(Args.at(2))
@@ -126,6 +143,7 @@ def main(): I64 =
       Nx.op(Args.at(1)) match
         case Nx.OpParse => Nx.answerParse(src)
         case Nx.OpNar => Nx.answerNar(src)
+        case Nx.OpDrv => Nx.answerDrv(Args.at(2), src)
         case Nx.OpCheck => Nx.answerCheck(Args.at(2), src)
         case Nx.OpEval => Nx.answerEval(Args.at(2))
         case Nx.OpUnknown => 3

@@ -302,3 +302,11 @@ srs_str Nx__unb64(srs_str s) {
   }
   return (srs_str){o, k};
 }
+
+// compressHash (hash.cc): byte i of h is XORed into byte i % n of the n-byte result
+srs_str Nx__foldHash(srs_str h, int64_t n) {
+  uint8_t* p = h_alloc(n);
+  memset(p, 0, (size_t)n);
+  for (int64_t i = 0; i < h.n; i++) p[i % n] ^= h.p[i];
+  return (srs_str){p, n};
+}

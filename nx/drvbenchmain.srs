@@ -1,0 +1,20 @@
+// unparse + SHA-256 the derivation in argv[1] argv[2] times (Nx.drvPath's hot part); print the last drv path
+def Nx.drvBench(d: Nx.Drv, n: I64, acc: I64): I64 =
+  if n == 0 then acc else Nx.drvBench(d, n - 1, acc + Str.len(Nx.drvHash(d)))
+
+def main(): I64 =
+  handle r = Srs.Arena()
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  val src = Files.read(Args.at(1))
+  Nx.drvParse(src, Nx.drvFileName(Args.at(1))) match
+    case Nx.DrvBad =>
+      Console.print("error\n")
+      1
+    case Nx.DrvOk(d) =>
+      Console.printI64(Nx.drvBench(d, Nx.intValue(Args.at(2)), 0))
+      Console.print(" ")
+      Console.print(Nx.drvPath(d))
+      Console.print("\n")
+      0

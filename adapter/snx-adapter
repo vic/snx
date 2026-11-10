@@ -7,6 +7,7 @@ snx=${SNX:-${XDG_RUNTIME_DIR:-/tmp}/snx-build/snx}
 case $op in
   parse) exec timeout 5 "$snx" parse "$file" ;;
   nar) exec timeout 5 "$snx" nar "$file" ;;
+  drv) exec timeout 5 "$snx" drv "$file" ;;
   check) exec timeout 5 "$snx" check "$(realpath -s "$file")" ;;
   eval) exec timeout 5 "$snx" eval "$(realpath -s "$file")" "$@" ;;
   *) exit 3 ;;
