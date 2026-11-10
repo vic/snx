@@ -196,10 +196,10 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
     b match
       case Nx.VBool(x) => if x then Nx.eval(env, t) else Nx.eval(env, e)
       case _ => Nx.typeErr("a Boolean", b)
-  case Nx.CAssert(cnd, body, line, col) =>
+  case Nx.CAssert(cnd, body, src, p) =>
     val b = Nx.eval(env, cnd)
     b match
-      case Nx.VBool(x) => if x then Nx.eval(env, body) else Nx.assertErr(line, col)
+      case Nx.VBool(x) => if x then Nx.eval(env, body) else Nx.assertErr(src, p)
       case _ => Nx.typeErr("a Boolean", b)
   case Nx.CNot(a) =>
     val b = Nx.eval(env, a)
@@ -230,8 +230,9 @@ def Nx.evalBool(env: Ptr, c: Nx.Code): Nx.Val =
     case Nx.VBool(_) => v
     case _ => Nx.typeErr("a Boolean", v)
 
-def Nx.assertErr(line: I64, col: I64): Nx.Val =
-  Nx.VErr(Nx.KAssert, Nx.cat(Nx.cat(Nx.cat("assertion failed at ", Nx.intStr(line)), ":"), Nx.intStr(col)))
+def Nx.assertErr(src: Str, p: I64): Nx.Val = Nx.lineCol(src, p) match
+  case Nx.LineCol(line, col) =>
+    Nx.VErr(Nx.KAssert, Nx.cat(Nx.cat(Nx.cat("assertion failed at ", Nx.intStr(line)), ":"), Nx.intStr(col)))
 
 // [L:A4] the with frames innermost first; slot 1 of each is the set, forced here
 def Nx.withVar(env: Ptr, sym: I64, ups: Coll.List[I64], name: Str): Nx.Val = ups match

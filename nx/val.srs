@@ -76,7 +76,7 @@ enum Nx.Code:
   case Nx.CSelect(e: Nx.Code, path: Coll.List[Nx.CKey], dflt: Coll.Option[Nx.Code])
   case Nx.CHas(e: Nx.Code, path: Coll.List[Nx.CKey])
   case Nx.CIf(c: Nx.Code, t: Nx.Code, e: Nx.Code)
-  case Nx.CAssert(c: Nx.Code, b: Nx.Code, line: I64, col: I64)
+  case Nx.CAssert(c: Nx.Code, b: Nx.Code, src: Str, p: I64)    // p = the offset in src: LINE:COL only when it fails
   case Nx.CNot(a: Nx.Code)
   case Nx.CAnd(a: Nx.Code, b: Nx.Code)
   case Nx.COr(a: Nx.Code, b: Nx.Code)
