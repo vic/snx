@@ -369,3 +369,12 @@ srs_str Nx__blake3(srs_str s) {
   for (int i = 0; i < 8; i++) { r[4*i] = (uint8_t)out[i]; r[4*i+1] = (uint8_t)(out[i] >> 8); r[4*i+2] = (uint8_t)(out[i] >> 16); r[4*i+3] = (uint8_t)(out[i] >> 24); }
   return fs_mk(r, 32);
 }
+// a loaded file's position records (posGet/posPut above): their file and source cells were in the freed arena;
+// Nx.posMove puts the current file's cells in the record under old and registers it under key too
+static void* g_pos_file; static void* g_pos_src;
+int64_t Nx__posCells(void* file, void* src) { g_pos_file = file; g_pos_src = src; return 0; }
+int64_t Nx__posMove(void* old, void* key) {
+  void** r = Nx__posGet(old);
+  if (r) { r[0] = g_pos_file; r[1] = g_pos_src; if (key != old) Nx__posPut(key, r); }
+  return 0;
+}

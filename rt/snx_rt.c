@@ -606,13 +606,3 @@ void* Nx__wbGetP(nx_wb* b) { return (void*)b->w[b->rd++]; }
 int64_t Nx__wbPutS(nx_wb* b, srs_str s) { Nx__wbPut(b, (int64_t)s.p); return Nx__wbPut(b, s.n); }
 srs_str Nx__wbGetS(nx_wb* b) { const uint8_t* p = (const uint8_t*)b->w[b->rd++]; return (srs_str){p, b->w[b->rd++]}; }
 int64_t Nx__wbFree(nx_wb* b) { free(b->w); free(b); return 0; }
-// a loaded file's position records (rt/snx_fs.c posGet/posPut): their file and source cells were in the freed arena;
-// Nx.posMove puts the current file's cells in the record under old and registers it under key too
-void* Nx__posGet(void* key); int64_t Nx__posPut(void* key, void* val);
-static void* g_pos_file; static void* g_pos_src;
-int64_t Nx__posCells(void* file, void* src) { g_pos_file = file; g_pos_src = src; return 0; }
-int64_t Nx__posMove(void* old, void* key) {
-  void** r = Nx__posGet(old);
-  if (r) { r[0] = g_pos_file; r[1] = g_pos_src; if (key != old) Nx__posPut(key, r); }
-  return 0;
-}
