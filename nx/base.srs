@@ -2,7 +2,7 @@
 // file sees before its own bindings, each with its cell. A name `__x` is `__x` in scope and `x` in builtins; any other
 // name is both (eval.cc:536-538). Built once per run: Nx.globals() keeps it (slots in Nx.gBase..).
 
-// the run-wide words of Nx.globals() (16 in rt/snx_rt.c): every slot is defined here, nowhere else, so no two share a number
+// the run-wide words of Nx.globals() (20 in rt/snx_rt.c): every slot is defined here, nowhere else, so no two share a number
 def Nx.gReady(): I64 = 0
 def Nx.gBase(): I64 = 1
 def Nx.gKinds(): I64 = 2
@@ -20,6 +20,8 @@ def Nx.gStore(): I64 = 13
 def Nx.gSrcs(): I64 = 14
 // the --lint-* settings, a base-4 digit each (0 off, 1 warn, 2 fatal): absolute-path-literals at unit 1, short-path-literals 4, url-literals 16
 def Nx.gLint(): I64 = 15
+// the symbol of the file being parsed, for lint warnings
+def Nx.gFile(): I64 = 16
 
 // the integers 0 until Nx.smallInts() are made once, as the Booleans
 def Nx.smallInts(): I64 = 256
@@ -81,6 +83,15 @@ def Nx.bsPrim(b: Nx.BB, name: Str, arity: I64, k: Nx.Prim): Unit = b match
     Nx.aseti(pn, id, Nx.intern(Nx.bareName(name)))
     Nx.aseti(cnt, 2, id + 1)
     Nx.bsConst(b, name, Nx.VPrim(id, arity))
+
+// a primop only the scope has, not `builtins` (for snx's own wrapper expressions)
+def Nx.bsPrimScope(b: Nx.BB, name: Str, arity: I64, k: Nx.Prim): Unit = b match
+  case Nx.BB(_, _, _, _, pk, pn, cnt) =>
+    val id = Nx.ageti(cnt, 2)
+    Nx.aset[Nx.Prim](pk, id, k)
+    Nx.aseti(pn, id, Nx.intern(name))
+    Nx.aseti(cnt, 2, id + 1)
+    Nx.bbScope(b, Nx.intern(name), Nx.cell(Nx.VPrim(id, arity)))
 
 // a primop of a later wave: it exists, and calling it fails honestly
 def Nx.bsTodo(b: Nx.BB, name: Str, arity: I64): Unit = Nx.bsPrim(b, name, arity, Nx.PTodo)
@@ -181,6 +192,7 @@ def Nx.bsPrims(b: Nx.BB): Unit =
   Nx.bsPrim(b, "__stringLength", 1, Nx.PStringLength)
   Nx.bsPrim(b, "__substring", 3, Nx.PSubstring)
   Nx.bsPrim(b, "__functionArgs", 1, Nx.PFunctionArgs)
+  Nx.bsPrimScope(b, "__snxHasFormals", 1, Nx.PHasFormals)
   Nx.bsPrim(b, "__mapAttrs", 2, Nx.PMapAttrs)
   Nx.bsPrim(b, "__intersectAttrs", 2, Nx.PIntersectAttrs)
   Nx.bsPrim(b, "__catAttrs", 2, Nx.PCatAttrs)

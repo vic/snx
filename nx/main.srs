@@ -123,8 +123,7 @@ def Nx.flagsOk(i: I64): Bool =
     else if Str.eq(f, "--lint-url-literals") && i + 1 < Args.count() then Nx.lintSet(16, Args.at(i + 1)) && Nx.flagsOk(i + 2)
     else false
 
-// the lint at `unit` of Nx.gLint set to warn or fatal; false for a mode snx does not know. A warning is not printed
-// (nix-conformance compares stdout and the exit code only).
+// the lint at `unit` of Nx.gLint set to warn or fatal; false for a mode snx does not know. A warning goes to stderr (Nx.lintWarn)
 def Nx.lintSet(unit: I64, mode: Str): Bool =
   val g = Nx.globals()
   if Str.eq(mode, "warn") then
@@ -137,8 +136,7 @@ def Nx.lintSet(unit: I64, mode: Str): Bool =
 
 // ---- auto arguments (nix-instantiate.cc, attr-path.cc findAlongAttrPath, get-drvs autoCallFunction) --------------------
 // --arg/--argstr/-A are done by evaluating a wrapper expression around `import FILE`.
-// shortcut: a function written `{ ... }:` with no named formals is not auto-called (the wrapper cannot tell it from `x:`),
-// and the 2nd and later -A are refused (exit 3); upgrade with a primop that tests for formals
+// shortcut: the 2nd and later -A are refused (exit 3); upgrade by running the wrapper once per -A
 
 // the flag `f` among Args from i on, counted
 def Nx.flagCount(i: I64, f: Str, g: Str): I64 =
@@ -199,7 +197,7 @@ def Nx.autoSrc(path: Str): Str =
   val sb = Nx.sbNew()
   Nx.sbAdd(sb, "let\n__args = {\n")
   Nx.autoBinds(3, sb)
-  Nx.sbAdd(sb, "};\n__auto = f: if builtins.isFunction f && builtins.functionArgs f != {} then f (builtins.intersectAttrs (builtins.functionArgs f) __args) else f;\n")
+  Nx.sbAdd(sb, "};\n__auto = f: if __snxHasFormals f then f (builtins.intersectAttrs (builtins.functionArgs f) __args) else f;\n")
   Nx.sbAdd(sb, "__s = v: k: if builtins.isList v && builtins.match \"[0-9]+\" k != null then builtins.elemAt v (builtins.fromJSON k) else v.${k};\nin __auto ")
   val root = Nx.cat(Nx.cat("(import (builtins.toPath ", Nx.nixStr(path)), "))")
   Nx.sbAdd(sb, Nx.autoSel(root, Nx.autoPath(3), 0, 0))

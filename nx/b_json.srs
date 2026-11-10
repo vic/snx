@@ -123,7 +123,7 @@ def Nx.jExp(s: Str, i: I64): I64 =
 
 def Nx.jNumVal(t: Str, isInt: Bool, neg: Bool, e: I64, s: Str, st: Coll.List[Nx.JFrame]): Nx.JR =
   if isInt && !Nx.intOverflows(t) then Nx.jDone(s, e, st, Nx.VInt(Nx.intValue(t)))
-  else if isInt && !neg then Nx.jBad("unsigned json number outside of Nix integer range")
+  else if isInt && !neg && !Nx.jBeyondU64(t) then Nx.jBad("unsigned json number outside of Nix integer range")
   else Nx.jDone(s, e, st, Nx.VFloat(Nx.floatBits(t)))
 
 def Nx.jLit(s: Str, i: I64, w: Str, v: Nx.Val, st: Coll.List[Nx.JFrame]): Nx.JR =
@@ -429,3 +429,6 @@ def Nx.pToXml(v: Nx.Val): Nx.Val = Nx.xmlDoc(v)
 def Nx.jRunEnd(s: Str, i: I64): I64 =
   val c = Str.at(s, i)
   if c < 32 || c == '"' || c == '\\' then i else Nx.jRunEnd(s, i + 1)
+
+// the digits t of a non-negative integer exceed uint64: nlohmann reads them as a double
+def Nx.jBeyondU64(t: Str): Bool = Str.len(t) > 20 || (Str.len(t) == 20 && Nx.strLess("18446744073709551615", t))

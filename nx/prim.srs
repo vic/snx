@@ -46,6 +46,7 @@ enum Nx.Prim:
   case Nx.PStringLength
   case Nx.PSubstring
   case Nx.PFunctionArgs
+  case Nx.PHasFormals
   case Nx.PMapAttrs
   case Nx.PIntersectAttrs
   case Nx.PCatAttrs
@@ -172,6 +173,7 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
         case _ => s
     case Nx.PSubstring => Nx.pSubstring(Nx.force(a), Nx.force(b), c)
     case Nx.PFunctionArgs => Nx.pFunctionArgs(Nx.force(a))
+    case Nx.PHasFormals => Nx.bool(Nx.pHasFormals(Nx.force(a)))
     case Nx.PMapAttrs => Nx.pMapAttrs(a, Nx.force(b))
     case Nx.PIntersectAttrs => Nx.pIntersect(Nx.force(a), Nx.force(b))
     case Nx.PCatAttrs => Nx.pCatAttrs(Nx.force(a), Nx.force(b))
@@ -883,3 +885,10 @@ def Nx.importFile(p0: Str): Nx.Val =
           Nx.force(c)
         case Nx.LoadUndefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
         case Nx.LoadBad => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))
+
+// the auto-call test of --arg/-A (nix-instantiate autoCallFunction): a lambda written with a formals set, `{ ... }:` included
+def Nx.pHasFormals(f: Nx.Val): Bool = f match
+  case Nx.VLam(_, code) => code match
+    case Nx.CLam(_, _, _, _, _, _, _) => true
+    case _ => false
+  case _ => false

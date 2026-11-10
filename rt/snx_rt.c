@@ -309,7 +309,7 @@ srs_str Nx__floatShow(int64_t bits) {
 #include <sys/stat.h>
 
 // sixteen zeroed words for run-wide state (the base env, the primop table, the call depth): nx/base.srs
-void* Nx__globals(void) { static void* g[16]; return g; }
+void* Nx__globals(void) { static void* g[20]; return g; }
 bool Nx__ptrEq(void* a, void* b) { return a == b; }
 // the n slots of frame f (a set built from a rec frame shares them)
 void* Nx__slots(void** f) { return f + 1; }

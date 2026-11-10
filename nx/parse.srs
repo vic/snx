@@ -533,7 +533,8 @@ def Nx.psSimple(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
   case Nx.TInt(v, p) => Nx.POk(Nx.PExpr(Nx.EInt(p, v)), Nx.psNext(ts))
   case Nx.TFloat(b, p) => Nx.POk(Nx.PExpr(Nx.EFloat(p, b)), Nx.psNext(ts))
   case Nx.TUri(s, p) =>
-    if Nx.lintFatal(16) then Nx.PBad(Nx.At(p)) else Nx.POk(Nx.PExpr(Nx.EStr(p, s)), Nx.psNext(ts))
+    val Nx.PCx(src, _, _, _) = cx
+    if Nx.psUriLintFatal(src, p, s) then Nx.PBad(Nx.At(p)) else Nx.POk(Nx.PExpr(Nx.EStr(p, s)), Nx.psNext(ts))
   case Nx.TSPath(s, p) =>
     val args = Coll.Cons(Nx.EVar(p, "__nixPath"), Coll.Cons(Nx.EStr(p, s), Coll.Nil))
     Nx.POk(Nx.PExpr(Nx.ECall(p, Nx.EVar(p, "__findFile"), args)), Nx.psNext(ts))
@@ -732,7 +733,8 @@ def Nx.psPath(cx: Nx.PCx, ts: I64, p: I64): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
   case Nx.TPathPart(lit, _) =>
     val start = Nx.EPath(p, Nx.psPathValue(cx, lit))
     val t1 = Nx.psNext(ts)
-    if Nx.psPathLintFatal(lit) then Nx.PBad(Nx.At(p))
+    val Nx.PCx(src, _, _, _) = cx
+    if Nx.psPathLintFatal(src, p, lit) then Nx.PBad(Nx.At(p))
     else Nx.psPath1(cx, t1, p, start)
   case _ => Nx.PBad(Nx.psAtW(ts))
 
@@ -747,9 +749,21 @@ def Nx.psPath1(cx: Nx.PCx, t1: I64, p: I64, start: Nx.Expr): Nx.PR[Nx.PE] = Nx.p
   case _ => Nx.PBad(Nx.psAtW(t1))
 
 // --lint-absolute-path-literals (/a and ~/a) and --lint-short-path-literals (a/b) fatal (parser.y:419-466)
-def Nx.psPathLintFatal(lit: Str): Bool =
+def Nx.psPathLintFatal(src: Str, p: I64, lit: Str): Bool =
   val c = Str.at(lit, 0)
-  if c == '/' || c == '~' then Nx.lintFatal(1) else if c != '.' then Nx.lintFatal(4) else false
+  if Nx.ageti(Nx.globals(), Nx.gLint()) == 0 then false
+  else if c == '/' || c == '~' then
+    val what = if c == '~' then "home" else "absolute"
+    Nx.lintAt(src, p, 1, Nx.cat(Nx.cat(Nx.cat(Nx.cat(what, " path literals are not portable. Consider replacing path literal '"), lit), "' by a string, relative path, or parameter"), " (lint-absolute-path-literals)"))
+  else if c != '.' then
+    Nx.lintAt(src, p, 4, Nx.cat(Nx.cat(Nx.cat(Nx.cat(Nx.cat("relative path literal '", lit), "' should be prefixed with '.' for clarity: './"), lit), "'"), " (lint-short-path-literals)"))
+  else false
+
+def Nx.psUriLintFatal(src: Str, p: I64, s: Str): Bool =
+  if Nx.ageti(Nx.globals(), Nx.gLint()) == 0 then false
+  else
+    val how = if Nx.lintFatal(16) then "disallowed" else "discouraged"
+    Nx.lintAt(src, p, 16, Nx.cat(Nx.cat(Nx.cat(Nx.cat("URL literals are ", how), ". Consider using a string literal \""), s), "\" instead (lint-url-literals)"))
 
 // the lint whose 2 bits sit at the digit `unit` (1, 4 or 16) of Nx.gLint is fatal
 def Nx.lintFatal(unit: I64): Bool = (Nx.ageti(Nx.globals(), Nx.gLint()) / unit) % 4 == 2
@@ -983,3 +997,61 @@ def Nx.psMergeEnts(cx: Nx.PCx, j: Nx.BSet, ae: Nx.BSet, xs: Coll.List[Str]): Nx.
       Nx.psAddSym(cx, j, n, pos, v) match
         case Nx.SBad(q) => Nx.SBad(q)
         case Nx.SOk(j1) => Nx.psMergeEnts(cx, j1, ae, t)
+
+// ---- lint warnings (parser.y diagnose, error.cc printAtPos) --------------------------------------------------------
+
+// the 1-based line n of src, "" past the end, and whether the line exists (a file ending in a newline has an empty last one)
+def Nx.srcLine(src: Str, n: I64): Str =
+  var i = 0
+  var ln = 1
+  val len = Str.len(src)
+  while i < len && ln < n do
+    if Str.at(src, i) == '\n' then ln = ln + 1 else ()
+    i = i + 1
+  var j = i
+  while j < len && Str.at(src, j) != '\n' do j = j + 1
+  if ln == n then Str.slice(src, i, j) else ""
+
+def Nx.srcHasLine(src: Str, n: I64): Bool =
+  var i = 0
+  var nl = 0
+  while i < Str.len(src) do
+    if Str.at(src, i) == '\n' then nl = nl + 1 else ()
+    i = i + 1
+  nl >= n - 1
+
+def Nx.pad(c: I64, n: I64): Str = if n <= 0 then "" else Nx.cat(Nx.byte(c), Nx.pad(c, n - 1))
+
+def Nx.snipLine(src: Str, n: I64, w: I64): Unit =
+  val ds = Nx.intStr(n)
+  val ln = Nx.srcLine(src, n)
+  Console.eprint(Nx.cat(Nx.pad(' ', 14 + w - Str.len(ds)), ds))
+  Console.eprint("|")
+  if Str.len(ln) > 0 then
+    Console.eprint(" ")
+    Console.eprint(ln)
+  else ()
+  Console.eprint("\n")
+
+// a warning with the position and the source lines around byte p
+def Nx.lintWarn(src: Str, p: I64, msg: Str): Unit =
+  val l = Nx.lcLine(src, p)
+  val c = Nx.lcCol(src, p)
+  val after = Nx.srcHasLine(src, l + 1)
+  val w = Str.len(Nx.intStr(if after then l + 1 else l))
+  Console.eprint("warning: ")
+  Console.eprint(msg)
+  Console.eprint("\n         at ")
+  Console.eprint(Nx.symName(Nx.ageti(Nx.globals(), Nx.gFile())))
+  Console.eprint(Nx.cat(Nx.cat(Nx.cat(":", Nx.intStr(l)), Nx.cat(":", Nx.intStr(c))), ":\n"))
+  if l > 1 then Nx.snipLine(src, l - 1, w) else ()
+  Nx.snipLine(src, l, w)
+  Console.eprint(Nx.cat(Nx.cat(Nx.pad(' ', 14 + w), "| "), Nx.cat(Nx.pad(' ', c - 1), "^\n")))
+  if after then Nx.snipLine(src, l + 1, w) else ()
+
+def Nx.lintWarns(unit: I64): Bool = (Nx.ageti(Nx.globals(), Nx.gLint()) / unit) % 4 == 1
+
+// the warning of a literal under its lint; true when that lint is fatal
+def Nx.lintAt(src: Str, p: I64, unit: I64, msg: Str): Bool =
+  if Nx.lintWarns(unit) then Nx.lintWarn(src, p, msg) else ()
+  Nx.lintFatal(unit)
