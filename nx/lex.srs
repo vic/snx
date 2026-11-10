@@ -10,10 +10,6 @@ enum Nx.LxState:
   case Nx.LxPath           // INPATH
   case Nx.LxPathSlash      // INPATH_SLASH: the last path piece ends in /
 
-enum Nx.LxStep:
-  case Nx.LxGo(i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok])
-  case Nx.LxDone(r: Nx.LexResult)
-
 // the DEFAULT rules of lexer.l, in file order (the order breaks ties)
 enum Nx.LxRule:
   case Nx.LxAny            // {ANY}: the byte itself, the last rule
@@ -31,9 +27,6 @@ enum Nx.LxRule:
   case Nx.LxSPath
   case Nx.LxUri
   case Nx.LxSkip           // whitespace and comments
-
-enum Nx.LxBest:
-  case Nx.LxBest(r: Nx.LxRule, e: I64)   // a rule and the end of its match
 
 def Nx.lxDigit(c: I64): Bool = c >= '0' && c <= '9'
 def Nx.lxAlpha(c: I64): Bool = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
@@ -129,36 +122,79 @@ def Nx.lxCommentEnd(s: Str, j: I64, i: I64): I64 =
   else if Str.at(s, j) == '*' && Str.at(s, j + 1) == '/' then j + 2
   else Nx.lxCommentEnd(s, j + 1, i)
 
-def Nx.lxBetter(b: Nx.LxBest, r: Nx.LxRule, e: I64): Nx.LxBest =
-  val Nx.LxBest(_, be) = b
-  if e > be then Nx.LxBest(r, e) else b
+// the longest DEFAULT match at i, the earlier rule on a tie (flex's DFA shape): the first byte picks the few rules
+// that can start with it; the winner is the first of them, in file order, whose end is the largest
+def Nx.lxRule(s: Str, i: I64): Nx.LxRule =
+  val c = Str.at(s, i)
+  // PATH and PATH_SEG${ need / right after the PATH_CHAR run from i, URI needs : (scheme chars are PATH_CHARs)
+  val x = if Nx.lxPc(c) then Str.at(s, Nx.lxPcEnd(s, i)) else -1
+  if Nx.lxWs(c) || c == '#' then Nx.LxSkip
+  else if Nx.lxAlpha(c) && x != '/' && x != ':' then Nx.LxId
+  else if Nx.lxAlpha(c) then Nx.lxRuleAlpha(Nx.lxIdEnd(s, i), Nx.lxSegDollarEnd(s, i), Nx.lxPathEnd(s, i), Nx.lxUriEnd(s, i))
+  else if Nx.lxDigit(c) && x != '/' then Nx.lxRuleIf(Nx.lxFloatEnd(s, i) > Nx.lxDigitsEnd(s, i), Nx.LxFloat, Nx.LxInt)
+  else if Nx.lxDigit(c) then Nx.lxRuleDigit(Nx.lxDigitsEnd(s, i), Nx.lxFloatEnd(s, i), Nx.lxSegDollarEnd(s, i), Nx.lxPathEnd(s, i))
+  else if c == '_' then Nx.lxRuleAlpha(Nx.lxIdEnd(s, i), Nx.lxSegDollarEnd(s, i), Nx.lxPathEnd(s, i), i)
+  else if c == '.' then Nx.lxRuleDot(Nx.lxOpEnd(s, i), Nx.lxFloatEnd(s, i), Nx.lxSegDollarEnd(s, i), Nx.lxPathEnd(s, i), i + 1)
+  else if c == '-' || c == '+' then Nx.lxRuleOpPath(Nx.lxOpEnd(s, i), Nx.lxSegDollarEnd(s, i), Nx.lxPathEnd(s, i), i, i + 1)
+  else if c == '/' then Nx.lxRuleOpPath(Nx.lxOpEnd(s, i), Nx.lxSegDollarEnd(s, i), Nx.lxPathEnd(s, i), Nx.lxSkipEnd(s, i), i + 1)
+  else if c == '~' then Nx.lxRuleOpPath(i, Nx.lxSegDollarEnd(s, i), Nx.lxHPathEnd(s, i), i, i + 1)
+  else if c == '<' then Nx.lxRuleLt(Nx.lxOpEnd(s, i), Nx.lxSPathEnd(s, i), i + 1)
+  else if c == '$' then Nx.lxRuleIf(Str.at(s, i + 1) == '{', Nx.LxDollar, Nx.LxAny)
+  else if c == '{' then Nx.LxOpen
+  else if c == '}' then Nx.LxClose
+  else if c == '"' then Nx.LxQuote
+  else if c == '\'' then Nx.lxRuleIf(Str.at(s, i + 1) == '\'', Nx.LxIndOpen, Nx.LxAny)
+  else if Nx.lxOpEnd(s, i) > i then Nx.LxOp
+  else Nx.LxAny
 
-def Nx.lxOne(s: Str, i: I64, c: I64): I64 = if Str.at(s, i) == c then i + 1 else i
+def Nx.lxRuleIf(b: Bool, r: Nx.LxRule, o: Nx.LxRule): Nx.LxRule = if b then r else o
+def Nx.lxMax3(a: I64, b: I64, c: I64): I64 = Nx.lxMax(a, Nx.lxMax(b, c))
+// ID, PATH_SEG${, PATH, URI
+def Nx.lxRuleAlpha(a: I64, d: I64, p: I64, u: I64): Nx.LxRule =
+  val m = Nx.lxMax(Nx.lxMax3(a, d, p), u)
+  if a == m then Nx.LxId else if d == m then Nx.LxSegDollar else if p == m then Nx.LxPathR else Nx.LxUri
+// INT, FLOAT, PATH_SEG${, PATH
+def Nx.lxRuleDigit(a: I64, f: I64, d: I64, p: I64): Nx.LxRule =
+  val m = Nx.lxMax(Nx.lxMax3(a, f, d), p)
+  if a == m then Nx.LxInt else if f == m then Nx.LxFloat else if d == m then Nx.LxSegDollar else Nx.LxPathR
+// ..., FLOAT, PATH_SEG${, PATH, ANY
+def Nx.lxRuleDot(o: I64, f: I64, d: I64, p: I64, y: I64): Nx.LxRule =
+  val m = Nx.lxMax(Nx.lxMax3(o, f, d), Nx.lxMax(p, y))
+  if o == m then Nx.LxOp else if f == m then Nx.LxFloat else if d == m then Nx.LxSegDollar else if p == m then Nx.LxPathR else Nx.LxAny
+// operator, PATH_SEG${ (or HPATH_START${), PATH (or HPATH), comment, ANY
+def Nx.lxRuleOpPath(o: I64, d: I64, p: I64, k: I64, y: I64): Nx.LxRule =
+  val m = Nx.lxMax(Nx.lxMax3(o, d, p), Nx.lxMax(k, y))
+  if o == m then Nx.LxOp else if d == m then Nx.LxSegDollar else if p == m then Nx.LxPathR else if k == m then Nx.LxSkip else Nx.LxAny
+// <= <|, SPATH, ANY
+def Nx.lxRuleLt(o: I64, sp: I64, y: I64): Nx.LxRule =
+  val m = Nx.lxMax3(o, sp, y)
+  if o == m then Nx.LxOp else if sp == m then Nx.LxSPath else Nx.LxAny
 
-// the longest DEFAULT match at i (the earlier rule on a tie)
-def Nx.lxPick(s: Str, i: I64): Nx.LxBest =
-  val b1 = Nx.lxBetter(Nx.LxBest(Nx.LxAny, i), Nx.LxOp, Nx.lxOpEnd(s, i))
-  val b2 = Nx.lxBetter(b1, Nx.LxId, Nx.lxIdEnd(s, i))
-  val b3 = Nx.lxBetter(b2, Nx.LxInt, Nx.lxDigitsEnd(s, i))
-  val b4 = Nx.lxBetter(b3, Nx.LxFloat, Nx.lxFloatEnd(s, i))
-  val b5 = Nx.lxBetter(b4, Nx.LxDollar, if Str.at(s, i) == '$' && Str.at(s, i + 1) == '{' then i + 2 else i)
-  val b6 = Nx.lxBetter(b5, Nx.LxClose, Nx.lxOne(s, i, '}'))
-  val b7 = Nx.lxBetter(b6, Nx.LxOpen, Nx.lxOne(s, i, '{'))
-  val b8 = Nx.lxBetter(b7, Nx.LxQuote, Nx.lxOne(s, i, '"'))
-  val b9 = Nx.lxBetter(b8, Nx.LxIndOpen, Nx.lxIndOpenEnd(s, i))
-  val b10 = Nx.lxBetter(b9, Nx.LxSegDollar, Nx.lxSegDollarEnd(s, i))
-  val b11 = Nx.lxBetter(b10, Nx.LxPathR, Nx.lxMax(Nx.lxPathEnd(s, i), Nx.lxHPathEnd(s, i)))
-  val b12 = Nx.lxBetter(b11, Nx.LxSPath, Nx.lxSPathEnd(s, i))
-  val b13 = Nx.lxBetter(b12, Nx.LxUri, Nx.lxUriEnd(s, i))
-  Nx.lxBetter(b13, Nx.LxSkip, Nx.lxSkipEnd(s, i))
+// the end of rule r's match at i
+def Nx.lxRuleEnd(s: Str, i: I64, r: Nx.LxRule): I64 = r match
+  case Nx.LxAny => i + 1
+  case Nx.LxOp => Nx.lxOpEnd(s, i)
+  case Nx.LxId => Nx.lxIdEnd(s, i)
+  case Nx.LxInt => Nx.lxDigitsEnd(s, i)
+  case Nx.LxFloat => Nx.lxFloatEnd(s, i)
+  case Nx.LxDollar => i + 2
+  case Nx.LxClose => i + 1
+  case Nx.LxOpen => i + 1
+  case Nx.LxQuote => i + 1
+  case Nx.LxIndOpen => Nx.lxIndOpenEnd(s, i)
+  case Nx.LxSegDollar => Nx.lxSegDollarEnd(s, i)
+  case Nx.LxPathR => Nx.lxMax(Nx.lxPathEnd(s, i), Nx.lxHPathEnd(s, i))
+  case Nx.LxSPath => Nx.lxSPathEnd(s, i)
+  case Nx.LxUri => Nx.lxUriEnd(s, i)
+  case Nx.LxSkip => Nx.lxSkipEnd(s, i)
 
 def Nx.lxPop(st: Coll.List[Nx.LxState]): Coll.List[Nx.LxState] = st match
   case Coll.Nil => st
   case Coll.Cons(_, rest) => rest
 
-def Nx.lxEnd(out: Coll.List[Nx.Tok], p: I64): Nx.LxStep = Nx.LxDone(Nx.Toks(Coll.rev(Coll.Cons(Nx.TEof(p), out))))
+def Nx.lxEnd(out: Coll.List[Nx.Tok], p: I64): Nx.LexResult = Nx.Toks(Coll.rev(Coll.Cons(Nx.TEof(p), out)))
 // the lexer throws at p: the tokens before it stay, so a syntax error the parser meets first is reported first
-def Nx.lxBad(out: Coll.List[Nx.Tok], p: I64): Nx.LxStep = Nx.LxDone(Nx.Toks(Coll.rev(Coll.Cons(Nx.TBad(p), out))))
+def Nx.lxBad(out: Coll.List[Nx.Tok], p: I64): Nx.LexResult = Nx.Toks(Coll.rev(Coll.Cons(Nx.TBad(p), out)))
 
 def Nx.tokPos(t: Nx.Tok): I64 = t match
   case Nx.TId(_, p) => p
@@ -185,38 +221,6 @@ def Nx.lxNonZero(t: Str, i: I64): Bool =
   else if c >= '1' && c <= '9' then true
   else Nx.lxNonZero(t, i + 1)
 
-def Nx.lxDef(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok]): Nx.LxStep =
-  if i >= n then Nx.lxEnd(out, n)
-  else
-    val Nx.LxBest(r, e) = Nx.lxPick(s, i)
-    val t = Str.slice(s, i, e)
-    r match
-      case Nx.LxAny =>
-        // {ANY} returns the byte; a NUL byte is token 0 = end of file
-        if Str.at(s, i) == 0 then Nx.lxEnd(out, i + 1)
-        else Nx.LxGo(i + 1, st, Coll.Cons(Nx.TOp(Str.slice(s, i, i + 1), i), out))
-      case Nx.LxOp => Nx.LxGo(e, st, Coll.Cons(Nx.TOp(t, i), out))
-      case Nx.LxId => Nx.LxGo(e, st, Coll.Cons(Nx.TId(t, i), out))
-      case Nx.LxInt =>
-        if Nx.intOverflows(t) then Nx.lxBad(out, i)
-        else Nx.LxGo(e, st, Coll.Cons(Nx.TInt(Nx.intValue(t), i), out))
-      case Nx.LxFloat =>
-        val bits = Nx.floatBits(t)
-        if Nx.lxFloatBad(t, bits) then Nx.lxBad(out, i)
-        else Nx.LxGo(e, st, Coll.Cons(Nx.TFloat(bits, i), out))
-      case Nx.LxDollar => Nx.LxGo(e, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TDollarCurly(i), out))
-      // } pops unless the stack is at INITIAL
-      case Nx.LxClose => Nx.LxGo(e, Nx.lxPop(st), Coll.Cons(Nx.TOp(t, i), out))
-      case Nx.LxOpen => Nx.LxGo(e, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TOp(t, i), out))
-      case Nx.LxQuote => Nx.LxGo(e, Coll.Cons(Nx.LxStr, st), Coll.Cons(Nx.TStrOpen(false, i), out))
-      case Nx.LxIndOpen => Nx.LxGo(e, Coll.Cons(Nx.LxInd, st), Coll.Cons(Nx.TStrOpen(true, i), out))
-      // PATH_START re-lexes the text before ${ as PATH_SEG or HPATH_START, then INPATH_SLASH
-      case Nx.LxSegDollar => Nx.LxGo(e - 2, Coll.Cons(Nx.LxPathSlash, st), Coll.Cons(Nx.TPathPart(Str.slice(s, i, e - 2), i), Coll.Cons(Nx.TPathOpen(i), out)))
-      case Nx.LxPathR => Nx.LxGo(e, Coll.Cons(Nx.lxPathState(s, e), st), Coll.Cons(Nx.TPathPart(t, i), Coll.Cons(Nx.TPathOpen(i), out)))
-      case Nx.LxSPath => Nx.LxGo(e, st, Coll.Cons(Nx.TSPath(Str.slice(s, i + 1, e - 1), i), out))
-      case Nx.LxUri => Nx.LxGo(e, st, Coll.Cons(Nx.TUri(t, i), out))
-      case Nx.LxSkip => Nx.LxGo(e, st, out)
-
 def Nx.lxPathState(s: Str, e: I64): Nx.LxState = if Str.at(s, e - 1) == '/' then Nx.LxPathSlash else Nx.LxPath
 
 // <STRING>: the run ([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})+ from i
@@ -231,18 +235,8 @@ def Nx.lxStrRun(s: Str, i: I64): I64 =
   else Nx.lxStrRun(s, i + 1)
 def Nx.lxStrEsc(s: Str, i: I64, x: I64, j: I64): I64 = if x == -1 then i else Nx.lxStrRun(s, j)
 
-def Nx.lxStr(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok]): Nx.LxStep =
-  val c = Str.at(s, i)
-  if c == '"' then Nx.LxGo(i + 1, Nx.lxPop(st), Coll.Cons(Nx.TStrClose(i), out))
-  else if c == '$' && Str.at(s, i + 1) == '{' then Nx.LxGo(i + 2, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TDollarCurly(i), out))
-  else
-    val r = Nx.lxStrRun(s, i)
-    // the first STRING rule: a run that ends in $ before " keeps the $
-    val e = if Str.at(s, r) == '$' && Str.at(s, r + 1) == '"' then r + 1 else r
-    // <STRING>\$|\\|\$\\ returns EOF; so does flex at the end of input
-    if e == i then Nx.lxEnd(out, n)
-    else if Nx.lxRawNul(s, i, e) then Nx.lxBad(out, i)
-    else Nx.LxGo(e, st, Coll.Cons(Nx.TStrPart(Nx.lxUnescape(s, i, e), i), out))
+// the first STRING rule: a run that ends in $ before " keeps the $
+def Nx.lxStrEnd(s: Str, r: I64): I64 = if Str.at(s, r) == '$' && Str.at(s, r + 1) == '"' then r + 1 else r
 
 // unescapeStr (lexer.l:46): \n \r \t, \x = x, a bare CR or CR LF = LF
 def Nx.lxUnescape(s: Str, i: I64, e: I64): Str = Nx.lxUnesc(s, i, e, i, "")
@@ -253,6 +247,12 @@ def Nx.lxUnesc(s: Str, i: I64, e: I64, from: I64, acc: Str): Str =
   else Nx.lxUnesc(s, i + 1, e, from, acc)
 def Nx.lxCrEnd(s: Str, i: I64, e: I64): I64 = if i + 1 < e && Str.at(s, i + 1) == '\n' then i + 2 else i + 1
 def Nx.lxEsc(c: I64): I64 = if c == 'n' then 10 else if c == 'r' then 13 else if c == 't' then 9 else c
+
+// no backslash, CR or NUL from i to e: unescapeStr would return the bytes as they are
+def Nx.lxPlain(s: Str, i: I64, e: I64): Bool =
+  if i >= e then true
+  else if Str.at(s, i) == '\\' || Str.at(s, i) == 13 || Str.at(s, i) == 0 then false
+  else Nx.lxPlain(s, i + 1, e)
 
 // unescapeStr's NUL check (forceNoNullByte): an escaped byte is not checked
 def Nx.lxRawNul(s: Str, i: I64, e: I64): Bool =
@@ -273,53 +273,90 @@ def Nx.lxIndRun(s: Str, i: I64): I64 =
   else if c == '$' || c == '\'' then Nx.lxIndRun(s, i + 2)
   else Nx.lxIndRun(s, i + 1)
 
-def Nx.lxInd(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok]): Nx.LxStep =
-  val c = Str.at(s, i)
-  val e = Nx.lxIndRun(s, i)
-  if c == '\'' && Str.at(s, i + 1) == '\'' then Nx.lxIndQuote(s, i, st, out)
-  else if c == '$' && Str.at(s, i + 1) == '{' then Nx.LxGo(i + 2, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TDollarCurly(i), out))
-  else if e > i && Nx.lxAnyNul(s, i, e) then Nx.lxBad(out, i)
-  else if e > i then Nx.LxGo(e, st, Coll.Cons(Nx.TStrPart(Str.slice(s, i, e), i), out))
-  // <IND_STRING>\$ and <IND_STRING>\' : a lone $ or ' is its own piece
-  else if c == '$' || c == '\'' then Nx.LxGo(i + 1, st, Coll.Cons(Nx.TStrPart(Nx.byte(c), i), out))
-  else Nx.lxEnd(out, n)
-
-// at '': ''$ is $, ''' is '', ''\{ANY} is the unescaped byte, else '' closes
-def Nx.lxIndQuote(s: Str, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok]): Nx.LxStep =
-  val c = Str.at(s, i + 2)
-  if c == '$' then Nx.LxGo(i + 3, st, Coll.Cons(Nx.TStrPart("$", i), out))
-  else if c == '\'' then Nx.LxGo(i + 3, st, Coll.Cons(Nx.TStrPart("''", i), out))
-  else if c == '\\' && Str.at(s, i + 3) != -1 then Nx.LxGo(i + 4, st, Coll.Cons(Nx.TStrPart(Nx.lxUnescape(s, i + 2, i + 4), i), out))
-  else Nx.LxGo(i + 2, Nx.lxPop(st), Coll.Cons(Nx.TStrClose(i), out))
-
 // <INPATH,INPATH_SLASH>: ${ ; {PATH}|{PATH_SEG}|{PATH_CHAR}+ ; else INPATH ends the path (PATH_END, the byte is lexed
 // again below) and INPATH_SLASH throws "path has a trailing slash". lb = begin of the last lexeme (a path piece or
 // }), pb = begin of the one before it. An <<EOF>> rule runs no adjustLoc, so unstash restores the location of the
 // lexeme before the last one: PATH_END at pb, and the EOF after it ends where that lexeme ends (lb).
-def Nx.lxPath(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok], slash: Bool, lb: I64, pb: I64): Nx.LxStep =
-  val e = Nx.lxMax(Nx.lxPathEnd(s, i), Nx.lxMax(Nx.lxSegEnd(s, i), Nx.lxPcEnd(s, i)))
-  if Str.at(s, i) == '$' && Str.at(s, i + 1) == '{' then Nx.LxGo(i + 2, Coll.Cons(Nx.LxDef, Coll.Cons(Nx.LxPath, Nx.lxPop(st))), Coll.Cons(Nx.TDollarCurly(i), out))
-  else if e > i then Nx.LxGo(e, Coll.Cons(Nx.lxPathState(s, e), Nx.lxPop(st)), Coll.Cons(Nx.TPathPart(Str.slice(s, i, e), i), out))
-  else if slash && i >= n then Nx.lxBad(out, lb)
-  else if slash then Nx.lxBad(out, i)
-  else if i >= n then Nx.lxEnd(Coll.Cons(Nx.TPathClose(pb), out), lb)
-  else Nx.LxGo(i, Nx.lxPop(st), Coll.Cons(Nx.TPathClose(lb), out))
+def Nx.lxPathPieceEnd(s: Str, i: I64): I64 = Nx.lxMax(Nx.lxPathEnd(s, i), Nx.lxMax(Nx.lxSegEnd(s, i), Nx.lxPcEnd(s, i)))
 
-def Nx.lxStep(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok], lb: I64, pb: I64): Nx.LxStep = st match
-  case Coll.Nil => Nx.lxDef(s, n, i, st, out)
-  case Coll.Cons(top, _) => top match
-    case Nx.LxDef => Nx.lxDef(s, n, i, st, out)
-    case Nx.LxStr => Nx.lxStr(s, n, i, st, out)
-    case Nx.LxInd => Nx.lxInd(s, n, i, st, out)
-    case Nx.LxPath => Nx.lxPath(s, n, i, st, out, false, lb, pb)
-    case Nx.LxPathSlash => Nx.lxPath(s, n, i, st, out, true, lb, pb)
+def Nx.lxTop(st: Coll.List[Nx.LxState]): Nx.LxState = st match
+  case Coll.Nil => Nx.LxDef
+  case Coll.Cons(top, _) => top
 
-// a step that moves past i read one lexeme starting at i (lexemes tile the source; whitespace and comments count)
+// one lexeme from i in the state on top of st, then the rest: one self tail call (a C loop), nothing allocated but
+// tokens and stack cells. lb = begin of the last lexeme, pb = the one before it; a lexeme from i makes them (i, lb).
 def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok], lb: I64, pb: I64): Nx.LexResult =
-  val step = Nx.lxStep(s, n, i, st, out, lb, pb)
-  step match
-    case Nx.LxGo(j, st2, out2) => if j > i then Nx.lxGo(s, n, j, st2, out2, i, lb) else Nx.lxGo(s, n, j, st2, out2, lb, pb)
-    case Nx.LxDone(r) => r
+  val c = Str.at(s, i)
+  Nx.lxTop(st) match
+    case Nx.LxDef =>
+      if i >= n then Nx.lxEnd(out, n)
+      else
+        val r = Nx.lxRule(s, i)
+        val e = Nx.lxRuleEnd(s, i, r)
+        val t = Str.slice(s, i, e)
+        r match
+          case Nx.LxAny =>
+            // {ANY} returns the byte; a NUL byte is token 0 = end of file
+            if c == 0 then Nx.lxEnd(out, i + 1)
+            else Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TOp(t, i), out), i, lb)
+          case Nx.LxOp => Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TOp(t, i), out), i, lb)
+          case Nx.LxId => Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TId(t, i), out), i, lb)
+          case Nx.LxInt =>
+            if Nx.intOverflows(t) then Nx.lxBad(out, i)
+            else Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TInt(Nx.intValue(t), i), out), i, lb)
+          case Nx.LxFloat =>
+            val bits = Nx.floatBits(t)
+            if Nx.lxFloatBad(t, bits) then Nx.lxBad(out, i)
+            else Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TFloat(bits, i), out), i, lb)
+          case Nx.LxDollar => Nx.lxGo(s, n, e, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TDollarCurly(i), out), i, lb)
+          // } pops unless the stack is at INITIAL
+          case Nx.LxClose => Nx.lxGo(s, n, e, Nx.lxPop(st), Coll.Cons(Nx.TOp(t, i), out), i, lb)
+          case Nx.LxOpen => Nx.lxGo(s, n, e, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TOp(t, i), out), i, lb)
+          case Nx.LxQuote => Nx.lxGo(s, n, e, Coll.Cons(Nx.LxStr, st), Coll.Cons(Nx.TStrOpen(false, i), out), i, lb)
+          case Nx.LxIndOpen => Nx.lxGo(s, n, e, Coll.Cons(Nx.LxInd, st), Coll.Cons(Nx.TStrOpen(true, i), out), i, lb)
+          // PATH_START re-lexes the text before ${ as PATH_SEG or HPATH_START, then INPATH_SLASH
+          case Nx.LxSegDollar => Nx.lxGo(s, n, e - 2, Coll.Cons(Nx.LxPathSlash, st), Coll.Cons(Nx.TPathPart(Str.slice(s, i, e - 2), i), Coll.Cons(Nx.TPathOpen(i), out)), i, lb)
+          case Nx.LxPathR => Nx.lxGo(s, n, e, Coll.Cons(Nx.lxPathState(s, e), st), Coll.Cons(Nx.TPathPart(t, i), Coll.Cons(Nx.TPathOpen(i), out)), i, lb)
+          case Nx.LxSPath => Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TSPath(Str.slice(s, i + 1, e - 1), i), out), i, lb)
+          case Nx.LxUri => Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TUri(t, i), out), i, lb)
+          case Nx.LxSkip => Nx.lxGo(s, n, e, st, out, i, lb)
+    case Nx.LxStr =>
+      if c == '"' then Nx.lxGo(s, n, i + 1, Nx.lxPop(st), Coll.Cons(Nx.TStrClose(i), out), i, lb)
+      else if c == '$' && Str.at(s, i + 1) == '{' then Nx.lxGo(s, n, i + 2, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TDollarCurly(i), out), i, lb)
+      else
+        val e = Nx.lxStrEnd(s, Nx.lxStrRun(s, i))
+        // <STRING>\$|\\|\$\\ returns EOF; so does flex at the end of input
+        if e == i then Nx.lxEnd(out, n)
+        else if Nx.lxPlain(s, i, e) then Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TStrPart(Str.slice(s, i, e), i), out), i, lb)
+        else if Nx.lxRawNul(s, i, e) then Nx.lxBad(out, i)
+        else Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TStrPart(Nx.lxUnescape(s, i, e), i), out), i, lb)
+    case Nx.LxInd =>
+      val d = Str.at(s, i + 2)
+      val e = Nx.lxIndRun(s, i)
+      // at '': ''$ is $, ''' is '', ''\{ANY} is the unescaped byte, else '' closes
+      if c == '\'' && Str.at(s, i + 1) == '\'' then
+        if d == '$' then Nx.lxGo(s, n, i + 3, st, Coll.Cons(Nx.TStrPart("$", i), out), i, lb)
+        else if d == '\'' then Nx.lxGo(s, n, i + 3, st, Coll.Cons(Nx.TStrPart("''", i), out), i, lb)
+        else if d == '\\' && Str.at(s, i + 3) != -1 then Nx.lxGo(s, n, i + 4, st, Coll.Cons(Nx.TStrPart(Nx.lxUnescape(s, i + 2, i + 4), i), out), i, lb)
+        else Nx.lxGo(s, n, i + 2, Nx.lxPop(st), Coll.Cons(Nx.TStrClose(i), out), i, lb)
+      else if c == '$' && Str.at(s, i + 1) == '{' then Nx.lxGo(s, n, i + 2, Coll.Cons(Nx.LxDef, st), Coll.Cons(Nx.TDollarCurly(i), out), i, lb)
+      else if e > i && Nx.lxAnyNul(s, i, e) then Nx.lxBad(out, i)
+      else if e > i then Nx.lxGo(s, n, e, st, Coll.Cons(Nx.TStrPart(Str.slice(s, i, e), i), out), i, lb)
+      // <IND_STRING>\$ and <IND_STRING>\' : a lone $ or ' is its own piece
+      else if c == '$' || c == '\'' then Nx.lxGo(s, n, i + 1, st, Coll.Cons(Nx.TStrPart(Nx.byte(c), i), out), i, lb)
+      else Nx.lxEnd(out, n)
+    case Nx.LxPath =>
+      val e = Nx.lxPathPieceEnd(s, i)
+      if c == '$' && Str.at(s, i + 1) == '{' then Nx.lxGo(s, n, i + 2, Coll.Cons(Nx.LxDef, Coll.Cons(Nx.LxPath, Nx.lxPop(st))), Coll.Cons(Nx.TDollarCurly(i), out), i, lb)
+      else if e > i then Nx.lxGo(s, n, e, Coll.Cons(Nx.lxPathState(s, e), Nx.lxPop(st)), Coll.Cons(Nx.TPathPart(Str.slice(s, i, e), i), out), i, lb)
+      else if i >= n then Nx.lxEnd(Coll.Cons(Nx.TPathClose(pb), out), lb)
+      else Nx.lxGo(s, n, i, Nx.lxPop(st), Coll.Cons(Nx.TPathClose(lb), out), lb, pb)
+    case Nx.LxPathSlash =>
+      val e = Nx.lxPathPieceEnd(s, i)
+      if c == '$' && Str.at(s, i + 1) == '{' then Nx.lxGo(s, n, i + 2, Coll.Cons(Nx.LxDef, Coll.Cons(Nx.LxPath, Nx.lxPop(st))), Coll.Cons(Nx.TDollarCurly(i), out), i, lb)
+      else if e > i then Nx.lxGo(s, n, e, Coll.Cons(Nx.lxPathState(s, e), Nx.lxPop(st)), Coll.Cons(Nx.TPathPart(Str.slice(s, i, e), i), out), i, lb)
+      else if i >= n then Nx.lxBad(out, lb)
+      else Nx.lxBad(out, i)
 
 def Nx.lex(src: Str): Nx.LexResult = Nx.lxGo(src, Str.len(src), 0, Coll.Nil, Coll.Nil, 0, 0)
 

@@ -1,0 +1,25 @@
+// lex every file named in the list file argv[1] (one path a line); print files, bytes, tokens
+def Nx.cntToks(ts: Coll.List[Nx.Tok], n: I64): I64 = ts match
+  case Coll.Nil => n
+  case Coll.Cons(_, t) => Nx.cntToks(t, n + 1)
+def Nx.lineEnd(s: Str, i: I64): I64 = if i < Str.len(s) && Str.at(s, i) != 10 then Nx.lineEnd(s, i + 1) else i
+def Nx.benchGo(list: Str, i: I64, files: I64, bytes: I64, toks: I64): Unit =
+  if i >= Str.len(list) then
+    Console.printI64(files)
+    Console.print(" files ")
+    Console.printI64(bytes)
+    Console.print(" bytes ")
+    Console.printI64(toks)
+    Console.print(" tokens\n")
+  else
+    val e = Nx.lineEnd(list, i)
+    val src = Files.read(Str.slice(list, i, e))
+    val Nx.Toks(ts) = Nx.lex(src)
+    Nx.benchGo(list, e + 1, files + 1, bytes + Str.len(src), toks + Nx.cntToks(ts, 0))
+def main(): I64 =
+  handle r = Srs.Arena()
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  Nx.benchGo(Files.read(Args.at(1)), 0, 0, 0, 0)
+  0
