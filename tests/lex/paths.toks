@@ -9,5 +9,5 @@ path-part 9 ~/d
 path-close 9
 path-open 13
 path-part 13 a/b
-path-close 13
+path-close 12
 eof 13

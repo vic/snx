@@ -177,10 +177,6 @@ def Nx.tokPos(t: Nx.Tok): I64 = t match
   case Nx.TEof(p) => p
   case Nx.TBad(p) => p
 
-def Nx.lxLastPos(out: Coll.List[Nx.Tok]): I64 = out match
-  case Coll.Nil => 0
-  case Coll.Cons(t, _) => Nx.tokPos(t)
-
 // strtod sets ERANGE (lexer.l {FLOAT}: "invalid float") on overflow to inf and on underflow to 0 or a subnormal
 def Nx.lxFloatBad(t: Str, bits: I64): Bool = bits == 9218868437227405312 || (bits < 4503599627370496 && Nx.lxNonZero(t, 0))
 def Nx.lxNonZero(t: Str, i: I64): Bool =
@@ -297,34 +293,35 @@ def Nx.lxIndQuote(s: Str, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.T
   else Nx.LxGo(i + 2, Nx.lxPop(st), Coll.Cons(Nx.TStrClose(i), out))
 
 // <INPATH,INPATH_SLASH>: ${ ; {PATH}|{PATH_SEG}|{PATH_CHAR}+ ; else INPATH ends the path (PATH_END, the byte is lexed
-// again below) and INPATH_SLASH throws "path has a trailing slash". At EOF no lexeme is read: the position is the
-// start of the last one (INPATH unstashes to it).
-def Nx.lxPath(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok], slash: Bool): Nx.LxStep =
+// again below) and INPATH_SLASH throws "path has a trailing slash". lb = begin of the last lexeme (a path piece or
+// }), pb = begin of the one before it. An <<EOF>> rule runs no adjustLoc, so unstash restores the location of the
+// lexeme before the last one: PATH_END at pb, and the EOF after it ends where that lexeme ends (lb).
+def Nx.lxPath(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok], slash: Bool, lb: I64, pb: I64): Nx.LxStep =
   val e = Nx.lxMax(Nx.lxPathEnd(s, i), Nx.lxMax(Nx.lxSegEnd(s, i), Nx.lxPcEnd(s, i)))
-  val q = Nx.lxLastPos(out)
   if Str.at(s, i) == '$' && Str.at(s, i + 1) == '{' then Nx.LxGo(i + 2, Coll.Cons(Nx.LxDef, Coll.Cons(Nx.LxPath, Nx.lxPop(st))), Coll.Cons(Nx.TDollarCurly(i), out))
   else if e > i then Nx.LxGo(e, Coll.Cons(Nx.lxPathState(s, e), Nx.lxPop(st)), Coll.Cons(Nx.TPathPart(Str.slice(s, i, e), i), out))
-  else if slash && i >= n then Nx.lxBad(out, q)
+  else if slash && i >= n then Nx.lxBad(out, lb)
   else if slash then Nx.lxBad(out, i)
-  else if i >= n then Nx.lxEnd(Coll.Cons(Nx.TPathClose(q), out), q)
-  else Nx.LxGo(i, Nx.lxPop(st), Coll.Cons(Nx.TPathClose(q), out))
+  else if i >= n then Nx.lxEnd(Coll.Cons(Nx.TPathClose(pb), out), lb)
+  else Nx.LxGo(i, Nx.lxPop(st), Coll.Cons(Nx.TPathClose(lb), out))
 
-def Nx.lxStep(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok]): Nx.LxStep = st match
+def Nx.lxStep(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok], lb: I64, pb: I64): Nx.LxStep = st match
   case Coll.Nil => Nx.lxDef(s, n, i, st, out)
   case Coll.Cons(top, _) => top match
     case Nx.LxDef => Nx.lxDef(s, n, i, st, out)
     case Nx.LxStr => Nx.lxStr(s, n, i, st, out)
     case Nx.LxInd => Nx.lxInd(s, n, i, st, out)
-    case Nx.LxPath => Nx.lxPath(s, n, i, st, out, false)
-    case Nx.LxPathSlash => Nx.lxPath(s, n, i, st, out, true)
+    case Nx.LxPath => Nx.lxPath(s, n, i, st, out, false, lb, pb)
+    case Nx.LxPathSlash => Nx.lxPath(s, n, i, st, out, true, lb, pb)
 
-def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok]): Nx.LexResult =
-  val step = Nx.lxStep(s, n, i, st, out)
+// a step that moves past i read one lexeme starting at i (lexemes tile the source; whitespace and comments count)
+def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Coll.List[Nx.Tok], lb: I64, pb: I64): Nx.LexResult =
+  val step = Nx.lxStep(s, n, i, st, out, lb, pb)
   step match
-    case Nx.LxGo(j, st2, out2) => Nx.lxGo(s, n, j, st2, out2)
+    case Nx.LxGo(j, st2, out2) => if j > i then Nx.lxGo(s, n, j, st2, out2, i, lb) else Nx.lxGo(s, n, j, st2, out2, lb, pb)
     case Nx.LxDone(r) => r
 
-def Nx.lex(src: Str): Nx.LexResult = Nx.lxGo(src, Str.len(src), 0, Coll.Nil, Coll.Nil)
+def Nx.lex(src: Str): Nx.LexResult = Nx.lxGo(src, Str.len(src), 0, Coll.Nil, Coll.Nil, 0, 0)
 
 // one line, no newline: <kind> <p> [<payload>]; payload bytes escaped \" \\ \n, \xHH below 0x20 and above 0x7e
 def Nx.printTok(t: Nx.Tok): Unit = t match

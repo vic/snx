@@ -4,5 +4,5 @@ dollar-curly 4
 id 6 x
 op 7 }
 path-part 8 .nix
-path-close 8
+path-close 7
 eof 8

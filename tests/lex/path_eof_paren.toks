@@ -1,0 +1,5 @@
+op 0 (
+path-open 1
+path-part 1 /a
+path-close 0
+eof 1

@@ -16,6 +16,9 @@ def Nx.answerParse(src: Str): I64 =
       Nx.printTree(e)
       Console.print("\n")
       0
+    case Nx.ParseBadNoPos =>
+      Console.print("error 0:0\n")
+      0
     case Nx.ParseBad(p) =>
       Nx.lineCol(src, p) match
         case Nx.LineCol(l, c) =>

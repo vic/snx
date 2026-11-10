@@ -6,5 +6,5 @@ path-part 6 a/b
 path-close 6
 path-open 10
 path-part 10 1/2
-path-close 10
+path-close 9
 eof 10

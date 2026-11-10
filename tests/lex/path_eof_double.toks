@@ -1,0 +1,6 @@
+id 0 x
+path-open 2
+path-part 2 /a/
+path-part 5 /b
+path-close 2
+eof 5

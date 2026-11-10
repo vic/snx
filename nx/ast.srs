@@ -74,6 +74,7 @@ enum Nx.Expr:
 enum Nx.ParseResult:
   case Nx.Parsed(e: Nx.Expr)
   case Nx.ParseBad(p: I64)                 // the byte offset of Nix's error position
+  case Nx.ParseBadNoPos                     // Nix fails with no position (a std::exception from a warning format): `error 0:0`
 
 // phase signatures (each lives in its own file):
 //   nx/lex.srs    def Nx.lex(src: Str): Nx.LexResult          and  def Nx.printTok(t: Nx.Tok): Unit (one line, for `snx lex`)

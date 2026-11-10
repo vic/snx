@@ -67,9 +67,12 @@ srs_str Nx__hex64(int64_t v) {
   return (srs_str){p, 16};
 }
 
-// the bits of -d for the bits of a double d: the sign bit flipped (nx/tree.srs, SPEC.md rule 3)
+// the bits of 0.0 - d for the bits of a double d, as the parse oracle folds a negated literal (nx/tree.srs, SPEC.md rule 3)
 int64_t Nx__treeFloatNeg(int64_t bits) {
-  return (int64_t)((uint64_t)bits ^ 0x8000000000000000ULL);
+  double d; memcpy(&d, &bits, sizeof d);
+  double r = 0.0 - d;
+  int64_t out; memcpy(&out, &r, sizeof out);
+  return out;
 }
 
 // ── word arrays: env frames, set and list slots. One bump arena for the whole run, never freed.
