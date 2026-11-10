@@ -79,6 +79,8 @@ def Nx.thunk(env: Ptr, c: Nx.Code): Ptr = c match
   case Nx.CNum(op, a, b, early) =>
     if early && Nx.probe(1) == 0 && Nx.numReady(env, a) && Nx.numReady(env, b) then Nx.cell(Nx.numOp(op, Nx.ev(env, a), Nx.ev(env, b)))
     else Nx.lazy(env, c)
+  // a lambda is a value at once: its closure, no thunk
+  case Nx.CLamArg(_, _) => Nx.cell(Nx.VLam(env, c))
   case _ => Nx.lazy(env, c)
 
 // a thunk of code that runs in frame f while f is being filled: a slot of f itself may not be set yet. early is false
