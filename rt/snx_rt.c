@@ -606,3 +606,80 @@ void* Nx__wbGetP(nx_wb* b) { return (void*)b->w[b->rd++]; }
 int64_t Nx__wbPutS(nx_wb* b, srs_str s) { Nx__wbPut(b, (int64_t)s.p); return Nx__wbPut(b, s.n); }
 srs_str Nx__wbGetS(nx_wb* b) { const uint8_t* p = (const uint8_t*)b->w[b->rd++]; return (srs_str){p, b->w[b->rd++]}; }
 int64_t Nx__wbFree(nx_wb* b) { free(b->w); free(b); return 0; }
+
+// string runs (nx/lex.srs <STRING>, <IND_STRING>): ordinary bytes are skipped by a table test, the bytes that end or
+// escape a run are handled as the flex rules do
+enum { NX_SSTR = 1, NX_SIND = 2, NX_SNPLAIN = 4 };
+static uint8_t nx_scls[256];
+__attribute__((constructor)) static void nx_scls_init(void) {
+  nx_scls['"'] |= NX_SSTR; nx_scls['\\'] |= NX_SSTR | NX_SNPLAIN; nx_scls['$'] |= NX_SSTR | NX_SIND;
+  nx_scls['\''] |= NX_SIND; nx_scls[13] |= NX_SNPLAIN; nx_scls[0] |= NX_SNPLAIN;
+}
+static inline int nx_at(srs_str s, int64_t i) { return i >= 0 && i < s.n ? s.p[i] : -1; }
+// <STRING>: the run ([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})+ from i
+int64_t Nx__lxStrRun(srs_str s, int64_t i) {
+  if (i < 0) return i;
+  for (;;) {
+    while (i < s.n && !(nx_scls[s.p[i]] & NX_SSTR)) i++;
+    int c = nx_at(s, i), d = nx_at(s, i + 1);
+    if (c == -1 || c == '"') return i;
+    if (c == '\\') { if (d == -1) return i; i += 2; }
+    else if (d == '\\') { if (nx_at(s, i + 2) == -1) return i; i += 3; }
+    else if (d == -1 || d == '{' || d == '"') return i;
+    else i += 2;
+  }
+}
+// <IND_STRING>: the run ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i
+int64_t Nx__lxIndRun(srs_str s, int64_t i) {
+  if (i < 0) return i;
+  for (;;) {
+    while (i < s.n && !(nx_scls[s.p[i]] & NX_SIND)) i++;
+    int c = nx_at(s, i), d = nx_at(s, i + 1);
+    if (c == -1) return i;
+    if (c == '$' && (d == -1 || d == '{' || d == '\'')) return i;
+    if (c == '\'' && (d == -1 || d == '\'' || d == '$')) return i;
+    i += 2;
+  }
+}
+// no backslash, CR or NUL in [i, e): unescapeStr would return the bytes as they are
+bool Nx__lxPlain(srs_str s, int64_t i, int64_t e) {
+  if (i < 0) i = 0;
+  if (e > s.n) e = s.n;
+  for (; i < e; i++) if (nx_scls[s.p[i]] & NX_SNPLAIN) return false;
+  return true;
+}
+// a NUL byte in [i, e)
+bool Nx__lxAnyNul(srs_str s, int64_t i, int64_t e) {
+  if (i < 0) i = 0;
+  if (e > s.n) e = s.n;
+  return e > i && memchr(s.p + i, 0, (size_t)(e - i)) != NULL;
+}
+
+// ── the parser's attribute index (nx/parse.srs Nx.BSet): name -> entry word, open addressing on FNV-1a; a set under
+// construction is updated in place; a slot is taken when its entry word is set. Freed by Nx.atFreeAll
+typedef struct nx_atab { srs_str* k; void** v; int64_t n, cap; struct nx_atab* next; } nx_atab;
+// every index made since the last Nx.atFreeAll (a file's sets: dead once it is parsed)
+static nx_atab* g_atabs;
+void* Nx__atNew(void) { nx_atab* t = calloc(1, sizeof *t); if (!t) { fputs("snx: out of memory\n", stderr); exit(70); } t->next = g_atabs; g_atabs = t; return t; }
+int64_t Nx__atFreeAll(void) { while (g_atabs) { nx_atab* t = g_atabs; g_atabs = t->next; free(t->k); free(t->v); free(t); } return 0; }
+static int64_t nx_at_slot(nx_atab* t, srs_str n) {
+  uint64_t m = (uint64_t)t->cap - 1, j = nx_hash(n) & m;
+  for (; t->v[j]; j = (j + 1) & m) if (t->k[j].n == n.n && memcmp(t->k[j].p, n.p, (size_t)n.n) == 0) return (int64_t)j;
+  return (int64_t)j;
+}
+void* Nx__atFind(nx_atab* t, srs_str n) { return t->cap ? t->v[nx_at_slot(t, n)] : 0; }
+void* Nx__atEnt(void* e) { return e; }
+bool Nx__atPut(nx_atab* t, srs_str n, void* x) {
+  if (2 * (t->n + 1) > t->cap) {
+    nx_atab o = *t; t->cap = o.cap ? 2 * o.cap : 8; t->n = 0;
+    t->k = calloc((size_t)t->cap, sizeof *t->k); t->v = calloc((size_t)t->cap, sizeof *t->v);
+    if (!t->k || !t->v) { fputs("snx: out of memory\n", stderr); exit(70); }
+    for (int64_t i = 0; i < o.cap; i++) if (o.v[i]) { int64_t j = nx_at_slot(t, o.k[i]); t->k[j] = o.k[i]; t->v[j] = o.v[i]; t->n++; }
+    free(o.k); free(o.v);
+  }
+  int64_t j = nx_at_slot(t, n);
+  bool fresh = !t->v[j];
+  if (fresh) { t->k[j] = n; t->n++; }
+  t->v[j] = x;
+  return fresh;
+}

@@ -204,18 +204,7 @@ def Nx.lxNonZero(t: Str, i: I64): Bool =
 
 def Nx.lxPathState(s: Str, e: I64): Nx.LxState = if Str.at(s, e - 1) == '/' then Nx.LxPathSlash else Nx.LxPath
 
-// <STRING>: the run ([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})+ from i
-def Nx.lxStrRun(s: Str, i: I64): I64 =
-  val c = Str.at(s, i)
-  val d = Str.at(s, i + 1)
-  if c == -1 || c == '"' then i
-  else if c == '\\' then Nx.lxStrEsc(s, i, d, i + 2)
-  else if c == '$' && d == '\\' then Nx.lxStrEsc(s, i, Str.at(s, i + 2), i + 3)
-  else if c == '$' && (d == -1 || d == '{' || d == '"') then i
-  else if c == '$' then Nx.lxStrRun(s, i + 2)
-  else Nx.lxStrRun(s, i + 1)
-def Nx.lxStrEsc(s: Str, i: I64, x: I64, j: I64): I64 = if x == -1 then i else Nx.lxStrRun(s, j)
-
+// <STRING> and <IND_STRING> runs, the plain-run and NUL checks: rt/snx_rt.c (nx/rt.srs "lexer")
 // the first STRING rule: a run that ends in $ before " keeps the $
 def Nx.lxStrEnd(s: Str, r: I64): I64 = if Str.at(s, r) == '$' && Str.at(s, r + 1) == '"' then r + 1 else r
 
@@ -229,30 +218,12 @@ def Nx.lxUnesc(s: Str, i: I64, e: I64, from: I64, acc: Str): Str =
 def Nx.lxCrEnd(s: Str, i: I64, e: I64): I64 = if i + 1 < e && Str.at(s, i + 1) == '\n' then i + 2 else i + 1
 def Nx.lxEsc(c: I64): I64 = if c == 'n' then 10 else if c == 'r' then 13 else if c == 't' then 9 else c
 
-// no backslash, CR or NUL from i to e: unescapeStr would return the bytes as they are
-def Nx.lxPlain(s: Str, i: I64, e: I64): Bool =
-  if i >= e then true
-  else if Str.at(s, i) == '\\' || Str.at(s, i) == 13 || Str.at(s, i) == 0 then false
-  else Nx.lxPlain(s, i + 1, e)
-
 // unescapeStr's NUL check (forceNoNullByte): an escaped byte is not checked
 def Nx.lxRawNul(s: Str, i: I64, e: I64): Bool =
   if i >= e then false
   else if Str.at(s, i) == 0 then true
   else if Str.at(s, i) == '\\' then Nx.lxRawNul(s, i + 2, e)
   else Nx.lxRawNul(s, i + 1, e)
-def Nx.lxAnyNul(s: Str, i: I64, e: I64): Bool =
-  if i >= e then false else if Str.at(s, i) == 0 then true else Nx.lxAnyNul(s, i + 1, e)
-
-// <IND_STRING>: the run ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i
-def Nx.lxIndRun(s: Str, i: I64): I64 =
-  val c = Str.at(s, i)
-  val d = Str.at(s, i + 1)
-  if c == -1 then i
-  else if c == '$' && (d == -1 || d == '{' || d == '\'') then i
-  else if c == '\'' && (d == -1 || d == '\'' || d == '$') then i
-  else if c == '$' || c == '\'' then Nx.lxIndRun(s, i + 2)
-  else Nx.lxIndRun(s, i + 1)
 
 // <INPATH,INPATH_SLASH>: ${ ; {PATH}|{PATH_SEG}|{PATH_CHAR}+ ; else INPATH ends the path (PATH_END, the byte is lexed
 // again below) and INPATH_SLASH throws "path has a trailing slash". lb = begin of the last lexeme (a path piece or

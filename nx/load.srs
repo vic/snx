@@ -43,6 +43,8 @@ def Nx.loadWords(src: Str, dir: Str, home: Str, file: Str): Ptr =
         Nx.wbPut(b, p)
         Nx.wbPutS(b, name)
     case _ => Nx.wbPut(b, Nx.wbBad())
+  // the parser's attr indexes (rt/snx_rt.c, malloc'd) die with this file's sets
+  Nx.atFreeAll()
   b
 
 def Nx.wbBool(b: Ptr, x: Bool): Unit = Nx.wbPut(b, if x then 1 else 0)

@@ -29,9 +29,9 @@ enum Nx.BVal:
 enum Nx.BEnt:
   case Nx.BEnt(name: Str, pos: I64, v: Nx.BVal)
 
-// names (in the order they were added) and dyns newest first; idx = the entries by Nx.strKey of the name
+// names (in the order they were added) and dyns newest first; idx = the entries by name (rt/snx_rt.c attr index)
 enum Nx.BSet:
-  case Nx.BSet(p: I64, rec: Bool, names: Coll.List[Str], idx: Coll.IMap[Coll.List[Nx.BEnt]], dyns: Coll.List[Nx.DynBind])
+  case Nx.BSet(p: I64, rec: Bool, names: Coll.List[Str], idx: Ptr, dyns: Coll.List[Nx.DynBind])
 
 enum Nx.SR:
   case Nx.SOk(s: Nx.BSet)
@@ -841,41 +841,21 @@ def Nx.psAttrOf(e: Nx.Expr): Nx.Attr = e match
 
 // ---- addAttr (parser-state.hh:195-298) ---------------------------------------------------------------------------
 
-def Nx.psNewSet(p: I64, isRec: Bool): Nx.BSet = Nx.BSet(p, isRec, Coll.Nil, Coll.Tip, Coll.Nil)
+def Nx.psNewSet(p: I64, isRec: Bool): Nx.BSet = Nx.BSet(p, isRec, Coll.Nil, Nx.atNew(), Coll.Nil)
 
-def Nx.psInBucket(xs: Coll.List[Nx.BEnt], n: Str): Coll.Option[Nx.BEnt] = xs match
-  case Coll.Nil => Coll.None
-  case Coll.Cons(h, t) =>
-    val Nx.BEnt(m, _, _) = h
-    if Str.eq(m, n) then Coll.Some(h) else Nx.psInBucket(t, n)
-
-def Nx.psBucket(s: Nx.BSet, n: Str): Coll.List[Nx.BEnt] = Nx.psBucketK(s, Nx.strKey(n))
-
-def Nx.psBucketK(s: Nx.BSet, k: I64): Coll.List[Nx.BEnt] =
+// the entry named n
+def Nx.psGet(s: Nx.BSet, n: Str): Coll.Option[Nx.BEnt] =
   val Nx.BSet(_, _, _, idx, _) = s
-  Coll.node(idx, k) match
-    case Coll.Bin(_, _, b, _, _) => b
-    case Coll.Tip => Coll.Nil
+  val e = Nx.atFind(idx, n)
+  if Nx.ptrEq(e, Nx.noFrame()) then Coll.None else Coll.Some(Nx.atEnt[Nx.BEnt](e))
 
-def Nx.psGet(s: Nx.BSet, n: Str): Coll.Option[Nx.BEnt] = Nx.psInBucket(Nx.psBucket(s, n), n)
-
-// the bucket without the entry named n
-def Nx.psDropIn(xs: Coll.List[Nx.BEnt], n: Str, acc: Coll.List[Nx.BEnt]): Coll.List[Nx.BEnt] = xs match
-  case Coll.Nil => acc
-  case Coll.Cons(h, t) =>
-    val Nx.BEnt(m, _, _) = h
-    if Str.eq(m, n) then Coll.revOnto(acc, t) else Nx.psDropIn(t, n, Coll.Cons(h, acc))
-
-// s with e added, or in place of the entry of its name
+// s with e added, or in place of the entry of its name. The index is updated in place: a set under construction is
+// used linearly (each put's result replaces it; a failed parse drops it)
 def Nx.psPut(s: Nx.BSet, e: Nx.BEnt): Nx.BSet =
   val Nx.BSet(p, isRec, names, idx, dyns) = s
   val Nx.BEnt(n, _, _) = e
-  val k = Nx.strKey(n)
-  val b = Nx.psBucketK(s, k)
-  val names1: Coll.List[Str] = Nx.psInBucket(b, n) match
-    case Coll.Some(_) => names
-    case Coll.None => Coll.Cons(n, names)
-  Nx.BSet(p, isRec, names1, Coll.insert(idx, k, Coll.Cons(e, Nx.psDropIn(b, n, Coll.Nil))), dyns)
+  val names1: Coll.List[Str] = if Nx.atPut(idx, n, e) then Coll.Cons(n, names) else names
+  Nx.BSet(p, isRec, names1, idx, dyns)
 
 def Nx.psSetExpr(s: Nx.BSet): Nx.Expr =
   val Nx.BSet(p, isRec, names, _, dyns) = s
