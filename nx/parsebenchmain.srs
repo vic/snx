@@ -1,0 +1,33 @@
+// parse and compile every file named in the list file argv[1] (one path a line), no eval; print files, bytes, the
+// files that compiled, those with an undefined variable and those that did not parse
+def Nx.pbLineEnd(s: Str, i: I64): I64 = if i < Str.len(s) && Str.at(s, i) != 10 then Nx.pbLineEnd(s, i + 1) else i
+def Nx.pbGo(list: Str, i: I64, files: I64, bytes: I64, ok: I64, undef: I64, bad: I64): Unit =
+  if i >= Str.len(list) then
+    Console.printI64(files)
+    Console.print(" files ")
+    Console.printI64(bytes)
+    Console.print(" bytes ")
+    Console.printI64(ok)
+    Console.print(" compiled ")
+    Console.printI64(undef)
+    Console.print(" undefined ")
+    Console.printI64(bad)
+    Console.print(" unparsed\n")
+  else
+    val e = Nx.pbLineEnd(list, i)
+    val path = Str.slice(list, i, e)
+    val src = Files.read(path)
+    val n = files + 1
+    val b = bytes + Str.len(src)
+    Nx.parse(src, Nx.dirName(path), "/home/case") match
+      case Nx.Parsed(x) => Nx.compile(x, path, src) match
+        case Nx.Compiled(_) => Nx.pbGo(list, e + 1, n, b, ok + 1, undef, bad)
+        case Nx.Undefined(_, _) => Nx.pbGo(list, e + 1, n, b, ok, undef + 1, bad)
+      case _ => Nx.pbGo(list, e + 1, n, b, ok, undef, bad + 1)
+def main(): I64 =
+  handle r = Srs.Arena()
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  Nx.pbGo(Files.read(Args.at(1)), 0, 0, 0, 0, 0, 0)
+  0

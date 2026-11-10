@@ -156,6 +156,8 @@ int64_t Nx__release(uint8_t* m) {
 static srs_str* g_names; static int64_t g_nsyms, g_names_cap;
 static int64_t* g_tab; static int64_t g_tab_cap;
 static uint64_t nx_hash(srs_str s) { uint64_t h = 1469598103934665603ull; for (int64_t i = 0; i < s.n; i++) { h ^= s.p[i]; h *= 1099511628211ull; } return h; }
+// a string's 64-bit FNV-1a (nx/parse.srs keys its attribute index by it; equal names are still compared)
+int64_t Nx__strKey(srs_str s) { return (int64_t)nx_hash(s); }
 static void nx_tab_grow(void) {
   int64_t cap = g_tab_cap ? g_tab_cap * 2 : 4096;
   int64_t* t = malloc((size_t)cap * sizeof *t);
@@ -503,4 +505,54 @@ int64_t Nx__sbAddEsc(nx_sb* b, srs_str s) {
   }
   *o++ = '"'; b->n = o - b->p;
   return 0;
+}
+
+// ── lexer byte classes and runs (nx/lex.srs): one table lookup a byte instead of a chain of compares. A class bit per
+// flex class; -1 (past the end, Str.at) and NUL are in none
+enum { NX_ALPHA = 1, NX_DIGIT = 2, NX_ID = 4, NX_PC = 8, NX_SCHEME = 16, NX_URI = 32, NX_WS = 64 };
+static uint8_t nx_cls[256];
+__attribute__((constructor)) static void nx_cls_init(void) {
+  for (int c = 0; c < 256; c++) {
+    bool a = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'), d = c >= '0' && c <= '9';
+    uint8_t k = 0;
+    if (a) k |= NX_ALPHA;
+    if (d) k |= NX_DIGIT;
+    if (a || d || c == '_' || c == '\'' || c == '-') k |= NX_ID;
+    if (a || d || c == '.' || c == '_' || c == '-' || c == '+') k |= NX_PC;
+    if (a || d || c == '+' || c == '-' || c == '.') k |= NX_SCHEME;
+    if (a || d || (c && strchr("%/?:@&=+$,-_.!~*'", c))) k |= NX_URI;
+    if (c == ' ' || c == 9 || c == 13 || c == '\n') k |= NX_WS;
+    nx_cls[c] = k;
+  }
+}
+static inline bool nx_is(int64_t c, uint8_t k) { return c >= 0 && c < 256 && (nx_cls[c] & k); }
+bool Nx__lxDigit(int64_t c) { return nx_is(c, NX_DIGIT); }
+bool Nx__lxAlpha(int64_t c) { return nx_is(c, NX_ALPHA); }
+bool Nx__lxIdChar(int64_t c) { return nx_is(c, NX_ID); }
+bool Nx__lxPc(int64_t c) { return nx_is(c, NX_PC); }
+bool Nx__lxSchemeChar(int64_t c) { return nx_is(c, NX_SCHEME); }
+bool Nx__lxUriChar(int64_t c) { return nx_is(c, NX_URI); }
+bool Nx__lxWs(int64_t c) { return nx_is(c, NX_WS); }
+// the end of the run of class k in s from i
+static inline int64_t nx_run(srs_str s, int64_t i, uint8_t k) {
+  if (i < 0) return i;
+  while (i < s.n && (nx_cls[s.p[i]] & k)) i++;
+  return i;
+}
+int64_t Nx__lxDigitsEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_DIGIT); }
+int64_t Nx__lxIdRun(srs_str s, int64_t i) { return nx_run(s, i, NX_ID); }
+int64_t Nx__lxPcEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_PC); }
+int64_t Nx__lxSchemeEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_SCHEME); }
+int64_t Nx__lxUricEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_URI); }
+int64_t Nx__lxWsEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_WS); }
+// the end of a # comment's line: at \r, \n or the end
+int64_t Nx__lxLineEnd(srs_str s, int64_t i) {
+  if (i < 0) return i;
+  while (i < s.n && s.p[i] != '\n' && s.p[i] != 13) i++;
+  return i;
+}
+// the end of a /* comment whose body starts at j (after the */), or i when it does not close
+int64_t Nx__lxCommentEnd(srs_str s, int64_t j, int64_t i) {
+  for (; j >= 0 && j + 1 < s.n; j++) if (s.p[j] == '*' && s.p[j + 1] == '/') return j + 2;
+  return i;
 }

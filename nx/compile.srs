@@ -139,8 +139,7 @@ def Nx.cpPos(p: I64, cx: Nx.Cx): Nx.Code = cx match
     case Nx.LineCol(l, c) => Nx.CCurPos(file, l, c)
 
 def Nx.cpAssert(p: I64, c: Nx.Code, b: Nx.Code, cx: Nx.Cx): Nx.Code = cx match
-  case Nx.Cx(_, src, _, _) => Nx.lineCol(src, p) match
-    case Nx.LineCol(l, col) => Nx.CAssert(c, b, l, col)
+  case Nx.Cx(_, src, _, _) => Nx.CAssert(c, b, src, p)
 
 // ---- variables ------------------------------------------------------------------------------------------------
 

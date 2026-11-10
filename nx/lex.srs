@@ -28,28 +28,13 @@ enum Nx.LxRule:
   case Nx.LxUri
   case Nx.LxSkip           // whitespace and comments
 
-def Nx.lxDigit(c: I64): Bool = c >= '0' && c <= '9'
-def Nx.lxAlpha(c: I64): Bool = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-def Nx.lxIdChar(c: I64): Bool = Nx.lxAlpha(c) || Nx.lxDigit(c) || c == '_' || c == '\'' || c == '-'
-def Nx.lxPc(c: I64): Bool = Nx.lxAlpha(c) || Nx.lxDigit(c) || c == '.' || c == '_' || c == '-' || c == '+'
-def Nx.lxSchemeChar(c: I64): Bool = Nx.lxAlpha(c) || Nx.lxDigit(c) || c == '+' || c == '-' || c == '.'
-def Nx.lxUriChar(c: I64): Bool =
-  Nx.lxAlpha(c) || Nx.lxDigit(c) || c == '%' || c == '/' || c == '?' || c == ':' || c == '@' || c == '&' || c == '=' || c == '+' || c == '$' || c == ',' || c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == '\''
-def Nx.lxWs(c: I64): Bool = c == ' ' || c == 9 || c == 13 || c == '\n'
+// the byte classes and the runs of one class are rt/snx_rt.c tables (nx/rt.srs "lexer")
 def Nx.lxOp2(a: I64, b: I64): Bool =
   (a == '=' && b == '=') || (a == '!' && b == '=') || (a == '<' && b == '=') || (a == '>' && b == '=') || (a == '&' && b == '&') || (a == '|' && b == '|') || (a == '-' && b == '>') || (a == '/' && b == '/') || (a == '+' && b == '+') || (a == '<' && b == '|') || (a == '|' && b == '>')
 def Nx.lxMax(a: I64, b: I64): I64 = if a > b then a else b
 
 // the end of a run of one class from i
-def Nx.lxDigitsEnd(s: Str, i: I64): I64 = if Nx.lxDigit(Str.at(s, i)) then Nx.lxDigitsEnd(s, i + 1) else i
-def Nx.lxIdRun(s: Str, i: I64): I64 = if Nx.lxIdChar(Str.at(s, i)) then Nx.lxIdRun(s, i + 1) else i
-def Nx.lxPcEnd(s: Str, i: I64): I64 = if Nx.lxPc(Str.at(s, i)) then Nx.lxPcEnd(s, i + 1) else i
-def Nx.lxSchemeEnd(s: Str, i: I64): I64 = if Nx.lxSchemeChar(Str.at(s, i)) then Nx.lxSchemeEnd(s, i + 1) else i
-def Nx.lxUricEnd(s: Str, i: I64): I64 = if Nx.lxUriChar(Str.at(s, i)) then Nx.lxUricEnd(s, i + 1) else i
-def Nx.lxWsEnd(s: Str, i: I64): I64 = if Nx.lxWs(Str.at(s, i)) then Nx.lxWsEnd(s, i + 1) else i
 def Nx.lxSpacesEnd(s: Str, i: I64): I64 = if Str.at(s, i) == ' ' then Nx.lxSpacesEnd(s, i + 1) else i
-def Nx.lxLineEnd(s: Str, i: I64): I64 =
-  if Str.at(s, i) == -1 || Str.at(s, i) == 13 || Str.at(s, i) == '\n' then i else Nx.lxLineEnd(s, i + 1)
 
 // each fn below: the end of the rule's match from i, or i when it does not match
 def Nx.lxOpEnd(s: Str, i: I64): I64 =
@@ -117,10 +102,6 @@ def Nx.lxSkipEnd(s: Str, i: I64): I64 =
   else if c == '#' then Nx.lxLineEnd(s, i + 1)
   else if c == '/' && Str.at(s, i + 1) == '*' then Nx.lxCommentEnd(s, i + 2, i)
   else i
-def Nx.lxCommentEnd(s: Str, j: I64, i: I64): I64 =
-  if Str.at(s, j) == -1 then i
-  else if Str.at(s, j) == '*' && Str.at(s, j + 1) == '/' then j + 2
-  else Nx.lxCommentEnd(s, j + 1, i)
 
 // the longest DEFAULT match at i, the earlier rule on a tie (flex's DFA shape): the first byte picks the few rules
 // that can start with it; the winner is the first of them, in file order, whose end is the largest
