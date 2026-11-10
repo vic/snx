@@ -728,12 +728,29 @@ def Nx.pRemoveAttrs(sv: Nx.Val, l: Nx.Val): Nx.Val = Nx.flat(sv) match
     case _ => Nx.typeErr("a list", l)
   case _ => Nx.typeErr("a set", sv)
 
-// intersectAttrs e1 e2: the attributes of e2 whose names e1 has
-def Nx.pIntersect(x: Nx.Val, y: Nx.Val): Nx.Val = Nx.flat(x) match
-  case Nx.VAttrs(_, _, _) => Nx.flat(y) match
-    case Nx.VAttrs(n, syms, vals) => Nx.filterAttrs(n, syms, vals, x, true)
-    case _ => Nx.typeErr("a set", y)
-  case _ => Nx.typeErr("a set", x)
+// intersectAttrs e1 e2: the attributes of e2 whose names e1 has. The smaller side is walked, its names looked up in the
+// other (prim_intersectAttrs, primops.cc:3396-3408); a layered e2 is not merged, e1's names are looked up in its leaves
+def Nx.pIntersect(x: Nx.Val, y: Nx.Val): Nx.Val =
+  val fx = Nx.flat(x)
+  fx match
+    case Nx.VAttrs(n, syms, _) => y match
+      case Nx.VAttrs(m, ys, yv) =>
+        if m <= n then Nx.filterAttrs(m, ys, yv, fx, true) else Nx.pickGo(n, syms, y, Nx.arrNew(n), Nx.arrNew(n), 0, 0)
+      case Nx.VUnion(_, _) => Nx.pickGo(n, syms, y, Nx.arrNew(n), Nx.arrNew(n), 0, 0)
+      case _ => Nx.typeErr("a set", y)
+    case _ => Nx.typeErr("a set", x)
+
+// the cells of the set y under the n sorted names syms[i..], into os/ov from o: they stay sorted
+def Nx.pickGo(n: I64, syms: Ptr, y: Nx.Val, os: Ptr, ov: Ptr, i: I64, o: I64): Nx.Val =
+  if i == n then Nx.VAttrs(o, os, ov)
+  else
+    val s = Nx.ageti(syms, i)
+    Nx.cellIn(y, s) match
+      case Coll.Some(v) =>
+        Nx.aseti(os, o, s)
+        Nx.aset[Ptr](ov, o, v)
+        Nx.pickGo(n, syms, y, os, ov, i + 1, o + 1)
+      case Coll.None => Nx.pickGo(n, syms, y, os, ov, i + 1, o)
 
 // prim_listToAttrs: { name, value } elements, the first of a name wins, values stay lazy
 def Nx.pListToAttrs(l: Nx.Val): Nx.Val = l match
@@ -850,11 +867,12 @@ def Nx.importFile(p0: Str): Nx.Val =
     case Coll.Tip =>
       val src = Nx.readSrc(p)
       if Str.len(src) < 0 then Nx.VErr(Nx.KOther, Nx.cat("cannot read ", p))
-      else Nx.loadFile(src, Nx.dirName(p), Nx.getEnv("HOME"), p) match
-        case Nx.Loaded(code) =>
-          val c = Nx.lazy(Nx.noFrame(), code)
-          Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.insert(m, key, c))
-          Nx.leak()
-          Nx.force(c)
-        case Nx.LoadUndefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
-        case Nx.LoadBad => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))
+      else Nx.parse(src, Nx.dirName(p), Nx.getEnv("HOME")) match
+        case Nx.Parsed(e) => Nx.compile(e, p, src) match
+          case Nx.Undefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
+          case Nx.Compiled(code) =>
+            val c = Nx.lazy(Nx.noFrame(), code)
+            Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.insert(m, key, c))
+            Nx.leak()
+            Nx.force(c)
+        case _ => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))

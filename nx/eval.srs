@@ -196,10 +196,10 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
     b match
       case Nx.VBool(x) => if x then Nx.eval(env, t) else Nx.eval(env, e)
       case _ => Nx.typeErr("a Boolean", b)
-  case Nx.CAssert(cnd, body, src, p) =>
+  case Nx.CAssert(cnd, body, line, col) =>
     val b = Nx.eval(env, cnd)
     b match
-      case Nx.VBool(x) => if x then Nx.eval(env, body) else Nx.assertErr(src, p)
+      case Nx.VBool(x) => if x then Nx.eval(env, body) else Nx.assertErr(line, col)
       case _ => Nx.typeErr("a Boolean", b)
   case Nx.CNot(a) =>
     val b = Nx.eval(env, a)
@@ -230,9 +230,8 @@ def Nx.evalBool(env: Ptr, c: Nx.Code): Nx.Val =
     case Nx.VBool(_) => v
     case _ => Nx.typeErr("a Boolean", v)
 
-def Nx.assertErr(src: Str, p: I64): Nx.Val = Nx.lineCol(src, p) match
-  case Nx.LineCol(line, col) =>
-    Nx.VErr(Nx.KAssert, Nx.cat(Nx.cat(Nx.cat("assertion failed at ", Nx.intStr(line)), ":"), Nx.intStr(col)))
+def Nx.assertErr(line: I64, col: I64): Nx.Val =
+  Nx.VErr(Nx.KAssert, Nx.cat(Nx.cat(Nx.cat("assertion failed at ", Nx.intStr(line)), ":"), Nx.intStr(col)))
 
 // [L:A4] the with frames innermost first; slot 1 of each is the set, forced here
 def Nx.withVar(env: Ptr, sym: I64, ups: Coll.List[I64], name: Str): Nx.Val = ups match
@@ -634,7 +633,7 @@ def Nx.update(x: Nx.Val, y: Nx.Val): Nx.Val =
   else Nx.flat(y) match
     case Nx.VAttrs(n2, s2, v2) => x match
       case Nx.VAttrs(n1, s1, v1) =>
-        if n1 < Nx.unionMin() then Nx.updFlat(n1, s1, v1, n2, s2, v2)
+        if n1 < Nx.unionMin() || n1 <= n2 then Nx.updFlat(n1, s1, v1, n2, s2, v2)
         else Nx.VUnion(2, Nx.LOn(n2, s2, v2, Nx.LBase(n1, s1, v1)))
       case Nx.VUnion(k, ls) => if k < Nx.maxLeaves() then Nx.VUnion(k + 1, Nx.LOn(n2, s2, v2, ls)) else Nx.compact(ls, n2, s2, v2)
       case _ => x
@@ -792,11 +791,8 @@ def Nx.eqOk(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case Nx.VList(n, xs) => y match
     case Nx.VList(m, ys) => if n != m then Nx.bool(false) else Nx.eqList(xs, ys, 0, n)
     case _ => Nx.bool(false)
-  case Nx.VUnion(_, _) => Nx.eqOk(Nx.flat(x), y)
-  case Nx.VAttrs(_, _, _) => y match
-    case Nx.VAttrs(_, _, _) => Nx.eqAttrs(x, y)
-    case Nx.VUnion(_, _) => Nx.eqAttrs(x, Nx.flat(y))
-    case _ => Nx.bool(false)
+  case Nx.VUnion(_, _) => if Nx.isSet(y) then Nx.eqAttrs(x, y) else Nx.bool(false)
+  case Nx.VAttrs(_, _, _) => if Nx.isSet(y) then Nx.eqAttrs(x, y) else Nx.bool(false)
   case _ => Nx.bool(false)
 
 def Nx.eqList(xs: Ptr, ys: Ptr, i: I64, n: I64): Nx.Val =
@@ -808,17 +804,14 @@ def Nx.eqList(xs: Ptr, ys: Ptr, i: I64, n: I64): Nx.Val =
       case _ => r
 
 // a set whose type is "derivation" (isDerivation, eval.cc:2429-2440): a Nx.VBool or the error
-def Nx.isDrv(v: Nx.Val): Nx.Val = Nx.flat(v) match
-  case Nx.VAttrs(n, syms, vals) =>
-    val i = Nx.findSym(syms, n, Nx.intern("type"))
-    if i < n then
-      val t = Nx.force(Nx.aget[Ptr](vals, i))
-      t match
-        case Nx.VStr(s, _) => Nx.bool(Str.eq(s, "derivation"))
-        case Nx.VErr(_, _) => t
-        case _ => Nx.bool(false)
-    else Nx.bool(false)
-  case _ => Nx.bool(false)
+def Nx.isDrv(v: Nx.Val): Nx.Val = Nx.cellIn(v, Nx.intern("type")) match
+  case Coll.Some(c) =>
+    val t = Nx.force(c)
+    t match
+      case Nx.VStr(s, _) => Nx.bool(Str.eq(s, "derivation"))
+      case Nx.VErr(_, _) => t
+      case _ => Nx.bool(false)
+  case Coll.None => Nx.bool(false)
 
 def Nx.eqAttrs(x: Nx.Val, y: Nx.Val): Nx.Val =
   val dx = Nx.isDrv(x)
@@ -832,17 +825,18 @@ def Nx.eqAttrs(x: Nx.Val, y: Nx.Val): Nx.Val =
       else Nx.eqAttrsPlain(x, y)
     case _ => dx
 
-def Nx.eqDrvs(x: Nx.Val, y: Nx.Val): Nx.Val = x match
-  case Nx.VAttrs(n1, s1, v1) => y match
-    case Nx.VAttrs(n2, s2, v2) =>
-      val o = Nx.intern("outPath")
-      val i = Nx.findSym(s1, n1, o)
-      val j = Nx.findSym(s2, n2, o)
-      if i < n1 && j < n2 then Nx.eqCells(Nx.aget[Ptr](v1, i), Nx.aget[Ptr](v2, j)) else Nx.eqAttrsPlain(x, y)
-    case _ => Nx.bool(false)
-  case _ => Nx.bool(false)
+def Nx.eqDrvs(x: Nx.Val, y: Nx.Val): Nx.Val =
+  val o = Nx.intern("outPath")
+  Nx.cellIn(x, o) match
+    case Coll.Some(a) => Nx.cellIn(y, o) match
+      case Coll.Some(b) => Nx.eqCells(a, b)
+      case Coll.None => Nx.eqAttrsPlain(x, y)
+    case Coll.None => Nx.eqAttrsPlain(x, y)
 
-def Nx.eqAttrsPlain(x: Nx.Val, y: Nx.Val): Nx.Val = x match
+// sets only (Nx.eqOk); a layered one is compared flat
+def Nx.eqAttrsPlain(x: Nx.Val, y: Nx.Val): Nx.Val = Nx.eqFlat(Nx.flat(x), Nx.flat(y))
+
+def Nx.eqFlat(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case Nx.VAttrs(n1, s1, v1) => y match
     case Nx.VAttrs(n2, s2, v2) => if n1 != n2 then Nx.bool(false) else Nx.eqAttrsGo(s1, v1, s2, v2, 0, n1)
     case _ => Nx.bool(false)

@@ -85,14 +85,4 @@ enum Nx.ParseResult:
 enum Nx.LC:
   case Nx.LineCol(line: I64, col: I64)
 
-def Nx.lineCol(src: Str, p: I64): Nx.LC = Nx.lcFrom(src, p, 0, 1, 1)
-
-def Nx.lcFrom(src: Str, p: I64, i: I64, line: I64, col: I64): Nx.LC =
-  if i >= p then Nx.LineCol(line, col)
-  else
-    val c = Str.at(src, i)
-    if c == '\n' then Nx.lcFrom(src, p, i + 1, line + 1, 1)
-    else if c == '\r' then
-      if Str.at(src, i + 1) == '\n' && i + 1 < p then Nx.lcFrom(src, p, i + 2, line + 1, 1)
-      else Nx.lcFrom(src, p, i + 1, line + 1, 1)
-    else Nx.lcFrom(src, p, i + 1, line, col + 1)
+def Nx.lineCol(src: Str, p: I64): Nx.LC = Nx.LineCol(Nx.lcLine(src, p), Nx.lcCol(src, p))

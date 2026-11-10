@@ -29,7 +29,7 @@ enum Nx.BVal:
 enum Nx.BEnt:
   case Nx.BEnt(name: Str, pos: I64, v: Nx.BVal)
 
-// names (in the order they were added) and dyns newest first; idx = the entries by Nx.strKey of the name
+// names (in the order they were added) and dyns newest first; idx = the entries by strHash of the name
 enum Nx.BSet:
   case Nx.BSet(p: I64, rec: Bool, names: Coll.List[Str], idx: Coll.IMap[Coll.List[Nx.BEnt]], dyns: Coll.List[Nx.DynBind])
 
@@ -752,8 +752,30 @@ def Nx.psPathValue(cx: Nx.PCx, lit: Str): Str =
   if Str.at(lit, 0) == '~' then Nx.cat(home, Str.slice(lit, 1, n))
   else
     val full = if Str.at(lit, 0) == '/' then lit else Nx.cat(Nx.cat(dir, "/"), lit)
-    val c = Nx.canonPath(full)
+    val c = Nx.psJoinPath(Nx.psComps(full, 0, Coll.Nil), "")
     if n > 1 && Str.at(lit, n - 1) == '/' then Nx.cat(c, "/") else c
+
+// canonPathInner (file-path-impl.hh): the components from i, last first; . is skipped, .. drops the last
+def Nx.psComps(s: Str, i: I64, acc: Coll.List[Str]): Coll.List[Str] =
+  val n = Str.len(s)
+  if i >= n then acc
+  else if Str.at(s, i) == '/' then Nx.psComps(s, i + 1, acc)
+  else
+    val e = Nx.psCompEnd(s, i)
+    val c = Str.slice(s, i, e)
+    if Str.eq(c, ".") then Nx.psComps(s, e, acc)
+    else if Str.eq(c, "..") then Nx.psComps(s, e, Nx.psDropOne(acc))
+    else Nx.psComps(s, e, Coll.Cons(c, acc))
+
+def Nx.psCompEnd(s: Str, i: I64): I64 = if i >= Str.len(s) || Str.at(s, i) == '/' then i else Nx.psCompEnd(s, i + 1)
+
+def Nx.psDropOne(xs: Coll.List[Str]): Coll.List[Str] = xs match
+  case Coll.Nil => xs
+  case Coll.Cons(_, t) => t
+
+def Nx.psJoinPath(rcs: Coll.List[Str], out: Str): Str = rcs match
+  case Coll.Nil => if Str.len(out) == 0 then "/" else out
+  case Coll.Cons(c, t) => Nx.psJoinPath(t, Nx.cat(Nx.cat("/", c), out))
 
 // ---- binds (parser.y:478-554) ------------------------------------------------------------------------------------
 
@@ -849,11 +871,9 @@ def Nx.psInBucket(xs: Coll.List[Nx.BEnt], n: Str): Coll.Option[Nx.BEnt] = xs mat
     val Nx.BEnt(m, _, _) = h
     if Str.eq(m, n) then Coll.Some(h) else Nx.psInBucket(t, n)
 
-def Nx.psBucket(s: Nx.BSet, n: Str): Coll.List[Nx.BEnt] = Nx.psBucketK(s, Nx.strKey(n))
-
-def Nx.psBucketK(s: Nx.BSet, k: I64): Coll.List[Nx.BEnt] =
+def Nx.psBucket(s: Nx.BSet, n: Str): Coll.List[Nx.BEnt] =
   val Nx.BSet(_, _, _, idx, _) = s
-  Coll.node(idx, k) match
+  Coll.node(idx, strHash(n)) match
     case Coll.Bin(_, _, b, _, _) => b
     case Coll.Tip => Coll.Nil
 
@@ -870,12 +890,11 @@ def Nx.psDropIn(xs: Coll.List[Nx.BEnt], n: Str, acc: Coll.List[Nx.BEnt]): Coll.L
 def Nx.psPut(s: Nx.BSet, e: Nx.BEnt): Nx.BSet =
   val Nx.BSet(p, isRec, names, idx, dyns) = s
   val Nx.BEnt(n, _, _) = e
-  val k = Nx.strKey(n)
-  val b = Nx.psBucketK(s, k)
+  val b = Nx.psBucket(s, n)
   val names1: Coll.List[Str] = Nx.psInBucket(b, n) match
     case Coll.Some(_) => names
     case Coll.None => Coll.Cons(n, names)
-  Nx.BSet(p, isRec, names1, Coll.insert(idx, k, Coll.Cons(e, Nx.psDropIn(b, n, Coll.Nil))), dyns)
+  Nx.BSet(p, isRec, names1, Coll.insert(idx, strHash(n), Coll.Cons(e, Nx.psDropIn(b, n, Coll.Nil))), dyns)
 
 def Nx.psSetExpr(s: Nx.BSet): Nx.Expr =
   val Nx.BSet(p, isRec, names, _, dyns) = s

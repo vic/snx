@@ -131,6 +131,8 @@ static void sha256_ni(uint32_t state[8], const uint8_t* p, size_t nb) {
   s1 = _mm_blend_epi16(s1, t, 0xF0);
   for (; nb; nb--, p += 64) {
     __m128i abef = s0, cdgh = s1, w[4];
+    // unrolled, w[g & 3] is a register and the g < 4 test is gone
+#pragma clang loop unroll(full)
     for (int g = 0; g < 16; g++) {
       __m128i m;
       if (g < 4) m = w[g] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 16 * g)), mask);

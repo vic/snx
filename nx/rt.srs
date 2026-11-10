@@ -43,6 +43,9 @@ extern def Nx.sbView(b: Ptr): Str
 extern def Nx.sbAddQ(b: Ptr, s: Str): Unit
 extern def Nx.sbAddEsc(b: Ptr, s: Str): Unit
 extern def Nx.escStr(s: Str): Str
+// Nx.lineCol: the line and the column of byte p of src
+extern def Nx.lcLine(src: Str, p: I64): I64
+extern def Nx.lcCol(src: Str, p: I64): I64
 extern def Nx.readFile(path: Str): Str
 extern def Nx.isDir(path: Str): Bool
 extern def Nx.getEnv(name: Str): Str
@@ -64,34 +67,3 @@ extern def Nx.attrName(s: Str): Str
 // the position record of a symbol array (rt/snx_fs.c), Nx.noFrame() when none
 extern def Nx.posGet(key: Ptr): Ptr
 extern def Nx.posPut(key: Ptr, rec: Ptr): Unit
-// lexer byte classes (flex classes of nx/lex.srs) and the end of a run of one class from i (rt/snx_rt.c table)
-extern def Nx.lxDigit(c: I64): Bool
-extern def Nx.lxAlpha(c: I64): Bool
-extern def Nx.lxIdChar(c: I64): Bool
-extern def Nx.lxPc(c: I64): Bool
-extern def Nx.lxSchemeChar(c: I64): Bool
-extern def Nx.lxUriChar(c: I64): Bool
-extern def Nx.lxWs(c: I64): Bool
-extern def Nx.lxDigitsEnd(s: Str, i: I64): I64
-extern def Nx.lxIdRun(s: Str, i: I64): I64
-extern def Nx.lxPcEnd(s: Str, i: I64): I64
-extern def Nx.lxSchemeEnd(s: Str, i: I64): I64
-extern def Nx.lxUricEnd(s: Str, i: I64): I64
-extern def Nx.lxWsEnd(s: Str, i: I64): I64
-// the end of a # comment's line; of a /* comment whose body starts at j, or i when it does not close
-extern def Nx.lxLineEnd(s: Str, i: I64): I64
-extern def Nx.lxCommentEnd(s: Str, j: I64, i: I64): I64
-// a hash of the bytes of s (rt/snx_rt.c FNV-1a): a key, names that collide are told apart by Str.eq
-extern def Nx.strKey(s: Str): I64
-// a word buffer (rt/snx_rt.c, nx/load.srs): words, pointers and strings put in order and got back in the same order
-extern def Nx.wbNew(): Ptr
-extern def Nx.wbPut(b: Ptr, x: I64): Unit
-extern def Nx.wbGet(b: Ptr): I64
-extern def Nx.wbPutP(b: Ptr, p: Ptr): Unit
-extern def Nx.wbGetP(b: Ptr): Ptr
-extern def Nx.wbPutS(b: Ptr, s: Str): Unit
-extern def Nx.wbGetS(b: Ptr): Str
-extern def Nx.wbFree(b: Ptr): Unit
-// a loaded file's position records get its file and source cells (nx/load.srs)
-extern def Nx.posCells(file: Ptr, src: Ptr): Unit
-extern def Nx.posMove(old: Ptr, key: Ptr): Unit

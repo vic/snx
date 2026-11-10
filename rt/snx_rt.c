@@ -156,8 +156,6 @@ int64_t Nx__release(uint8_t* m) {
 static srs_str* g_names; static int64_t g_nsyms, g_names_cap;
 static int64_t* g_tab; static int64_t g_tab_cap;
 static uint64_t nx_hash(srs_str s) { uint64_t h = 1469598103934665603ull; for (int64_t i = 0; i < s.n; i++) { h ^= s.p[i]; h *= 1099511628211ull; } return h; }
-// a string's 64-bit FNV-1a (nx/parse.srs keys its attribute index by it; equal names are still compared)
-int64_t Nx__strKey(srs_str s) { return (int64_t)nx_hash(s); }
 static void nx_tab_grow(void) {
   int64_t cap = g_tab_cap ? g_tab_cap * 2 : 4096;
   int64_t* t = malloc((size_t)cap * sizeof *t);
@@ -486,17 +484,50 @@ srs_str Nx__attrName(srs_str s) {
   return ok ? s : Nx__escStr(s);
 }
 
+// nx/ast.srs Nx.lineCol: a line ends at \n, \r\n or a lone \r; the column counts bytes from 1, also past the end of src
+int64_t Nx__lcLine(srs_str s, int64_t p) {
+  int64_t line = 1, e = p < s.n ? p : s.n;
+  for (int64_t i = 0; i < e; i++) {
+    uint8_t c = s.p[i];
+    if (c > '\r') continue;
+    if (c == '\n') line++;
+    else if (c == '\r') { if (i + 1 < e && s.p[i + 1] == '\n') i++; line++; }
+  }
+  return line;
+}
+// back to the last line end before p (a \r right before p ends a line there too)
+int64_t Nx__lcCol(srs_str s, int64_t p) {
+  int64_t j = (p < s.n ? p : s.n) - 1;
+  while (j >= 0 && s.p[j] != '\n' && s.p[j] != '\r') j--;
+  return p - j;
+}
+
 // ATerm strings (derivations.cc): printUnquotedString = s in quotes; printString also escapes " \ newline CR tab
 int64_t Nx__sbAddQ(nx_sb* b, srs_str s) {
   nx_sbRoom(b, s.n + 2);
   b->p[b->n] = '"'; memcpy(b->p + b->n + 1, s.p, (size_t)s.n); b->p[b->n + 1 + s.n] = '"'; b->n += s.n + 2;
   return 0;
 }
+// the high bit set in some byte of w when one of its bytes is " or \ or below 14 (hasless, exact when none is)
+static inline uint64_t nx_atermSpecial(uint64_t w) {
+  const uint64_t ones = 0x0101010101010101ull, high = 0x8080808080808080ull;
+  uint64_t q = w ^ (ones * '"'), s = w ^ (ones * '\\');
+  return (((q - ones) & ~q) | ((s - ones) & ~s) | ((w - ones * 14) & ~w)) & high;
+}
 int64_t Nx__sbAddEsc(nx_sb* b, srs_str s) {
   nx_sbRoom(b, 2 * s.n + 2);
   uint8_t* o = b->p + b->n; *o++ = '"';
-  for (int64_t i = 0; i < s.n; i++) {
-    uint8_t c = s.p[i];
+  for (int64_t i = 0; i < s.n;) {
+    // eight bytes at a time: the plain ones before the first special byte (the lowest flagged byte is a true one) go
+    // out in one store, which the 2n + 2 bytes of room cover
+    if (i + 8 <= s.n) {
+      uint64_t w, m;
+      memcpy(&w, s.p + i, 8);
+      memcpy(o, &w, 8);
+      if (!(m = nx_atermSpecial(w))) { o += 8; i += 8; continue; }
+      o += __builtin_ctzll(m) >> 3; i += __builtin_ctzll(m) >> 3;
+    }
+    uint8_t c = s.p[i++];
     if (c == '"' || c == '\\') { *o++ = '\\'; *o++ = c; }
     else if (c == '\n') { *o++ = '\\'; *o++ = 'n'; }
     else if (c == '\r') { *o++ = '\\'; *o++ = 'r'; }
@@ -504,82 +535,5 @@ int64_t Nx__sbAddEsc(nx_sb* b, srs_str s) {
     else *o++ = c;
   }
   *o++ = '"'; b->n = o - b->p;
-  return 0;
-}
-
-// ── lexer byte classes and runs (nx/lex.srs): one table lookup a byte instead of a chain of compares. A class bit per
-// flex class; -1 (past the end, Str.at) and NUL are in none
-enum { NX_ALPHA = 1, NX_DIGIT = 2, NX_ID = 4, NX_PC = 8, NX_SCHEME = 16, NX_URI = 32, NX_WS = 64 };
-static uint8_t nx_cls[256];
-__attribute__((constructor)) static void nx_cls_init(void) {
-  for (int c = 0; c < 256; c++) {
-    bool a = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'), d = c >= '0' && c <= '9';
-    uint8_t k = 0;
-    if (a) k |= NX_ALPHA;
-    if (d) k |= NX_DIGIT;
-    if (a || d || c == '_' || c == '\'' || c == '-') k |= NX_ID;
-    if (a || d || c == '.' || c == '_' || c == '-' || c == '+') k |= NX_PC;
-    if (a || d || c == '+' || c == '-' || c == '.') k |= NX_SCHEME;
-    if (a || d || (c && strchr("%/?:@&=+$,-_.!~*'", c))) k |= NX_URI;
-    if (c == ' ' || c == 9 || c == 13 || c == '\n') k |= NX_WS;
-    nx_cls[c] = k;
-  }
-}
-static inline bool nx_is(int64_t c, uint8_t k) { return c >= 0 && c < 256 && (nx_cls[c] & k); }
-bool Nx__lxDigit(int64_t c) { return nx_is(c, NX_DIGIT); }
-bool Nx__lxAlpha(int64_t c) { return nx_is(c, NX_ALPHA); }
-bool Nx__lxIdChar(int64_t c) { return nx_is(c, NX_ID); }
-bool Nx__lxPc(int64_t c) { return nx_is(c, NX_PC); }
-bool Nx__lxSchemeChar(int64_t c) { return nx_is(c, NX_SCHEME); }
-bool Nx__lxUriChar(int64_t c) { return nx_is(c, NX_URI); }
-bool Nx__lxWs(int64_t c) { return nx_is(c, NX_WS); }
-// the end of the run of class k in s from i
-static inline int64_t nx_run(srs_str s, int64_t i, uint8_t k) {
-  if (i < 0) return i;
-  while (i < s.n && (nx_cls[s.p[i]] & k)) i++;
-  return i;
-}
-int64_t Nx__lxDigitsEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_DIGIT); }
-int64_t Nx__lxIdRun(srs_str s, int64_t i) { return nx_run(s, i, NX_ID); }
-int64_t Nx__lxPcEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_PC); }
-int64_t Nx__lxSchemeEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_SCHEME); }
-int64_t Nx__lxUricEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_URI); }
-int64_t Nx__lxWsEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_WS); }
-// the end of a # comment's line: at \r, \n or the end
-int64_t Nx__lxLineEnd(srs_str s, int64_t i) {
-  if (i < 0) return i;
-  while (i < s.n && s.p[i] != '\n' && s.p[i] != 13) i++;
-  return i;
-}
-// the end of a /* comment whose body starts at j (after the */), or i when it does not close
-int64_t Nx__lxCommentEnd(srs_str s, int64_t j, int64_t i) {
-  for (; j >= 0 && j + 1 < s.n; j++) if (s.p[j] == '*' && s.p[j + 1] == '/') return j + 2;
-  return i;
-}
-
-// ── word buffer (nx/load.srs): a file's compiled code written out as words before its arena is freed, then read back
-// in order. malloc'd, freed by Nx.wbFree
-typedef struct { int64_t* w; int64_t n, cap, rd; } nx_wb;
-void* Nx__wbNew(void) { nx_wb* b = calloc(1, sizeof *b); if (!b) { fputs("snx: out of memory\n", stderr); exit(70); } return b; }
-int64_t Nx__wbPut(nx_wb* b, int64_t x) {
-  if (b->n == b->cap) { b->cap = b->cap ? 2 * b->cap : 1024; b->w = realloc(b->w, (size_t)b->cap * sizeof *b->w); if (!b->w) { fputs("snx: out of memory\n", stderr); exit(70); } }
-  b->w[b->n++] = x;
-  return 0;
-}
-int64_t Nx__wbGet(nx_wb* b) { return b->w[b->rd++]; }
-int64_t Nx__wbPutP(nx_wb* b, void* p) { return Nx__wbPut(b, (int64_t)p); }
-void* Nx__wbGetP(nx_wb* b) { return (void*)b->w[b->rd++]; }
-// a string as its two words: the bytes are not in an arena (source text, malloc'd or static)
-int64_t Nx__wbPutS(nx_wb* b, srs_str s) { Nx__wbPut(b, (int64_t)s.p); return Nx__wbPut(b, s.n); }
-srs_str Nx__wbGetS(nx_wb* b) { const uint8_t* p = (const uint8_t*)b->w[b->rd++]; return (srs_str){p, b->w[b->rd++]}; }
-int64_t Nx__wbFree(nx_wb* b) { free(b->w); free(b); return 0; }
-// a loaded file's position records (rt/snx_fs.c posGet/posPut): their file and source cells were in the freed arena;
-// Nx.posMove puts the current file's cells in the record under old and registers it under key too
-void* Nx__posGet(void* key); int64_t Nx__posPut(void* key, void* val);
-static void* g_pos_file; static void* g_pos_src;
-int64_t Nx__posCells(void* file, void* src) { g_pos_file = file; g_pos_src = src; return 0; }
-int64_t Nx__posMove(void* old, void* key) {
-  void** r = Nx__posGet(old);
-  if (r) { r[0] = g_pos_file; r[1] = g_pos_src; if (key != old) Nx__posPut(key, r); }
   return 0;
 }

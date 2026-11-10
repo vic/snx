@@ -145,17 +145,30 @@ static int fs_u8(const uint8_t* s, int64_t n, int64_t i) {
   return k;
 }
 
-// a JSON string literal of s as nlohmann::json::dump writes it; length -1 when s is not UTF-8
+// a JSON string literal of s as nlohmann::json::dump writes it; length -1 when s is not UTF-8. The bytes are a
+// scratch buffer, valid until the next call (nx/b_json.srs Nx.jsonStrOut copies them at once)
 srs_str Nx__jsonStr(srs_str s) {
-  uint8_t* o = malloc((size_t)s.n * 6 + 3);
+  static uint8_t* o; static size_t cap;
+  if ((size_t)s.n * 6 + 3 > cap) { free(o); cap = (size_t)s.n * 6 + 3 > 2 * cap ? (size_t)s.n * 6 + 3 : 2 * cap; o = malloc(cap); }
   if (!o) exit(70);
   int64_t n = 0;
   o[n++] = '"';
+  const uint64_t ones = 0x0101010101010101ull, high = 0x8080808080808080ull;
   for (int64_t i = 0; i < s.n;) {
+    // eight bytes at a time: the plain ones (not below 0x20, at or above 0x80, " or \) before the first special byte go
+    // out in one store (hasless and haszero: the lowest flagged byte is a true one)
+    if (i + 8 <= s.n) {
+      uint64_t w, q, b, m;
+      memcpy(&w, s.p + i, 8);
+      memcpy(o + n, &w, 8);
+      q = w ^ (ones * '"'); b = w ^ (ones * '\\');
+      if (!(m = (w | ((w - ones * 0x20) & ~w) | ((q - ones) & ~q) | ((b - ones) & ~b)) & high)) { n += 8; i += 8; continue; }
+      n += __builtin_ctzll(m) >> 3; i += __builtin_ctzll(m) >> 3;
+    }
     uint8_t c = s.p[i];
     if (c >= 0x80) {
       int k = fs_u8(s.p, s.n, i);
-      if (!k) { free(o); return fs_mk((const uint8_t*)"", -1); }
+      if (!k) return fs_mk((const uint8_t*)"", -1);
       memcpy(o + n, s.p + i, (size_t)k); n += k; i += k; continue;
     }
     i++;

@@ -2,6 +2,7 @@
 // xml-writer.cc). fromJSON keeps its own stack of open arrays and objects, so nesting depth costs no C stack.
 
 extern def Nx.utf8(cp: I64): Str
+// the bytes stay valid until the next call only
 extern def Nx.jsonStr(s: Str): Str
 extern def Nx.jsonFloat(bits: I64): Str
 extern def Nx.xmlEsc(s: Str): Str
