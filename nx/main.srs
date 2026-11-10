@@ -73,14 +73,21 @@ def Nx.answerCheck(path: Str, src: Str): I64 =
       Console.eprint("error: syntax error\n")
       1
 
+def Nx.hasSub(s: Str, w: Str, i: I64): Bool =
+  if i + Str.len(w) > Str.len(s) then false
+  else if Str.eq(Str.slice(s, i, i + Str.len(w)), w) then true
+  else Nx.hasSub(s, w, i + 1)
+
 // the nix-instantiate flags snx knows (the rest exit 3): --eval and --strict (eval is always strict), --no-show-trace,
-// --extra-experimental-features X (the features of later waves do not change core evaluation), --max-call-depth N
+// --extra-experimental-features X (only parse-toml-timestamps changes anything yet), --max-call-depth N
 def Nx.flagsOk(i: I64): Bool =
   if i >= Args.count() then true
   else
     val f = Args.at(i)
     if Str.eq(f, "--eval") || Str.eq(f, "--strict") || Str.eq(f, "--no-show-trace") then Nx.flagsOk(i + 1)
-    else if Str.eq(f, "--extra-experimental-features") then Nx.flagsOk(i + 2)
+    else if Str.eq(f, "--extra-experimental-features") then
+      if i + 1 < Args.count() && Nx.hasSub(Args.at(i + 1), "parse-toml-timestamps", 0) then Nx.aseti(Nx.globals(), Nx.gTimestamps(), 1) else ()
+      Nx.flagsOk(i + 2)
     else if Str.eq(f, "--max-call-depth") && i + 1 < Args.count() then
       Nx.aseti(Nx.globals(), Nx.gMaxDepth(), Nx.intValue(Args.at(i + 1)))
       Nx.flagsOk(i + 2)

@@ -56,6 +56,9 @@ enum Nx.Prim:
   case Nx.PConcatMap
   case Nx.PAddErrorContext
   case Nx.PGetEnv
+  case Nx.PMatch
+  case Nx.PSplit
+  case Nx.PFromToml
 
 // the arithmetic primops
 enum Nx.Ar:
@@ -132,6 +135,9 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PSort => Nx.pSort(a, Nx.force(b))
     case Nx.PConcatMap => Nx.pConcatMap(a, Nx.force(b))
     case Nx.PAddErrorContext => Nx.force(b)
+    case Nx.PMatch => Nx.pMatch(Nx.force(a), Nx.force(b))
+    case Nx.PSplit => Nx.pSplit(Nx.force(a), Nx.force(b))
+    case Nx.PFromToml => Nx.pFromToml(Nx.force(a))
     case Nx.PGetEnv =>
       val s = Nx.force(a)
       s match

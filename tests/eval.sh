@@ -11,7 +11,8 @@ fail=0 n=0
 for f in "$here"/tests/eval/*.nix; do
   b=${f%.nix}
   n=$((n + 1))
-  if got=$(HOME=/fake-home TEST_VAR=foo timeout 5 "$SNX" eval "$f" 2>/dev/null); then :; else got=error; fi
+  fl=(); [[ -e $b.flags ]] && read -ra fl < "$b.flags"
+  if got=$(HOME=/fake-home TEST_VAR=foo timeout 5 "$SNX" eval "$f" "${fl[@]}" 2>/dev/null); then :; else got=error; fi
   [[ $got == "$(cat "$b.exp")" ]] || { echo "FAIL $(basename "$f"): want $(cat "$b.exp") got $got"; fail=1; }
 done
 echo "unit: $n cases, $([[ $fail == 0 ]] && echo all pass || echo FAILURES)"

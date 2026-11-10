@@ -1,0 +1,105 @@
+// snx builtins.match, builtins.split, builtins.fromTOML (primops.cc prim_match, prim_split; primops/fromTOML.cc) over the
+// engines of nx/regex.srs and nx/toml.srs.
+
+// the compiled regex of a pattern, compiled once per distinct pattern string (cache = Nx.gRegex of Nx.globals())
+def Nx.reGet(pat: Str): Nx.ReResult =
+  val g = Nx.globals()
+  val m = Nx.aget[Coll.IMap[Nx.ReResult]](g, Nx.gRegex())
+  val k = Nx.intern(pat)
+  Coll.lookup(m, k) match
+    case Coll.Some(r) => r
+    case Coll.None =>
+      val r = Nx.reCompile(pat)
+      Nx.aset[Coll.IMap[Nx.ReResult]](g, Nx.gRegex(), Coll.insert(m, k, r))
+      r
+
+def Nx.reBadErr(pat: Str): Nx.Val = Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("invalid regular expression '", pat), "'"))
+
+def Nx.strCell(s: Str): Ptr = Nx.cell(Nx.VStr(s, Coll.Nil))
+
+def Nx.groupCell(g: Coll.Option[Str]): Ptr = g match
+  case Coll.None => Nx.cell(Nx.VNull)
+  case Coll.Some(s) => Nx.strCell(s)
+
+def Nx.groupsFill(gs: Coll.List[Coll.Option[Str]], out: Ptr, i: I64): Unit = gs match
+  case Coll.Nil => ()
+  case Coll.Cons(g, t) =>
+    Nx.aset[Ptr](out, i, Nx.groupCell(g))
+    Nx.groupsFill(t, out, i + 1)
+
+def Nx.groupsVal(gs: Coll.List[Coll.Option[Str]]): Nx.Val =
+  val n = Coll.length(gs)
+  val out = Nx.arrNew(n)
+  Nx.groupsFill(gs, out, 0)
+  Nx.VList(n, out)
+
+// builtins.match regex str
+def Nx.pMatch(rv: Nx.Val, sv: Nx.Val): Nx.Val = rv match
+  case Nx.VStr(pat, _) => Nx.reGet(pat) match
+    case Nx.ReBad => Nx.reBadErr(pat)
+    case Nx.ReOk(re) => sv match
+      case Nx.VStr(s, _) => Nx.reMatch(re, s) match
+        case Coll.None => Nx.VNull
+        case Coll.Some(gs) => Nx.groupsVal(gs)
+      case _ => Nx.typeErr("a string", sv)
+  case _ => Nx.typeErr("a string", rv)
+
+def Nx.splitFill(ps: Coll.List[Nx.SplitPart], out: Ptr, i: I64): Unit = ps match
+  case Coll.Nil => ()
+  case Coll.Cons(p, t) =>
+    val c = p match
+      case Nx.SpStr(s) => Nx.strCell(s)
+      case Nx.SpMatch(gs) => Nx.cell(Nx.groupsVal(gs))
+    Nx.aset[Ptr](out, i, c)
+    Nx.splitFill(t, out, i + 1)
+
+// builtins.split regex str
+def Nx.pSplit(rv: Nx.Val, sv: Nx.Val): Nx.Val = rv match
+  case Nx.VStr(pat, _) => Nx.reGet(pat) match
+    case Nx.ReBad => Nx.reBadErr(pat)
+    case Nx.ReOk(re) => sv match
+      case Nx.VStr(s, _) =>
+        val ps = Nx.reSplit(re, s)
+        val n = Coll.length(ps)
+        val out = Nx.arrNew(n)
+        Nx.splitFill(ps, out, 0)
+        Nx.VList(n, out)
+      case _ => Nx.typeErr("a string", sv)
+  case _ => Nx.typeErr("a string", rv)
+
+// ---- fromTOML -------------------------------------------------------------------------------------------------
+
+def Nx.tomlItems(xs: Coll.List[Nx.TVal], out: Ptr, i: I64): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.aset[Ptr](out, i, Nx.cell(Nx.tomlVal(h)))
+    Nx.tomlItems(t, out, i + 1)
+
+def Nx.tomlPairs(kvs: Coll.List[Nx.TKV]): Coll.List[Nx.Pair] = kvs match
+  case Coll.Nil => Coll.Nil
+  case Coll.Cons(h, t) => h match
+    case Nx.TvKey(k, v) => Coll.Cons(Nx.Pair(Nx.intern(k), Nx.cell(Nx.tomlVal(v))), Nx.tomlPairs(t))
+
+// a date or time is { _type = "timestamp"; value = "..."; }
+def Nx.tomlStamp(text: Str): Nx.Val =
+  Nx.attrsOf(Coll.Cons(Nx.Pair(Nx.intern("_type"), Nx.strCell("timestamp")), Coll.Cons(Nx.Pair(Nx.intern("value"), Nx.strCell(text)), Coll.Nil)))
+
+def Nx.tomlVal(v: Nx.TVal): Nx.Val = v match
+  case Nx.TvInt(n) => Nx.VInt(n)
+  case Nx.TvFloat(b) => Nx.VFloat(b)
+  case Nx.TvStr(s) => Nx.VStr(s, Coll.Nil)
+  case Nx.TvBool(b) => Nx.VBool(b)
+  case Nx.TvArr(xs) =>
+    val n = Coll.length(xs)
+    val out = Nx.arrNew(n)
+    Nx.tomlItems(xs, out, 0)
+    Nx.VList(n, out)
+  case Nx.TvTable(kvs) => Nx.attrsOf(Nx.tomlPairs(kvs))
+  case Nx.TvStamp(t) => Nx.tomlStamp(t)
+
+// builtins.fromTOML str; timestamps = --extra-experimental-features parse-toml-timestamps
+def Nx.pFromToml(sv: Nx.Val): Nx.Val = sv match
+  case Nx.VStr(s, _) => Nx.tomlParse(s, Nx.ageti(Nx.globals(), Nx.gTimestamps()) == 1) match
+    case Nx.TomlOk(v) => Nx.tomlVal(v)
+    case Nx.TomlBad(why) => Nx.VErr(Nx.KOther, Nx.cat("while parsing TOML: ", why))
+  case _ => Nx.typeErr("a string", sv)
