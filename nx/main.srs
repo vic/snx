@@ -1,0 +1,43 @@
+// snx: the command line. `snx parse FILE` answers as nix-conformance SPEC.md "parse": `ok TREE` or `error LINE:COL`,
+// with FILE read as /case/input.nix and $HOME as /home/case. Exit 3 = an operation snx does not have yet.
+
+enum Nx.Op:
+  case Nx.OpParse
+  case Nx.OpUnknown
+
+def Nx.op(s: Str): Nx.Op = if Str.eq(s, "parse") then Nx.OpParse else Nx.OpUnknown
+
+def Nx.answerParse(src: Str): I64 =
+  Nx.parse(src, "/case", "/home/case") match
+    case Nx.Parsed(e) =>
+      Console.print("ok ")
+      Nx.printTree(e)
+      Console.print("\n")
+      0
+    case Nx.ParseBad(p) =>
+      Nx.lineCol(src, p) match
+        case Nx.LineCol(l, c) =>
+          Console.print("error ")
+          Console.printI64(l)
+          Console.print(":")
+          Console.printI64(c)
+          Console.print("\n")
+          0
+
+def main(): I64 =
+  handle r = Srs.Arena()
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  if Args.count() < 3 then
+    Console.eprint("usage: snx parse FILE\n")
+    2
+  else
+    val src = Files.read(Args.at(2))
+    if Str.len(src) < 0 then
+      Console.eprint("snx: cannot read the file\n")
+      2
+    else
+      Nx.op(Args.at(1)) match
+        case Nx.OpParse => Nx.answerParse(src)
+        case Nx.OpUnknown => 3

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# The nix-conformance adapter of snx (nix-conformance README.md "Writing an adapter").
+# SNX = the snx binary, default $XDG_RUNTIME_DIR/snx-build/snx.
+op=$1 file=$2
+shift 2
+snx=${SNX:-${XDG_RUNTIME_DIR:-/tmp}/snx-build/snx}
+case $op in
+  parse) exec timeout 5 "$snx" parse "$file" ;;
+  *) exit 3 ;;
+esac
