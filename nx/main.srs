@@ -11,6 +11,7 @@ enum Nx.Op:
   case Nx.OpCheck
   case Nx.OpEval
   case Nx.OpEvalXml
+  case Nx.OpFlake
   case Nx.OpUnknown
 
 def Nx.op(s: Str): Nx.Op =
@@ -20,6 +21,7 @@ def Nx.op(s: Str): Nx.Op =
   else if Str.eq(s, "check") then Nx.OpCheck
   else if Str.eq(s, "eval") then Nx.OpEval
   else if Str.eq(s, "eval-xml") then Nx.OpEvalXml
+  else if Str.eq(s, "flake") then Nx.OpFlake
   else Nx.OpUnknown
 
 def Nx.answerParse(src: Str): I64 =
@@ -148,6 +150,22 @@ def Nx.answerEvalXml(path: Str): I64 =
         0
       case _ => 1
 
+// `snx flake FILE`: SPEC.md "flake", output `result` of the flake FILE/../flake.nix as JSON (b_flake.srs)
+def Nx.answerFlake(path: Str): I64 =
+  val f = Nx.importFile(Nx.cat(Nx.corePrefix(), "flake.nix"))
+  val r = if Nx.isErr(f) then f else Nx.apply(f, Nx.cell(Nx.VStr(Nx.dirName(path), Coll.Nil)))
+  r match
+    case Nx.VErr(_, msg) =>
+      Console.eprint("error: ")
+      Console.eprint(msg)
+      Console.eprint("\n")
+      1
+    case Nx.VStr(s, _) =>
+      Console.print(s)
+      Console.print("\n")
+      0
+    case _ => 1
+
 def main(): I64 =
   handle r = Srs.Arena()
   handle c = Srs.Console()
@@ -169,4 +187,5 @@ def main(): I64 =
         case Nx.OpCheck => Nx.answerCheck(Args.at(2), src)
         case Nx.OpEval => Nx.answerEval(Args.at(2))
         case Nx.OpEvalXml => Nx.answerEvalXml(Args.at(2))
+        case Nx.OpFlake => Nx.answerFlake(Args.at(2))
         case Nx.OpUnknown => 3

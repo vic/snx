@@ -13,4 +13,6 @@ def Nx.coreDerivation(): Str =
 def Nx.readSrc(p: Str): Str =
   if Str.eq(p, Nx.cat(Nx.corePrefix(), "fetchurl.nix")) then Nx.coreFetchurl()
   else if Str.eq(p, Nx.cat(Nx.corePrefix(), "derivation.nix")) then Nx.coreDerivation()
+  else if Str.eq(p, Nx.cat(Nx.corePrefix(), "call-flake.nix")) then Nx.coreCallFlake()
+  else if Str.eq(p, Nx.cat(Nx.corePrefix(), "flake.nix")) then Nx.coreFlake()
   else Nx.readFile(p)

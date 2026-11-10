@@ -11,5 +11,6 @@ case $op in
   check) exec timeout 5 "$snx" check "$(realpath -s "$file")" ;;
   eval) exec timeout 5 "$snx" eval "$(realpath -s "$file")" "$@" ;;
   eval-xml) exec timeout 5 "$snx" eval-xml "$(realpath -s "$file")" "$@" ;;
+  flake) exec timeout 5 "$snx" flake "$(realpath -s "$file")" ;;
   *) exit 3 ;;
 esac
