@@ -263,7 +263,7 @@ def Nx.psFormalsBody(cx: Nx.PCx, ts: I64, p: I64, fs: Nx.FSet, arg: Coll.Option[
   case Nx.PBad(q) => Nx.PBad(q)
   case Nx.POk(b, t1) =>
     val Nx.FSet(ell, xs) = fs
-    val dup = Nx.psDupFormal(Nx.noFrame(), xs, xs, 0, Nx.psAt(ts), -1, -1)
+    val dup = Nx.psDupFormal(Nx.noFrame(), Nx.noFrame(), xs, xs, 0, Nx.psAt(ts), -1, -1)
     if Nx.psLookBad(t1) then Nx.PBad(Nx.psAtW(t1))
     else if dup >= 0 then Nx.PBad(Nx.At(dup))
     else if Nx.psArgIn(xs, arg) then Nx.PBad(Nx.At(p))
@@ -300,39 +300,54 @@ def Nx.psFormalTab(xs: Coll.List[Nx.FmP], k: I64, tab: Ptr): Ptr = xs match
 // from there on a table of the formals before, so a pattern is linear in its formals
 def Nx.psTabAt(): I64 = 64
 
-def Nx.psDupFormal(tab: Ptr, all: Coll.List[Nx.FmP], xs: Coll.List[Nx.FmP], i: I64, body: I64, bestSym: I64, bestPos: I64): I64 = xs match
+def Nx.psDupFormal(tab: Ptr, tm: Ptr, all: Coll.List[Nx.FmP], xs: Coll.List[Nx.FmP], i: I64, body: I64, bestSym: I64, bestPos: I64): I64 = xs match
   case Coll.Nil => bestPos
   case Coll.Cons(h, t) =>
     val tb = if i == Nx.psTabAt() then Nx.psFormalTab(all, i, Nx.atNew()) else tab
     val Nx.FmP(n, q, _, _) = h
     val repeat = if Nx.ptrEq(tb, Nx.noFrame()) then Nx.psFirstIdx(all, n, 0) < i else !Nx.ptrEq(Nx.atAdd[Nx.FmP](tb, n, h), Nx.noFrame())
     if repeat then
+      val tm1 = if Nx.ptrEq(tm, Nx.noFrame()) then Nx.psTimes(0, all, body, Nx.atNew()) else tm
       val known = Nx.psFind1(Nx.psKnownSyms(), Nx.cat(Nx.cat("|", n), "|"), 0)
-      val sym = if known >= 0 then known else Nx.psFileSyms() + Nx.psSymTime(0, n, all, body, body)
-      if bestSym < 0 || sym < bestSym then Nx.psDupFormal(tb, all, t, i + 1, body, sym, q)
-      else Nx.psDupFormal(tb, all, t, i + 1, body, bestSym, bestPos)
-    else Nx.psDupFormal(tb, all, t, i + 1, body, bestSym, bestPos)
+      val sym = if known >= 0 then known else Nx.psFileSyms() + Nx.psTimeOf(tm1, n, body)
+      if bestSym < 0 || sym < bestSym then Nx.psDupFormal(tb, tm1, all, t, i + 1, body, sym, q)
+      else Nx.psDupFormal(tb, tm1, all, t, i + 1, body, bestSym, bestPos)
+    else Nx.psDupFormal(tb, tm, all, t, i + 1, body, bestSym, bestPos)
 
-// when the symbol n is created before the body: an identifier at its token, a formal's name once its default is read
-def Nx.psSymTime(ts: I64, n: Str, fs: Coll.List[Nx.FmP], body: I64, best: I64): I64 =
-  if ts >= Nx.tsLen() then best
+// when each name is created before the body, in one pass over the tokens: an identifier at its token, a formal's name
+// once its default is read; the least over the name's tokens. fs = the formals not passed yet, in position order
+// (the parser appends them in source order)
+def Nx.psTimes(ts: I64, fs: Coll.List[Nx.FmP], body: I64, tm: Ptr): Ptr =
+  if ts >= Nx.tsLen() then tm
   else
     val t = Nx.psPeek(ts)
-    val rest = ts + 1
     val q = Nx.psPos(t)
-    if q >= body then best
-    else
-      val at: I64 = t match
-        case Nx.TId(x, _) => if Str.eq(x, n) then Nx.psFormalEnd(fs, q, q) else best
-        case _ => best
-      Nx.psSymTime(rest, n, fs, body, if at < best then at else best)
+    if q >= body then tm
+    else t match
+      case Nx.TId(x, _) =>
+        val fs1 = Nx.psFormalsFrom(fs, q)
+        val at: I64 = fs1 match
+          case Coll.Cons(h, _) =>
+            val Nx.FmP(_, p, e, _) = h
+            if p == q then e else q
+          case Coll.Nil => q
+        val old = Nx.atFind(tm, x)
+        if Nx.ptrEq(old, Nx.noFrame()) then Nx.atPut[Nx.Where](tm, x, Nx.At(at))
+        else if at < Nx.psReadTo(Nx.atEnt[Nx.Where](old)) then Nx.atPut[Nx.Where](tm, x, Nx.At(at)) else ()
+        Nx.psTimes(ts + 1, fs1, body, tm)
+      case _ => Nx.psTimes(ts + 1, fs, body, tm)
 
-// the end of the formal named at q, or q when no formal is
-def Nx.psFormalEnd(fs: Coll.List[Nx.FmP], q: I64, dflt: I64): I64 = fs match
-  case Coll.Nil => dflt
+// the formals from the first at or after position q
+def Nx.psFormalsFrom(fs: Coll.List[Nx.FmP], q: I64): Coll.List[Nx.FmP] = fs match
+  case Coll.Nil => fs
   case Coll.Cons(h, t) =>
-    val Nx.FmP(_, p, e, _) = h
-    if p == q then e else Nx.psFormalEnd(t, q, dflt)
+    val Nx.FmP(_, p, _, _) = h
+    if p < q then Nx.psFormalsFrom(t, q) else fs
+
+// the time of n: its entry, or body when no identifier before the body is n
+def Nx.psTimeOf(tm: Ptr, n: Str, body: I64): I64 =
+  val e = Nx.atFind(tm, n)
+  if Nx.ptrEq(e, Nx.noFrame()) then body else Nx.psReadTo(Nx.atEnt[Nx.Where](e))
 
 // the rank of the file's first symbol: above every offset in psKnownSyms
 def Nx.psFileSyms(): I64 = Str.len(Nx.psKnownSyms())
@@ -1074,17 +1089,47 @@ def Nx.psIdsRead(ids: Ptr, n: Str, ts: I64, none: I64): I64 =
         else Nx.psIdsRead(ids, n, ts + 1, none)
       case _ => Nx.psIdsRead(ids, n, ts + 1, none)
 
-// xs (in insertion order) stably sorted by psSymRank; acc = sorted so far, highest first
-def Nx.psBySym(cx: Nx.PCx, xs: Coll.List[Str], acc: Coll.List[Str]): Coll.List[Str] = xs match
-  case Coll.Nil => Coll.rev(acc)
-  case Coll.Cons(n, t) => Nx.psBySym(cx, t, Nx.psInsRank(cx, n, Nx.psSymRank(cx, n), acc, Coll.Nil))
+// xs (in insertion order) stably sorted by psSymRank, each rank computed once
+def Nx.psBySym(cx: Nx.PCx, xs: Coll.List[Str], acc: Coll.List[Str]): Coll.List[Str] =
+  Nx.psUnrank(Nx.psMsort(Nx.psRanks(cx, xs, Coll.Nil), Coll.length(xs)), Coll.Nil)
 
-// n into acc (highest rank first) after every name of a rank above or equal
-def Nx.psInsRank(cx: Nx.PCx, n: Str, r: I64, acc: Coll.List[Str], seen: Coll.List[Str]): Coll.List[Str] = acc match
-  case Coll.Nil => Coll.revOnto(seen, Coll.Cons(n, Coll.Nil))
+enum Nx.RkN:
+  case Nx.RkN(r: I64, n: Str)
+
+def Nx.psRanks(cx: Nx.PCx, xs: Coll.List[Str], acc: Coll.List[Nx.RkN]): Coll.List[Nx.RkN] = xs match
+  case Coll.Nil => Coll.rev(acc)
+  case Coll.Cons(n, t) => Nx.psRanks(cx, t, Coll.Cons(Nx.RkN(Nx.psSymRank(cx, n), n), acc))
+
+def Nx.psUnrank(xs: Coll.List[Nx.RkN], acc: Coll.List[Str]): Coll.List[Str] = xs match
+  case Coll.Nil => Coll.rev(acc)
   case Coll.Cons(h, t) =>
-    if Nx.psSymRank(cx, h) > r then Nx.psInsRank(cx, n, r, t, Coll.Cons(h, seen))
-    else Coll.revOnto(seen, Coll.Cons(n, acc))
+    val Nx.RkN(_, n) = h
+    Nx.psUnrank(t, Coll.Cons(n, acc))
+
+// the first k of xs, stably sorted by ascending rank
+def Nx.psMsort(xs: Coll.List[Nx.RkN], k: I64): Coll.List[Nx.RkN] =
+  if k < 2 then Nx.psTake(xs, k, Coll.Nil)
+  else
+    val h = k / 2
+    Nx.psRkMerge(Nx.psMsort(xs, h), Nx.psMsort(Nx.psDrop(xs, h), k - h), Coll.Nil)
+
+def Nx.psTake(xs: Coll.List[Nx.RkN], k: I64, acc: Coll.List[Nx.RkN]): Coll.List[Nx.RkN] = xs match
+  case Coll.Nil => Coll.rev(acc)
+  case Coll.Cons(h, t) => if k <= 0 then Coll.rev(acc) else Nx.psTake(t, k - 1, Coll.Cons(h, acc))
+
+def Nx.psDrop(xs: Coll.List[Nx.RkN], k: I64): Coll.List[Nx.RkN] = xs match
+  case Coll.Nil => xs
+  case Coll.Cons(_, t) => if k <= 0 then xs else Nx.psDrop(t, k - 1)
+
+// the left run's element wins a tie, so equal ranks keep their input order
+def Nx.psRkMerge(a: Coll.List[Nx.RkN], b: Coll.List[Nx.RkN], acc: Coll.List[Nx.RkN]): Coll.List[Nx.RkN] = a match
+  case Coll.Nil => Coll.revOnto(acc, b)
+  case Coll.Cons(x, at) => b match
+    case Coll.Nil => Coll.revOnto(acc, a)
+    case Coll.Cons(y, bt) =>
+      val Nx.RkN(rx, _) = x
+      val Nx.RkN(ry, _) = y
+      if ry < rx then Nx.psRkMerge(a, bt, Coll.Cons(y, acc)) else Nx.psRkMerge(at, b, Coll.Cons(x, acc))
 
 def Nx.psMergeEnts(cx: Nx.PCx, j: Nx.BSet, ae: Nx.BSet, xs: Coll.List[Str]): Nx.SR = xs match
   case Coll.Nil => Nx.SOk(j)

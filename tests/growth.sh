@@ -14,18 +14,26 @@ trap 'rm -rf "$T"' EXIT
 ulimit -s unlimited
 fail=0
 instr() { timeout 20 "$PERF" stat -x, -e instructions:u "$SNX" parse "$1" 2>&1 >/dev/null | cut -d, -f1 | grep -E '^[0-9]+$' || echo 0; }
-for kind in formals merges; do
+for kind in formals merges dupformals revrank; do
   prev=0
-  for n in 1000 4000 16000; do
+  sizes="1000 4000 16000"
+  [[ $kind == dupformals ]] && sizes="250 1000 4000"
+  [[ $kind == revrank ]] && sizes="18 72 288"
+  for n in $sizes; do
     f=$T/$kind$n.nix
     case $kind in
       formals) awk -v n="$n" 'BEGIN { printf "{ "; for (i = 1; i <= n; i++) printf "%sa%d", (i > 1 ? ", " : ""), i; print " }: a1" }' > "$f" ;;
+      # every formal twice: each repeat is looked up in the file's tokens (psDupFormal -> psSymTime, psFormalEnd)
+      dupformals) awk -v n="$n" 'BEGIN { printf "{ "; for (i = 1; i <= n; i++) printf "%sa%d", (i > 1 ? ", " : ""), i; for (i = 1; i <= n; i++) printf ", a%d", i; print " }: a1" }' > "$f" ;;
+      # z names b_n..b_1 first (rank order), then a set merged with b_1..b_n (insertion order): psBySym inserts each name last
+      revrank) awk -v n="$n" 'BEGIN { printf "{ z = { "; for (i = n; i >= 1; i--) printf "b%d = 0; ", i; print "};"; print "  x = { q = 1; };"; printf "  x = { "; for (i = 1; i <= n; i++) printf "b%d = %d; ", i, i; print "}; }" }' > "$f" ;;
       merges) awk -v n="$n" 'BEGIN { print "{"; for (i = 1; i <= n; i++) printf "  x = { a%d = %d; };\n", i, i; print "}" }' > "$f" ;;
     esac
     got=$(instr "$f")
     if [[ $prev != 0 ]]; then
       # ratio in tenths, rounded down: <= 44
       r=$(( got * 10 / prev ))
+      echo "  $kind instr per name at $n: $((got / n))"
       if [[ $got == 0 || $r -gt 44 ]]; then echo "FAIL $kind $((n / 4)) -> $n: $prev -> $got instr (ratio x10 = $r, limit 44)"; fail=1
       else echo "ok $kind $((n / 4)) -> $n: $prev -> $got instr (ratio x10 = $r)"; fi
     fi
