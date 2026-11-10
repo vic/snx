@@ -850,12 +850,11 @@ def Nx.importFile(p0: Str): Nx.Val =
     case Coll.Tip =>
       val src = Nx.readSrc(p)
       if Str.len(src) < 0 then Nx.VErr(Nx.KOther, Nx.cat("cannot read ", p))
-      else Nx.parse(src, Nx.dirName(p), Nx.getEnv("HOME")) match
-        case Nx.Parsed(e) => Nx.compile(e, p, src) match
-          case Nx.Undefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
-          case Nx.Compiled(code) =>
-            val c = Nx.lazy(Nx.noFrame(), code)
-            Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.insert(m, key, c))
-            Nx.leak()
-            Nx.force(c)
-        case _ => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))
+      else Nx.loadFile(src, Nx.dirName(p), Nx.getEnv("HOME"), p) match
+        case Nx.Loaded(code) =>
+          val c = Nx.lazy(Nx.noFrame(), code)
+          Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.insert(m, key, c))
+          Nx.leak()
+          Nx.force(c)
+        case Nx.LoadUndefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
+        case Nx.LoadBad => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))

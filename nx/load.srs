@@ -1,0 +1,19 @@
+// a file loaded for import: lexed and parsed in an arena of its own, freed before Nx.loadFile returns, so its tokens
+// and syntax tree die with it; the compiler reads the tree and builds the code in the importer's region (outer)
+
+enum Nx.LoadResult:
+  case Nx.Loaded(c: Nx.Code)
+  case Nx.LoadUndefined(p: I64, name: Str)
+  case Nx.LoadBad
+
+def Nx.loadFile {outer: Region} (src: Str, dir: Str, home: Str, file: Str): Nx.LoadResult =
+  handle inner = Srs.Arena()
+  val r = Nx.loadOf{outer}(Nx.parse(src, dir, home), file, src)
+  inner.free()
+  r
+
+def Nx.loadOf {r: Region} (pr: Nx.ParseResult, file: Str, src: Str): Nx.LoadResult = pr match
+  case Nx.Parsed(e) => Nx.compile(e, file, src) match
+    case Nx.Compiled(c) => Nx.Loaded(c)
+    case Nx.Undefined(p, name) => Nx.LoadUndefined(p, name)
+  case _ => Nx.LoadBad
