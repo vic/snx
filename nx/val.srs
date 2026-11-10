@@ -31,6 +31,7 @@ enum Nx.Val:
   case Nx.VStr(s: Str, ctx: Coll.List[Nx.Ctx])
   case Nx.VPath(s: Str)
   case Nx.VAttrs(n: I64, syms: Ptr, vals: Ptr)    // n names sorted by symbol id (Nx.intern), vals = their n cells
+  case Nx.VUnion(k: I64, ls: Nx.Leaves)           // x // y kept as k (2..8) flat leaves, newest first (Nx.update): never empty
   case Nx.VList(n: I64, xs: Ptr)                  // n cells
   case Nx.VLam(env: Ptr, code: Nx.Code)           // code = a Nx.CLam
   case Nx.VPrim(id: I64, arity: I64)
@@ -70,7 +71,8 @@ enum Nx.Code:
   case Nx.CWith(a: Nx.Code, body: Nx.Code)                // new frame of 1 slot: the set (forced on first lookup)
   case Nx.CLam(arg: Bool, nformals: I64, formals: Ptr, ellipsis: Bool, nslots: I64, body: Nx.Code, name: Str)
   case Nx.CCall(f: Nx.Code, n: I64, args: Ptr)
-  case Nx.CPrimCall(id: I64, n: I64, args: Ptr, num: Bool)  // a base env primop called with exactly its arity; num = arithmetic, comparison or bit op
+  case Nx.CPrimCall(id: I64, n: I64, args: Ptr)           // a base env primop called with exactly its arity
+  case Nx.CNum(op: Nx.NumOp, a: Nx.Code, b: Nx.Code, early: Bool)   // a numeric primop on two operands (n - 1, a < b); early = a call argument (Nx.thunk)
   case Nx.CSelect(e: Nx.Code, path: Coll.List[Nx.CKey], dflt: Coll.Option[Nx.Code])
   case Nx.CHas(e: Nx.Code, path: Coll.List[Nx.CKey])
   case Nx.CIf(c: Nx.Code, t: Nx.Code, e: Nx.Code)
@@ -81,7 +83,8 @@ enum Nx.Code:
   case Nx.CImpl(a: Nx.Code, b: Nx.Code)
   case Nx.CBin(op: Nx.BinOp, a: Nx.Code, b: Nx.Code)
   case Nx.CLamArg(body: Nx.Code, name: Str)               // x: body, a frame of 1 slot: the argument (CLam = a pattern)
-  case Nx.CAppSlots(n: I64)                               // slot 1 applied to slots 2..n+1 (the thunks of map, genList, ..)
+  case Nx.CAppSlots(n: I64)                               // slot 1 applied to slots 2..n+1 (the thunks of mapAttrs, ..)
+  case Nx.CApp1(f: Ptr)                                   // cell f applied to the cell that is the env (a map or genList thunk: no frame)
 
 enum Nx.CKey:
   case Nx.KSym(sym: I64)
@@ -112,6 +115,12 @@ extern def Nx.noFrame(): Ptr
 extern def Nx.mark(): Ptr
 extern def Nx.release(m: Ptr): Unit
 extern def Nx.leak(): Unit
+// the address of a value (a layered set's identity for «repeated», nx/print.srs)
+extern def Nx.valPtr(v: Nx.Val): Ptr
+// the k leaves of a layered set, (n, syms, vals) word triples newest first in t, merged into out = (n, syms, vals)
+extern def Nx.mergeLeaves(k: I64, t: Ptr, out: Ptr): Unit
+// leaves 0..k-2 of t (all but the base) merged into out the same way
+extern def Nx.mergeTop(k: I64, t: Ptr, out: Ptr): Unit
 
 // symbols: ids in first-seen order (attribute order of == and of forcing is this order)
 extern def Nx.intern(s: Str): I64
@@ -122,3 +131,20 @@ extern def Nx.findSym(syms: Ptr, n: I64, sym: I64): I64
 def Nx.slotOf(syms: Ptr, n: I64, sym: I64): Coll.Option[I64] =
   val i = Nx.findSym(syms, n, sym)
   if i < n then Coll.Some(i) else Coll.None
+
+// the leaves of a layered set (Nx.VUnion), newest first: a name's value is the one in its newest leaf. Each leaf is a
+// flat set as Nx.VAttrs holds it (n names sorted by symbol id, their cells); the oldest is the base
+enum Nx.Leaves:
+  case Nx.LBase(n: I64, syms: Ptr, vals: Ptr)
+  case Nx.LOn(n: I64, syms: Ptr, vals: Ptr, under: Nx.Leaves)
+
+// the primops that on numbers force their two operands and nothing else, and always end (Nx.CNum)
+enum Nx.NumOp:
+  case Nx.NAdd
+  case Nx.NSub
+  case Nx.NMul
+  case Nx.NDiv
+  case Nx.NLess
+  case Nx.NAnd
+  case Nx.NOr
+  case Nx.NXor

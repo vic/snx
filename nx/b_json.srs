@@ -202,7 +202,7 @@ def Nx.jsonStrOut(s: Str, sb: Ptr): Nx.Val =
     Nx.sbAdd(sb, q)
     Nx.VNull
 
-def Nx.toJson1(v: Nx.Val, sb: Ptr, ctx: Ptr): Nx.Val = v match
+def Nx.toJson1(v: Nx.Val, sb: Ptr, ctx: Ptr): Nx.Val = Nx.flat(v) match
   case Nx.VErr(_, _) => v
   case Nx.VInt(n) =>
     Nx.sbAdd(sb, Nx.intStr(n))
@@ -301,7 +301,7 @@ def Nx.xClose(sb: Ptr, d: I64, name: Str): Nx.Val =
   Nx.VNull
 
 // printValueAsXML (strict, no location) of v at depth d; seen = a word holding the drvPaths shown
-def Nx.xml(v: Nx.Val, sb: Ptr, d: I64, seen: Ptr): Nx.Val = v match
+def Nx.xml(v: Nx.Val, sb: Ptr, d: I64, seen: Ptr): Nx.Val = Nx.flat(v) match
   case Nx.VErr(_, _) => v
   case Nx.VInt(n) => Nx.xEmpty(sb, d, "int", Nx.xAttr("value", Nx.intStr(n)))
   case Nx.VBool(b) => Nx.xEmpty(sb, d, "bool", Nx.xAttr("value", if b then "true" else "false"))

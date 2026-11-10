@@ -35,7 +35,7 @@ def Nx.dsAddCtx(st: Ptr, c: Coll.List[Nx.Ctx]): Unit = c match
   case _ => Nx.aset[Coll.List[Nx.Ctx]](st, Nx.dsCtx(), Coll.revOnto(c, Nx.aget[Coll.List[Nx.Ctx]](st, Nx.dsCtx())))
 
 // prim_derivationStrict: the name first, then the attributes
-def Nx.pDerivationStrict(v: Nx.Val): Nx.Val = v match
+def Nx.pDerivationStrict(v: Nx.Val): Nx.Val = Nx.flat(v) match
   case Nx.VAttrs(n, syms, vals) => Nx.slotOf(syms, n, Nx.intern("name")) match
     case Coll.None => Nx.VErr(Nx.KMissing, "attribute 'name' missing")
     case Coll.Some(j) =>

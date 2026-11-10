@@ -113,7 +113,7 @@ def Nx.strAttr(n: I64, syms: Ptr, vals: Ptr, name: Str): Nx.Val =
       case Nx.VStr(_, _) => v
       case _ => Nx.typeErr("a string", v)
 
-def Nx.pConvertHash(v: Nx.Val): Nx.Val = v match
+def Nx.pConvertHash(v: Nx.Val): Nx.Val = Nx.flat(v) match
   case Nx.VAttrs(n, syms, vals) =>
     val h = Nx.strAttr(n, syms, vals, "hash")
     val a = Nx.strAttr(n, syms, vals, "hashAlgo")

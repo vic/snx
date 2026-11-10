@@ -254,7 +254,7 @@ def Nx.infoPairs(xs: Coll.List[Nx.CInfo], acc: Coll.List[Nx.Pair]): Coll.List[Nx
 
 // prim_appendContext: each name a store path, its set's path / allOutputs / outputs as context elements
 def Nx.pAppendCtx(sv: Nx.Val, av: Nx.Val): Nx.Val = sv match
-  case Nx.VStr(s, c) => av match
+  case Nx.VStr(s, c) => Nx.flat(av) match
     case Nx.VAttrs(n, syms, vals) =>
       val r = Nx.appendGo(syms, vals, 0, n, c)
       r match
@@ -285,7 +285,7 @@ def Nx.boolAttr(n: I64, syms: Ptr, vals: Ptr, name: Str): Nx.Val = Nx.slotOf(sym
       case Nx.VErr(_, _) => b
       case _ => Nx.typeErr("a Boolean", b)
 
-def Nx.appendOne(name: Str, v: Nx.Val, ctx: Coll.List[Nx.Ctx]): Nx.Val = v match
+def Nx.appendOne(name: Str, v: Nx.Val, ctx: Coll.List[Nx.Ctx]): Nx.Val = Nx.flat(v) match
   case Nx.VAttrs(n, syms, vals) =>
     val drv = Nx.endsWith(name, ".drv")
     val pa = Nx.boolAttr(n, syms, vals, "path")
@@ -491,7 +491,7 @@ def Nx.pFilterSource(fc: Ptr, pv: Nx.Val): Nx.Val =
     case _ => p
 
 // prim_path: path, name, filter, recursive, sha256
-def Nx.pPath(v: Nx.Val): Nx.Val = v match
+def Nx.pPath(v: Nx.Val): Nx.Val = Nx.flat(v) match
   case Nx.VAttrs(n, syms, vals) => Nx.pathArgs(syms, vals, 0, n, Coll.None, "", Coll.None, true, Coll.None)
   case _ => Nx.typeErr("a set", v)
 

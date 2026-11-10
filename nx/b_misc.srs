@@ -295,7 +295,7 @@ def Nx.zipGo(f: Ptr, xs: Ptr, i: I64, n: I64, g: Nx.Groups): Nx.Val =
   if i == n then Nx.grpSet(g, Nx.grpOrder(g), Coll.Some(f), Coll.Nil)
   else
     val e = Nx.force(Nx.aget[Ptr](xs, i))
-    e match
+    Nx.flat(e) match
       case Nx.VAttrs(m, syms, vals) => Nx.zipGo(f, xs, i + 1, n, Nx.zipAdd(g, syms, vals, 0, m))
       case _ => Nx.typeErr("a set", e)
 
@@ -341,7 +341,7 @@ def Nx.gcOther(st: Ptr, k: Nx.Val, seen: Coll.List[Nx.Val]): Nx.Val = seen match
         case _ => b
       case _ => a
 
-def Nx.pGenericClosure(v: Nx.Val): Nx.Val = v match
+def Nx.pGenericClosure(v: Nx.Val): Nx.Val = Nx.flat(v) match
   case Nx.VAttrs(n, syms, vals) =>
     val si = Nx.findSym(syms, n, Nx.intern("startSet"))
     if si == n then Nx.VErr(Nx.KMissing, "attribute 'startSet' missing")
@@ -371,7 +371,7 @@ def Nx.gcLoop(op: Nx.Val, front: Coll.List[Ptr], back: Coll.List[Ptr], res: Coll
     case Coll.Cons(_, _) => Nx.gcLoop(op, Coll.rev(back), Coll.Nil, res, st)
   case Coll.Cons(c, rest) =>
     val e = Nx.force(c)
-    e match
+    Nx.flat(e) match
       case Nx.VAttrs(n, syms, vals) =>
         val ki = Nx.findSym(syms, n, Nx.intern("key"))
         if ki == n then Nx.VErr(Nx.KMissing, "attribute 'key' missing")
@@ -410,7 +410,7 @@ def Nx.gcCmpErr(k: Nx.Val): Nx.Val = Nx.VErr(Nx.KOther, Nx.cat("cannot compare "
 
 // prim_unsafeGetAttrPos: { file; line; column; } of the name in the source, null when the set has no such record
 def Nx.pAttrPos(nv: Nx.Val, sv: Nx.Val): Nx.Val = nv match
-  case Nx.VStr(name, _) => sv match
+  case Nx.VStr(name, _) => Nx.flat(sv) match
     case Nx.VAttrs(n, syms, _) =>
       val i = Nx.findSym(syms, n, Nx.intern(name))
       if i == n then Nx.VNull else Nx.posVal(Nx.posGet(syms), i)

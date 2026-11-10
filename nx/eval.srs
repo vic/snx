@@ -15,6 +15,7 @@ def Nx.showType(v: Nx.Val): Str = v match
   case Nx.VStr(_, _) => "a string"
   case Nx.VPath(_) => "a path"
   case Nx.VAttrs(_, _, _) => "a set"
+  case Nx.VUnion(_, _) => "a set"
   case Nx.VList(_, _) => "a list"
   case Nx.VErr(_, _) => "an error"
   case _ => "a function"
@@ -65,29 +66,24 @@ def Nx.thunk(env: Ptr, c: Nx.Code): Ptr = c match
   case Nx.CLocal(up, i) => Nx.aget[Ptr](Nx.up(env, up), i)
   case Nx.CCell(x) => x
   case Nx.CConst(_, x) => x
-  case Nx.CPrimCall(id, n, args, num) =>
-    if num && Nx.numArgs(env, args, 0, n) then Nx.cell(Nx.primNow(env, id, n, args, 0)) else Nx.lazy(env, c)
+  case Nx.CNum(op, a, b, early) =>
+    if early && Nx.numReady(env, a) && Nx.numReady(env, b) then Nx.cell(Nx.numOp(op, Nx.ev(env, a), Nx.ev(env, b)))
+    else Nx.lazy(env, c)
   case _ => Nx.lazy(env, c)
 
-// a thunk of code that runs in frame f while f is being filled: a slot of f itself may not be set yet. num is false
+// a thunk of code that runs in frame f while f is being filled: a slot of f itself may not be set yet. early is false
 // here (Nx.markNum marks call arguments only), so no operand of f is read early
 def Nx.thunkIn(f: Ptr, c: Nx.Code): Ptr = c match
   case Nx.CLocal(up, i) => if up == 0 then Nx.lazy(f, c) else Nx.aget[Ptr](Nx.up(f, up), i)
   case _ => Nx.thunk(f, c)
 
-// CPrimCall num (set by Nx.markNum on call arguments only: a set or list element may never be forced): a numeric
+// CNum early (set by Nx.markNum on call arguments only: a set or list element may never be forced): a numeric
 // primop whose operands are numbers already (f (n - 1) with n forced) runs at thunk time. Same value as forced later
 // (an error is a value; these primops force nothing else and end), and no thunk captures the frame.
-
-def Nx.numArgs(env: Ptr, args: Ptr, i: I64, n: I64): Bool =
-  if i == n then true
-  else
-    val a = Nx.aget[Nx.Code](args, i)
-    val ok = a match
-      case Nx.CConst(v, _) => Nx.isNum(v)
-      case Nx.CLocal(up, k) => Nx.isNum(Nx.peek(Nx.aget[Ptr](Nx.up(env, up), k)))
-      case _ => false
-    if ok then Nx.numArgs(env, args, i + 1, n) else false
+def Nx.numReady(env: Ptr, a: Nx.Code): Bool = a match
+  case Nx.CConst(v, _) => Nx.isNum(v)
+  case Nx.CLocal(up, k) => Nx.isNum(Nx.peek(Nx.aget[Ptr](Nx.up(env, up), k)))
+  case _ => false
 
 def Nx.isNum(v: Nx.Val): Bool = v match
   case Nx.VInt(_) => true
@@ -150,6 +146,13 @@ def Nx.pair(name: Str, v: Nx.Val): Nx.Pair = Nx.Pair(Nx.intern(name), Nx.cell(v)
 
 // ---- eval -----------------------------------------------------------------------------------------------------
 
+// Nx.eval with a variable or a literal done in place: small enough to inline where operands are evaluated, so those
+// skip the prologue of the big Nx.eval (about 20 instructions a call)
+def Nx.ev(env: Ptr, c: Nx.Code): Nx.Val = c match
+  case Nx.CLocal(up, i) => Nx.force(Nx.aget[Ptr](Nx.up(env, up), i))
+  case Nx.CConst(v, _) => v
+  case _ => Nx.eval(env, c)
+
 def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
   case Nx.CConst(v, _) => v
   case Nx.CLocal(up, i) => Nx.force(Nx.aget[Ptr](Nx.up(env, up), i))
@@ -177,13 +180,15 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
     Nx.eval(f, body)
   case Nx.CLam(_, _, _, _, _, _, _) => Nx.VLam(env, c)
   case Nx.CLamArg(_, _) => Nx.VLam(env, c)
-  case Nx.CCall(f, n, args) => Nx.callN(env, Nx.eval(env, f), args, 0, n)
-  case Nx.CPrimCall(id, n, args, _) => Nx.primNow(env, id, n, args, 0)
+  case Nx.CCall(f, n, args) => Nx.callN(env, Nx.ev(env, f), args, 0, n)
+  case Nx.CPrimCall(id, n, args) => Nx.primNow(env, id, n, args, 0)
+  case Nx.CNum(op, a, b, _) => Nx.numOp(op, Nx.ev(env, a), Nx.ev(env, b))
   case Nx.CAppSlots(n) => Nx.appSlots(env, Nx.force(Nx.aget[Ptr](env, 1)), 2, n + 2)
-  case Nx.CSelect(e, path, d) => Nx.select(env, Nx.eval(env, e), path, d)
+  case Nx.CApp1(f) => Nx.apply(Nx.force(f), env)
+  case Nx.CSelect(e, path, d) => Nx.select(env, Nx.ev(env, e), path, d)
   case Nx.CHas(e, path) => Nx.has(env, Nx.eval(env, e), path)
   case Nx.CIf(cnd, t, e) =>
-    val b = Nx.eval(env, cnd)
+    val b = Nx.ev(env, cnd)
     b match
       case Nx.VBool(x) => if x then Nx.eval(env, t) else Nx.eval(env, e)
       case _ => Nx.typeErr("a Boolean", b)
@@ -233,6 +238,9 @@ def Nx.withVar(env: Ptr, sym: I64, ups: Coll.List[I64], name: Str): Nx.Val = ups
       case Nx.VAttrs(n, syms, vals) =>
         val i = Nx.findSym(syms, n, sym)
         if i < n then Nx.force(Nx.aget[Ptr](vals, i)) else Nx.withVar(env, sym, rest, name)
+      case Nx.VUnion(_, ls) => Nx.cellOfLeaves(ls, sym) match
+        case Coll.Some(c) => Nx.force(c)
+        case Coll.None => Nx.withVar(env, sym, rest, name)
       case _ => Nx.typeErr("a set", s)
 
 // ---- sets -----------------------------------------------------------------------------------------------------
@@ -279,7 +287,7 @@ def Nx.copyInts(src: Ptr, dst: Ptr, i: I64, n: I64): Unit =
 
 // a rec set with __overrides (eval.cc:1273-1290): each attribute of the forced __overrides set replaces the binding of
 // its name, in the set and in the rec frame, or is added; dynamic attributes come after
-def Nx.overrides(f: Ptr, n: I64, syms: Ptr, ov: Nx.Val, dyn: Coll.List[Nx.CDyn]): Nx.Val = ov match
+def Nx.overrides(f: Ptr, n: I64, syms: Ptr, ov: Nx.Val, dyn: Coll.List[Nx.CDyn]): Nx.Val = Nx.flat(ov) match
   case Nx.VAttrs(m, osyms, ovals) =>
     val extra = Nx.overGo(f, n, syms, osyms, ovals, 0, m, 0)
     extra match
@@ -332,13 +340,24 @@ def Nx.select(env: Ptr, v: Nx.Val, path: Coll.List[Nx.CKey], d: Coll.Option[Nx.C
 def Nx.selectSym(env: Ptr, v: Nx.Val, sym: I64, rest: Coll.List[Nx.CKey], d: Coll.Option[Nx.Code]): Nx.Val = v match
   case Nx.VAttrs(n, syms, vals) =>
     val i = Nx.findSym(syms, n, sym)
-    if i < n then Nx.select(env, Nx.force(Nx.aget[Ptr](vals, i)), rest, d)
-    else d match
-      case Coll.Some(dc) => Nx.eval(env, dc)
-      case Coll.None => Nx.VErr(Nx.KMissing, Nx.cat(Nx.cat("attribute '", Nx.symName(sym)), "' missing"))
+    if i < n then Nx.select(env, Nx.force(Nx.aget[Ptr](vals, i)), rest, d) else Nx.selMissing(env, sym, d)
+  case Nx.VUnion(_, ls) => Nx.selLeaves(env, ls, sym, rest, d)
   case _ => d match
     case Coll.Some(dc) => Nx.eval(env, dc)
     case Coll.None => Nx.typeErr("a set", v)
+
+def Nx.selMissing(env: Ptr, sym: I64, d: Coll.Option[Nx.Code]): Nx.Val = d match
+  case Coll.Some(dc) => Nx.eval(env, dc)
+  case Coll.None => Nx.VErr(Nx.KMissing, Nx.cat(Nx.cat("attribute '", Nx.symName(sym)), "' missing"))
+
+// a layered set: the newest leaf with the name gives its value
+def Nx.selLeaves(env: Ptr, ls: Nx.Leaves, sym: I64, rest: Coll.List[Nx.CKey], d: Coll.Option[Nx.Code]): Nx.Val = ls match
+  case Nx.LBase(n, syms, vals) =>
+    val i = Nx.findSym(syms, n, sym)
+    if i < n then Nx.select(env, Nx.force(Nx.aget[Ptr](vals, i)), rest, d) else Nx.selMissing(env, sym, d)
+  case Nx.LOn(n, syms, vals, under) =>
+    val i = Nx.findSym(syms, n, sym)
+    if i < n then Nx.select(env, Nx.force(Nx.aget[Ptr](vals, i)), rest, d) else Nx.selLeaves(env, under, sym, rest, d)
 
 // ExprOpHasAttr::eval (eval.cc:1483-1503)
 def Nx.has(env: Ptr, v: Nx.Val, path: Coll.List[Nx.CKey]): Nx.Val = path match
@@ -357,6 +376,9 @@ def Nx.hasSym(env: Ptr, v: Nx.Val, sym: I64, rest: Coll.List[Nx.CKey]): Nx.Val =
   case Nx.VAttrs(n, syms, vals) =>
     val i = Nx.findSym(syms, n, sym)
     if i < n then Nx.has(env, Nx.force(Nx.aget[Ptr](vals, i)), rest) else Nx.bool(false)
+  case Nx.VUnion(_, ls) => Nx.cellOfLeaves(ls, sym) match
+    case Coll.Some(c) => Nx.has(env, Nx.force(c), rest)
+    case Coll.None => Nx.bool(false)
   case _ => Nx.bool(false)
 
 // ---- calls ----------------------------------------------------------------------------------------------------
@@ -407,6 +429,9 @@ def Nx.apply(f: Nx.Val, arg: Ptr): Nx.Val = f match
       val r = Nx.apply(Nx.force(Nx.aget[Ptr](vals, i)), Nx.cell(f))
       Nx.apply(r, arg)
     else Nx.notFn(f)
+  case Nx.VUnion(_, ls) => Nx.cellOfLeaves(ls, Nx.intern("__functor")) match
+    case Coll.Some(c) => Nx.apply(Nx.apply(Nx.force(c), Nx.cell(f)), arg)
+    case Coll.None => Nx.notFn(f)
   case Nx.VErr(_, _) => f
   case _ => Nx.notFn(f)
 
@@ -422,7 +447,7 @@ def Nx.applyLam(lenv: Ptr, code: Nx.Code, arg: Ptr): Nx.Val = code match
     Nx.eval(f, body)
   case Nx.CLam(_, nf, fms, ell, ns, body, _) =>
     val av = Nx.force(arg)
-    av match
+    Nx.flat(av) match
       case Nx.VAttrs(n, syms, vals) =>
         val f = Nx.frame(lenv, ns)
         Nx.aset[Ptr](f, 1, arg)
@@ -484,7 +509,7 @@ def Nx.sbOf(sb: Ptr): Ptr = if Nx.ptrEq(sb, Nx.noFrame()) then Nx.sbNew() else s
 def Nx.concat(env: Ptr, parts: Ptr, i: I64, n: I64, first: Bool, k: Nx.CatK, ia: I64, fa: I64, sb: Ptr, ctx: Coll.List[Nx.Ctx]): Nx.Val =
   if i == n then Nx.catDone(k, ia, fa, sb, ctx)
   else
-    val v = Nx.eval(env, Nx.aget[Nx.Code](parts, i))
+    val v = Nx.ev(env, Nx.aget[Nx.Code](parts, i))
     if Nx.isErr(v) then v
     else
       val k2 = if first then Nx.kindOf(v) else k
@@ -533,8 +558,15 @@ def Nx.coerce(v: Nx.Val, more: Bool, toStore: Bool): Nx.Val = v match
       val j = Nx.findSym(syms, n, Nx.intern("outPath"))
       if j < n then Nx.coerce(Nx.force(Nx.aget[Ptr](vals, j)), more, toStore)
       else Nx.VErr(Nx.KType, "cannot coerce a set to a string")
+  case Nx.VUnion(_, ls) => Nx.coerceU(v, ls, more, toStore)
   case Nx.VErr(_, _) => v
   case _ => if more then Nx.coerceMore(v, toStore) else Nx.cantCoerce(v)
+
+def Nx.coerceU(v: Nx.Val, ls: Nx.Leaves, more: Bool, toStore: Bool): Nx.Val = Nx.cellOfLeaves(ls, Nx.intern("__toString")) match
+  case Coll.Some(c) => Nx.coerce(Nx.apply(Nx.force(c), Nx.cell(v)), more, toStore)
+  case Coll.None => Nx.cellOfLeaves(ls, Nx.intern("outPath")) match
+    case Coll.Some(c) => Nx.coerce(Nx.force(c), more, toStore)
+    case Coll.None => Nx.VErr(Nx.KType, "cannot coerce a set to a string")
 
 def Nx.cantCoerce(v: Nx.Val): Nx.Val = Nx.VErr(Nx.KType, Nx.cat(Nx.cat("cannot coerce ", Nx.showType(v)), " to a string"))
 
@@ -566,9 +598,9 @@ def Nx.isEmptyList(v: Nx.Val): Bool = v match
 // ---- operators ------------------------------------------------------------------------------------------------
 
 def Nx.bin(env: Ptr, op: Nx.BinOp, a: Nx.Code, b: Nx.Code): Nx.Val = op match
-  case Nx.OEq => Nx.eqVals(Nx.eval(env, a), Nx.eval(env, b))
+  case Nx.OEq => Nx.eqVals(Nx.ev(env, a), Nx.ev(env, b))
   case Nx.ONe =>
-    val r = Nx.eqVals(Nx.eval(env, a), Nx.eval(env, b))
+    val r = Nx.eqVals(Nx.ev(env, a), Nx.ev(env, b))
     r match
       case Nx.VBool(t) => Nx.bool(!t)
       case _ => r
@@ -580,24 +612,102 @@ def Nx.bin(env: Ptr, op: Nx.BinOp, a: Nx.Code, b: Nx.Code): Nx.Val = op match
     val x = Nx.eval(env, a)
     if Nx.isErr(x) then x else Nx.listConcat(x, Nx.eval(env, b))
 
-// ExprOpUpdate::eval (eval.cc:1917-1990): an empty side gives the other set itself
-def Nx.update(x: Nx.Val, y: Nx.Val): Nx.Val = x match
-  case Nx.VAttrs(n1, s1, v1) => y match
-    case Nx.VAttrs(n2, s2, v2) =>
-      if n1 == 0 then y
-      else if n2 == 0 then x
-      else if Nx.namesIn(s2, n2, s1, n1, 0) then
-        // no new name: the result shares x's names and copies only its cells
-        val ov = Nx.arrNew(n1)
-        Nx.copyCells(v1, 0, ov, 0, n1)
-        Nx.overwrite(s2, v2, n2, s1, n1, ov, 0)
-        Nx.VAttrs(n1, s1, ov)
-      else
-        val os = Nx.arrNew(n1 + n2)
-        val ov = Nx.arrNew(n1 + n2)
-        Nx.VAttrs(Nx.mergeAttrs(s1, v1, n1, s2, v2, n2, 0, 0, os, ov, 0), os, ov)
-    case _ => Nx.typeErr("a set", y)
-  case _ => Nx.typeErr("a set", x)
+// ExprOpUpdate::eval (eval.cc:1917-1990): an empty side gives the other set itself. A large x is not copied: the
+// result is x's leaves with y on top (Nx.VUnion), up to Nx.maxLeaves leaves (Nx.compact past them)
+def Nx.update(x: Nx.Val, y: Nx.Val): Nx.Val =
+  if !Nx.isSet(x) then Nx.typeErr("a set", x)
+  else if !Nx.isSet(y) then Nx.typeErr("a set", y)
+  else if Nx.isEmptySet(x) then y
+  else if Nx.isEmptySet(y) then x
+  else Nx.flat(y) match
+    case Nx.VAttrs(n2, s2, v2) => x match
+      case Nx.VAttrs(n1, s1, v1) =>
+        if n1 < Nx.unionMin() then Nx.updFlat(n1, s1, v1, n2, s2, v2)
+        else Nx.VUnion(2, Nx.LOn(n2, s2, v2, Nx.LBase(n1, s1, v1)))
+      case Nx.VUnion(k, ls) => if k < Nx.maxLeaves() then Nx.VUnion(k + 1, Nx.LOn(n2, s2, v2, ls)) else Nx.compact(ls, n2, s2, v2)
+      case _ => x
+    case _ => y
+
+// a left side with fewer names than this is merged flat (a short copy beats a leaf); at most this many leaves
+def Nx.unionMin(): I64 = 8
+def Nx.maxLeaves(): I64 = 8
+
+def Nx.isSet(v: Nx.Val): Bool = v match
+  case Nx.VAttrs(_, _, _) => true
+  case Nx.VUnion(_, _) => true
+  case _ => false
+
+// a union is never empty: each of its leaves has a name
+def Nx.isEmptySet(v: Nx.Val): Bool = v match
+  case Nx.VAttrs(n, _, _) => n == 0
+  case _ => false
+
+// the flat form of a set (a union merged, newest leaf winning); any other value as it is
+def Nx.flat(v: Nx.Val): Nx.Val = v match
+  case Nx.VUnion(_, ls) => Nx.flatLeaves(ls)
+  case _ => v
+
+// all leaves merged in one pass (rt/snx_rt.c Nx__mergeLeaves), the newest leaf winning a shared name
+def Nx.flatLeaves(ls: Nx.Leaves): Nx.Val =
+  val t = Nx.arrNew(3 * (Nx.maxLeaves() + 1))
+  val out = Nx.arrNew(3)
+  Nx.mergeLeaves(Nx.leafWords(ls, t, 0), t, out)
+  Nx.VAttrs(Nx.ageti(out, 0), Nx.aget[Ptr](out, 1), Nx.aget[Ptr](out, 2))
+
+// the leaves as (n, syms, vals) word triples into t from triple i, newest first; their count
+def Nx.leafWords(ls: Nx.Leaves, t: Ptr, i: I64): I64 = ls match
+  case Nx.LBase(n, s, v) =>
+    Nx.leafWord(t, i, n, s, v)
+    i + 1
+  case Nx.LOn(n, s, v, under) =>
+    Nx.leafWord(t, i, n, s, v)
+    Nx.leafWords(under, t, i + 1)
+
+def Nx.leafWord(t: Ptr, i: I64, n: I64, s: Ptr, v: Ptr): Unit =
+  Nx.aseti(t, 3 * i, n)
+  Nx.aset[Ptr](t, 3 * i + 1, s)
+  Nx.aset[Ptr](t, 3 * i + 2, v)
+
+// leaves full: y and the leaves above the base merge into one leaf on the base. When that leaf has a sixth as many
+// names as the base or more, the base merges in too: a top leaf that keeps growing is copied at every compaction, a
+// base copied at every merge; a sixth keeps their sum low (bench/micro/attrs.nix: half 181 MB RSS, a sixth 167 MB)
+def Nx.compact(ls: Nx.Leaves, n2: I64, s2: Ptr, v2: Ptr): Nx.Val =
+  val t = Nx.arrNew(3 * (Nx.maxLeaves() + 1))
+  val k = Nx.leafWords(Nx.LOn(n2, s2, v2, ls), t, 0)
+  val nb = Nx.ageti(t, 3 * (k - 1))
+  val sb = Nx.aget[Ptr](t, 3 * (k - 1) + 1)
+  val vb = Nx.aget[Ptr](t, 3 * (k - 1) + 2)
+  val out = Nx.arrNew(3)
+  Nx.mergeTop(k, t, out)
+  val nt = Nx.ageti(out, 0)
+  if 6 * nt >= nb then
+    Nx.leafWord(t, 0, nt, Nx.aget[Ptr](out, 1), Nx.aget[Ptr](out, 2))
+    Nx.leafWord(t, 1, nb, sb, vb)
+    Nx.mergeLeaves(2, t, out)
+    Nx.VAttrs(Nx.ageti(out, 0), Nx.aget[Ptr](out, 1), Nx.aget[Ptr](out, 2))
+  else Nx.VUnion(2, Nx.LOn(nt, Nx.aget[Ptr](out, 1), Nx.aget[Ptr](out, 2), Nx.LBase(nb, sb, vb)))
+
+// the cell of sym in a set, newest leaf first; Coll.None when absent
+def Nx.cellOfLeaves(ls: Nx.Leaves, sym: I64): Coll.Option[Ptr] = ls match
+  case Nx.LBase(n, s, v) =>
+    val i = Nx.findSym(s, n, sym)
+    if i < n then Coll.Some(Nx.aget[Ptr](v, i)) else Coll.None
+  case Nx.LOn(n, s, v, under) =>
+    val i = Nx.findSym(s, n, sym)
+    if i < n then Coll.Some(Nx.aget[Ptr](v, i)) else Nx.cellOfLeaves(under, sym)
+
+// two flat sets, both non-empty: y's value on a shared name
+def Nx.updFlat(n1: I64, s1: Ptr, v1: Ptr, n2: I64, s2: Ptr, v2: Ptr): Nx.Val =
+  if Nx.namesIn(s2, n2, s1, n1, 0) then
+    // no new name: the result shares x's names and copies only its cells
+    val ov = Nx.arrNew(n1)
+    Nx.copyCells(v1, 0, ov, 0, n1)
+    Nx.overwrite(s2, v2, n2, s1, n1, ov, 0)
+    Nx.VAttrs(n1, s1, ov)
+  else
+    val os = Nx.arrNew(n1 + n2)
+    val ov = Nx.arrNew(n1 + n2)
+    Nx.VAttrs(Nx.mergeAttrs(s1, v1, n1, s2, v2, n2, 0, 0, os, ov, 0), os, ov)
 
 // every name of s2[j..n2) is in s1 (a binary search each, stops at the first absent one)
 def Nx.namesIn(s2: Ptr, n2: I64, s1: Ptr, n1: I64, j: I64): Bool =
@@ -670,8 +780,10 @@ def Nx.eqOk(x: Nx.Val, y: Nx.Val): Nx.Val = x match
   case Nx.VList(n, xs) => y match
     case Nx.VList(m, ys) => if n != m then Nx.bool(false) else Nx.eqList(xs, ys, 0, n)
     case _ => Nx.bool(false)
+  case Nx.VUnion(_, _) => Nx.eqOk(Nx.flat(x), y)
   case Nx.VAttrs(_, _, _) => y match
     case Nx.VAttrs(_, _, _) => Nx.eqAttrs(x, y)
+    case Nx.VUnion(_, _) => Nx.eqAttrs(x, Nx.flat(y))
     case _ => Nx.bool(false)
   case _ => Nx.bool(false)
 
@@ -684,7 +796,7 @@ def Nx.eqList(xs: Ptr, ys: Ptr, i: I64, n: I64): Nx.Val =
       case _ => r
 
 // a set whose type is "derivation" (isDerivation, eval.cc:2429-2440): a Nx.VBool or the error
-def Nx.isDrv(v: Nx.Val): Nx.Val = v match
+def Nx.isDrv(v: Nx.Val): Nx.Val = Nx.flat(v) match
   case Nx.VAttrs(n, syms, vals) =>
     val i = Nx.findSym(syms, n, Nx.intern("type"))
     if i < n then
@@ -776,6 +888,7 @@ def Nx.listLess(xs: Ptr, n: I64, ys: Ptr, m: I64, i: I64): Nx.Val =
 // Nx.VNull when every value inside v is forced, else the first error
 def Nx.deepForce(v: Nx.Val, seen: Ptr): Nx.Val = v match
   case Nx.VAttrs(n, _, vals) => Nx.deepCells(vals, 0, n, seen)
+  case Nx.VUnion(_, _) => Nx.deepForce(Nx.flat(v), seen)
   case Nx.VList(n, xs) => Nx.deepCells(xs, 0, n, seen)
   case Nx.VErr(_, _) => v
   case _ => Nx.VNull

@@ -63,7 +63,7 @@ def Nx.nixPathVal(): Nx.Val =
 // ---- paths ----------------------------------------------------------------------------------------------------
 
 // coerceToPath: a path, a set with __toString, or a string that is an absolute path; as the canonical path in a Nx.VStr
-def Nx.pathStr(v: Nx.Val): Nx.Val = v match
+def Nx.pathStr(v: Nx.Val): Nx.Val = Nx.flat(v) match
   case Nx.VErr(_, _) => v
   case Nx.VPath(s) => Nx.VStr(s, Coll.Nil)
   case Nx.VAttrs(n, syms, vals) =>
@@ -163,7 +163,7 @@ def Nx.findGo(xs: Ptr, i: I64, n: I64, path: Str): Nx.Val =
     else Nx.VErr(Nx.KThrow, Nx.cat(Nx.cat("file '", path), "' was not found in the Nix search path (add it using $NIX_PATH or -I)"))
   else
     val e = Nx.force(Nx.aget[Ptr](xs, i))
-    e match
+    Nx.flat(e) match
       case Nx.VAttrs(m, syms, vals) =>
         val pi = Nx.findSym(syms, m, Nx.intern("prefix"))
         val di = Nx.findSym(syms, m, Nx.intern("path"))
@@ -196,7 +196,7 @@ def Nx.slotsFill(slots: Ptr, i: I64, n: I64): Ptr =
   else slots
 
 // prim_scopedImport: the file runs with the names of the set in scope over the base env; no import cache
-def Nx.pScopedImport(sv: Nx.Val, pv: Nx.Val): Nx.Val = sv match
+def Nx.pScopedImport(sv: Nx.Val, pv: Nx.Val): Nx.Val = Nx.flat(sv) match
   case Nx.VAttrs(n, syms, vals) =>
     val p = Nx.pathStr(pv)
     p match

@@ -91,6 +91,7 @@ int64_t Nx__aseti(int64_t* p, int64_t i, int64_t v) { p[i] = v; return 0; }
 void* Nx__parent(void** f) { return f[0]; }
 void* Nx__frame(void* parent, int64_t n) { void** f = nx_words(n + 1); f[0] = parent; return f; }
 void* Nx__noFrame(void) { return 0; }
+void* Nx__valPtr(void* v) { return v; }
 
 // ── stack discipline for the word arena (nx/eval.srs Nx.apply): a lambda call that returns a scalar and let nothing
 // escape gives back the words it took. An escape (a leak) = a pointer into the arena stored where older code can reach
@@ -133,6 +134,76 @@ int64_t Nx__findSym(const int64_t* syms, int64_t n, int64_t sym) {
   int64_t lo = 0, hi = n;
   while (lo < hi) { int64_t m = (lo + hi) >> 1; if (syms[m] < sym) lo = m + 1; else hi = m; }
   return (lo < n && syms[lo] == sym) ? lo : n;
+}
+
+// k sorted leaves (n, syms, vals) in t, newest first, merged by symbol into syms/vals; the newest leaf's cell wins a
+// shared name. Selection over the k heads: k is at most 9 and the leaves above the base are short. Returns the count
+static int64_t nx_kmerge(int64_t k, const int64_t* t, int64_t* syms, void** vals) {
+  int64_t pos[16] = {0}, o = 0;
+  for (;;) {
+    int64_t best = INT64_MAX, bi = -1;
+    for (int64_t i = 0; i < k; i++)
+      if (pos[i] < t[3 * i]) { int64_t s = ((const int64_t*)t[3 * i + 1])[pos[i]]; if (s < best) { best = s; bi = i; } }
+    if (bi < 0) return o;
+    syms[o] = best; vals[o++] = ((void**)t[3 * bi + 2])[pos[bi]];
+    for (int64_t i = bi; i < k; i++)
+      if (pos[i] < t[3 * i] && ((const int64_t*)t[3 * i + 1])[pos[i]] == best) pos[i]++;
+  }
+}
+
+// the leaves above the base (0..k-2 of t) merged into new arrays (nx/eval.srs Nx.compact); the unused name words go back
+// The oldest of them (k-2, an earlier merged top) may be long: the short newer ones merge first, then the two
+int64_t Nx__mergeTop(int64_t k, const int64_t* t, int64_t* out) {
+  int64_t ns = 0;
+  for (int64_t i = 0; i < k - 2; i++) ns += t[3 * i];
+  int64_t stk[64]; void* stv[64];
+  int64_t* ts = ns <= 64 ? stk : malloc((size_t)ns * sizeof *ts);
+  void** tv = ns <= 64 ? stv : malloc((size_t)ns * sizeof *tv);
+  if (!ts || !tv) { fputs("snx: out of memory\n", stderr); exit(70); }
+  int64_t pair[6] = { nx_kmerge(k - 2, t, ts, tv), (int64_t)ts, (int64_t)tv, t[3 * (k - 2)], t[3 * (k - 2) + 1], t[3 * (k - 2) + 2] };
+  int64_t ntop = pair[0] + pair[3];
+  void** vals = nx_words(ntop);
+  int64_t* syms = nx_words(ntop);
+  int64_t o = nx_kmerge(2, pair, syms, vals);
+  size_t back = (size_t)(ntop - o) * sizeof(void*);
+  if ((uint8_t*)(syms + ntop) == g_bump) { g_bump -= back; g_bump_left += back; }
+  out[0] = o; out[1] = (int64_t)syms; out[2] = (int64_t)vals;
+  if (ts != stk) { free(ts); free(tv); }
+  return 0;
+}
+
+// a layered set flat (nx/eval.srs Nx.flatLeaves): k >= 2 leaves as (n, syms, vals) triples in t, newest first. The
+// leaves above the base merge first (short); when all their names are in the base, the result shares the base's name
+// array and copies its cells with the newer ones written over, else base and the merged top merge into new arrays
+int64_t Nx__mergeLeaves(int64_t k, const int64_t* t, int64_t* out) {
+  int64_t nb = t[3 * (k - 1)], ntop = 0;
+  const int64_t* sb = (const int64_t*)t[3 * (k - 1) + 1];
+  void** vb = (void**)t[3 * (k - 1) + 2];
+  for (int64_t i = 0; i < k - 1; i++) ntop += t[3 * i];
+  int64_t stk[64]; void* stv[64];
+  int64_t* ts = ntop <= 64 ? stk : malloc((size_t)ntop * sizeof *ts);
+  void** tv = ntop <= 64 ? stv : malloc((size_t)ntop * sizeof *tv);
+  if (!ts || !tv) { fputs("snx: out of memory\n", stderr); exit(70); }
+  int64_t nt = nx_kmerge(k - 1, t, ts, tv);
+  int64_t in = 0;
+  while (in < nt && Nx__findSym(sb, nb, ts[in]) < nb) in++;
+  if (in == nt) {
+    void** vals = nx_words(nb);
+    memcpy(vals, vb, (size_t)nb * sizeof *vals);
+    for (int64_t j = 0; j < nt; j++) vals[Nx__findSym(sb, nb, ts[j])] = tv[j];
+    out[0] = nb; out[1] = (int64_t)sb; out[2] = (int64_t)vals;
+  } else {
+    int64_t pair[6] = { nt, (int64_t)ts, (int64_t)tv, nb, (int64_t)sb, (int64_t)vb };
+    void** vals = nx_words(nt + nb);
+    int64_t* syms = nx_words(nt + nb);
+    int64_t o = nx_kmerge(2, pair, syms, vals);
+    // syms is the last allocation: its unused tail goes back
+    size_t back = (size_t)(nt + nb - o) * sizeof(void*);
+    if ((uint8_t*)(syms + nt + nb) == g_bump) { g_bump -= back; g_bump_left += back; }
+    out[0] = o; out[1] = (int64_t)syms; out[2] = (int64_t)vals;
+  }
+  if (ts != stk) { free(ts); free(tv); }
+  return 0;
 }
 
 // ── stack: evaluation recurses as deep as the Nix program; raise the stack limit to 4 GiB (or the hard limit) and

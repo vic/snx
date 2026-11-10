@@ -68,27 +68,31 @@ def Nx.cpCall(f: Nx.Code, n: I64, args: Ptr): Nx.Code = Nx.fixedCell(f) match
   case Coll.None => Nx.CCall(f, n, args)
 
 def Nx.cpPrimCall(v: Nx.Val, f: Nx.Code, n: I64, args: Ptr): Nx.Code = v match
-  case Nx.VPrim(id, ar) => if ar == n then Nx.CPrimCall(id, n, args, false) else Nx.CCall(f, n, args)
+  case Nx.VPrim(id, ar) =>
+    if ar != n then Nx.CCall(f, n, args)
+    else Nx.numOpOf(id) match
+      case Coll.Some(op) => Nx.CNum(op, Nx.aget[Nx.Code](args, 0), Nx.aget[Nx.Code](args, 1), false)
+      case Coll.None => Nx.CPrimCall(id, n, args)
   case _ => Nx.CCall(f, n, args)
 
-// the primops that on numbers force nothing else and always end: arithmetic, <, bit ops (Nx.thunk runs them early)
-def Nx.numPrim(id: I64): Bool = Nx.aget[Nx.Prim](Nx.aget[Ptr](Nx.globals(), Nx.gKinds()), id) match
-  case Nx.PAdd => true
-  case Nx.PSub => true
-  case Nx.PMul => true
-  case Nx.PDiv => true
-  case Nx.PLessThan => true
-  case Nx.PBitAnd => true
-  case Nx.PBitOr => true
-  case Nx.PBitXor => true
-  case _ => false
+// the numeric primops (Nx.CNum: both operands evaluated strictly, no thunks; Nx.thunk may run a call argument early)
+def Nx.numOpOf(id: I64): Coll.Option[Nx.NumOp] = Nx.aget[Nx.Prim](Nx.aget[Ptr](Nx.globals(), Nx.gKinds()), id) match
+  case Nx.PAdd => Coll.Some(Nx.NAdd)
+  case Nx.PSub => Coll.Some(Nx.NSub)
+  case Nx.PMul => Coll.Some(Nx.NMul)
+  case Nx.PDiv => Coll.Some(Nx.NDiv)
+  case Nx.PLessThan => Coll.Some(Nx.NLess)
+  case Nx.PBitAnd => Coll.Some(Nx.NAnd)
+  case Nx.PBitOr => Coll.Some(Nx.NOr)
+  case Nx.PBitXor => Coll.Some(Nx.NXor)
+  case _ => Coll.None
 
-// args[i..n) of a call: a numeric primop call among them may run at thunk time (val.srs CPrimCall num)
+// args[i..n) of a call: a numeric primop among them may run at thunk time (val.srs CNum early)
 def Nx.markNum(args: Ptr, i: I64, n: I64): Ptr =
   if i == n then args
   else
     Nx.aget[Nx.Code](args, i) match
-      case Nx.CPrimCall(id, k, a, _) => Nx.aset[Nx.Code](args, i, Nx.CPrimCall(id, k, a, Nx.numPrim(id)))
+      case Nx.CNum(op, a, b, _) => Nx.aset[Nx.Code](args, i, Nx.CNum(op, a, b, true))
       case _ => ()
     Nx.markNum(args, i + 1, n)
 
