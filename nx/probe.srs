@@ -36,6 +36,7 @@ def Nx.cdesc(c: Nx.Code, d: I64): Str =
     case Nx.CAppSlots(n) => "appSlots"
     case Nx.CNum(_, a, b, _) => Nx.cat(Nx.cat(Nx.cdesc(a, d - 1), " <num> "), Nx.cdesc(b, d - 1))
     case Nx.CApp1(_) => "app1"
+    case Nx.CMapAt(_, _, _) => "mapAt"
 
 def Nx.decStr(n: I64): Str = if n < 10 then Nx.byte('0' + n) else Nx.cat(Nx.decStr(n / 10), Nx.byte('0' + n % 10))
 

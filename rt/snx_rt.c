@@ -88,6 +88,8 @@ void* Nx__aget(void** p, int64_t i) { return p[i]; }
 int64_t Nx__aset(void** p, int64_t i, void* v) { p[i] = v; return 0; }
 int64_t Nx__ageti(int64_t* p, int64_t i) { return p[i]; }
 int64_t Nx__aseti(int64_t* p, int64_t i, int64_t v) { p[i] = v; return 0; }
+void* Nx__slotAddr(void** p, int64_t i) { return p + i; }
+int64_t Nx__slotOfAddr(void** p, void** q) { return q - p; }
 void* Nx__parent(void** f) { return f[0]; }
 void* Nx__frame(void* parent, int64_t n) { void** f = nx_words(n + 1); f[0] = parent; return f; }
 void* Nx__noFrame(void) { return 0; }

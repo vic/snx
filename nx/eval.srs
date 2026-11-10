@@ -197,6 +197,9 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
   case Nx.CNum(op, a, b, _) => Nx.numOp(op, Nx.ev(env, a), Nx.ev(env, b))
   case Nx.CAppSlots(n) => Nx.appSlots(env, Nx.force(Nx.aget[Ptr](env, 1)), 2, n + 2)
   case Nx.CApp1(f) => Nx.apply(Nx.force(f), env)
+  case Nx.CMapAt(f, syms, vals) =>
+    val i = Nx.slotOfAddr(vals, env)
+    Nx.apply(Nx.apply(Nx.force(f), Nx.nameCell(Nx.ageti(syms, i))), Nx.aget[Ptr](vals, i))
   case Nx.CSelect(e, path, d) => Nx.select(env, Nx.ev(env, e), path, d)
   case Nx.CHas(e, path) => Nx.has(env, Nx.eval(env, e), path)
   case Nx.CIf(cnd, t, e) =>

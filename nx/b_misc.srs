@@ -246,8 +246,10 @@ def Nx.grpSet(ks: Ptr, vs: Ptr, n: I64, f: Coll.Option[Ptr]): Nx.Val =
   val g = Nx.runCount(ks, 1, n, if n == 0 then 0 else 1)
   val os = Nx.arrNew(g)
   val ov = Nx.arrNew(g)
-  Nx.grpRuns(ks, vs, n, f, os, ov, 0, 0)
-  Nx.VAttrs(g, os, ov)
+  Nx.grpRuns(ks, vs, n, os, ov, 0, 0)
+  f match
+    case Coll.None => Nx.VAttrs(g, os, ov)
+    case Coll.Some(fc) => Nx.VAttrs(g, os, Nx.mapAttrsGo(Nx.CMapAt(fc, os, ov), ov, Nx.arrNew(g), 0, g))
 
 // the runs of equal symbols in ks[i..n), acc counted so far
 def Nx.runCount(ks: Ptr, i: I64, n: I64, acc: I64): I64 =
@@ -255,24 +257,15 @@ def Nx.runCount(ks: Ptr, i: I64, n: I64, acc: I64): I64 =
 
 def Nx.runEnd(ks: Ptr, i: I64, n: I64, sym: I64): I64 = if i < n && Nx.ageti(ks, i) == sym then Nx.runEnd(ks, i + 1, n, sym) else i
 
-def Nx.grpRuns(ks: Ptr, vs: Ptr, n: I64, f: Coll.Option[Ptr], os: Ptr, ov: Ptr, i: I64, o: I64): Unit =
+def Nx.grpRuns(ks: Ptr, vs: Ptr, n: I64, os: Ptr, ov: Ptr, i: I64, o: I64): Unit =
   if i < n then
     val sym = Nx.ageti(ks, i)
     val e = Nx.runEnd(ks, i + 1, n, sym)
     val cells = Nx.arrNew(e - i)
     Nx.copyCells(vs, i, cells, 0, e - i)
-    val lst = Nx.cell(Nx.VList(e - i, cells))
-    val c = f match
-      case Coll.None => lst
-      case Coll.Some(fc) =>
-        val fr = Nx.frame(Nx.noFrame(), 3)
-        Nx.aset[Ptr](fr, 1, fc)
-        Nx.aset[Ptr](fr, 2, Nx.nameCell(sym))
-        Nx.aset[Ptr](fr, 3, lst)
-        Nx.lazy(fr, Nx.appCode(2))
     Nx.aseti(os, o, sym)
-    Nx.aset[Ptr](ov, o, c)
-    Nx.grpRuns(ks, vs, n, f, os, ov, e, o + 1)
+    Nx.aset[Ptr](ov, o, Nx.cell(Nx.VList(e - i, cells)))
+    Nx.grpRuns(ks, vs, n, os, ov, e, o + 1)
   else ()
 
 def Nx.pGroupBy(a: Ptr, l: Nx.Val): Nx.Val = l match

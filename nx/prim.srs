@@ -806,17 +806,14 @@ def Nx.catGo(sym: I64, xs: Ptr, i: I64, n: I64, out: Ptr, k: I64): Nx.Val =
 
 // prim_mapAttrs: value i = the thunk f name_i value_i
 def Nx.pMapAttrs(a: Ptr, sv: Nx.Val): Nx.Val = Nx.flat(sv) match
-  case Nx.VAttrs(n, syms, vals) => Nx.VAttrs(n, syms, Nx.mapAttrsGo(Nx.appCode(2), a, syms, vals, Nx.arrNew(n), 0, n))
+  case Nx.VAttrs(n, syms, vals) => Nx.VAttrs(n, syms, Nx.mapAttrsGo(Nx.CMapAt(a, syms, vals), vals, Nx.arrNew(n), 0, n))
   case _ => Nx.typeErr("a set", sv)
 
-def Nx.mapAttrsGo(code: Nx.Code, f: Ptr, syms: Ptr, vals: Ptr, out: Ptr, i: I64, n: I64): Ptr =
+// out[i] = the thunk of code (a Nx.CMapAt on vals) whose env is the address of slot i of vals
+def Nx.mapAttrsGo(code: Nx.Code, vals: Ptr, out: Ptr, i: I64, n: I64): Ptr =
   if i < n then
-    val fr = Nx.frame(Nx.noFrame(), 3)
-    Nx.aset[Ptr](fr, 1, f)
-    Nx.aset[Ptr](fr, 2, Nx.nameCell(Nx.ageti(syms, i)))
-    Nx.aset[Ptr](fr, 3, Nx.aget[Ptr](vals, i))
-    Nx.aset[Ptr](out, i, Nx.lazy(fr, code))
-    Nx.mapAttrsGo(code, f, syms, vals, out, i + 1, n)
+    Nx.aset[Ptr](out, i, Nx.lazy(Nx.slotAddr(vals, i), code))
+    Nx.mapAttrsGo(code, vals, out, i + 1, n)
   else out
 
 // prim_functionArgs: formal name = whether it has a default

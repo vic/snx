@@ -37,6 +37,14 @@ def Nx.bool(b: Bool): Nx.Val = if b then Nx.aget[Nx.Val](Nx.globals(), Nx.gTrue(
 // the capacity of the builder arrays: more names than Nix has
 def Nx.bsCap(): I64 = 512
 
+// the builder's counts (scope names, builtins names, primops), all 0: an Nx.arrNew word holds what was last put there
+def Nx.bsCounts(): Ptr =
+  val c = Nx.arrNew(3)
+  Nx.aseti(c, 0, 0)
+  Nx.aseti(c, 1, 0)
+  Nx.aseti(c, 2, 0)
+  c
+
 // scope names and cells, builtins names and cells, primop kinds and name symbols, the three counts
 enum Nx.BB:
   case Nx.BB(ss: Ptr, sc: Ptr, bs: Ptr, bc: Ptr, pk: Ptr, pn: Ptr, cnt: Ptr)
@@ -82,7 +90,7 @@ def Nx.baseEnv(): Nx.Val =
   val g = Nx.globals()
   if Nx.ageti(g, Nx.gReady()) == 1 then Nx.aget[Nx.Val](g, Nx.gBase())
   else
-    val b = Nx.BB(Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(3))
+    val b = Nx.BB(Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.bsCounts())
     val v = Nx.bsBuild(b)
     Nx.aset[Nx.Val](g, Nx.gBase(), v)
     Nx.aseti(g, Nx.gReady(), 1)

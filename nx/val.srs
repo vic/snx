@@ -85,6 +85,9 @@ enum Nx.Code:
   case Nx.CLamArg(body: Nx.Code, name: Str)               // x: body, a frame of 1 slot: the argument (CLam = a pattern)
   case Nx.CAppSlots(n: I64)                               // slot 1 applied to slots 2..n+1 (the thunks of mapAttrs, ..)
   case Nx.CApp1(f: Ptr)                                   // cell f applied to the cell that is the env (a map or genList thunk: no frame)
+  // cell f applied to name i of syms and cell i of vals, the env being the address of slot i of vals (the thunks of
+  // mapAttrs and zipAttrsWith: one code per call, two words per thunk)
+  case Nx.CMapAt(f: Ptr, syms: Ptr, vals: Ptr)
 
 enum Nx.CKey:
   case Nx.KSym(sym: I64)
@@ -107,6 +110,9 @@ extern def Nx.aget [A: Type] (p: Ptr, i: I64): A
 extern def Nx.aset [A: Type] (p: Ptr, i: I64, v: A): Unit
 extern def Nx.ageti(p: Ptr, i: I64): I64
 extern def Nx.aseti(p: Ptr, i: I64, v: I64): Unit
+// the address of slot i of p, and the slot of p that address q is (Nx.CMapAt)
+extern def Nx.slotAddr(p: Ptr, i: I64): Ptr
+extern def Nx.slotOfAddr(p: Ptr, q: Ptr): I64
 // the frame that slot 0 of frame f points to
 extern def Nx.parent(f: Ptr): Ptr
 // a frame of n value slots plus the parent link in slot 0

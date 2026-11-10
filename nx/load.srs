@@ -180,6 +180,11 @@ def Nx.serC(b: Ptr, c: Nx.Code): Unit = c match
   case Nx.CApp1(f) =>
     Nx.wbPut(b, 28)
     Nx.wbPutP(b, f)
+  case Nx.CMapAt(f, syms, vals) =>
+    Nx.wbPut(b, 29)
+    Nx.wbPutP(b, f)
+    Nx.wbPutP(b, syms)
+    Nx.wbPutP(b, vals)
 
 // a literal's value (Nx.konst: numbers, strings without context, paths, the undefined-variable error)
 def Nx.serConst(b: Ptr, v: Nx.Val): Unit = v match
@@ -368,7 +373,11 @@ def Nx.desC(b: Ptr): Nx.Code =
     val body = Nx.desC(b)
     Nx.CLamArg(body, Nx.wbGetS(b))
   else if t == 27 then Nx.CAppSlots(Nx.wbGet(b))
-  else Nx.CApp1(Nx.wbGetP(b))
+  else if t == 28 then Nx.CApp1(Nx.wbGetP(b))
+  else
+    val f = Nx.wbGetP(b)
+    val syms = Nx.wbGetP(b)
+    Nx.CMapAt(f, syms, Nx.wbGetP(b))
 
 def Nx.desConst(b: Ptr): Nx.Val =
   val t = Nx.wbGet(b)
