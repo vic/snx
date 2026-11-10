@@ -1,0 +1,6 @@
+uri 0 http://x.org/p?q=1
+uri 19 x:x
+id 23 x
+op 24 :
+id 26 x
+eof 27

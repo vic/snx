@@ -1,0 +1,13 @@
+op 0 {
+id 1 a
+op 2 .
+id 3 b
+op 4 =
+op 5 [
+op 6 (
+id 7 c
+op 8 )
+op 9 ]
+op 10 ;
+op 11 }
+eof 12

@@ -1,0 +1,21 @@
+// test driver for nx/lex.srs: lexmain FILE prints one token per line (Nx.printTok); a lexer throw is the last line, `error P`
+def main(): I64 =
+  handle r = Srs.Arena()
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  val src = Files.read(Args.at(1))
+  if Str.len(src) < 0 then
+    Console.print("lexmain: cannot read file\n")
+    2
+  else
+    val Nx.Toks(ts) = Nx.lex(src)
+    Nx.lxPrintAll(ts)
+    0
+
+def Nx.lxPrintAll(ts: Coll.List[Nx.Tok]): Unit = ts match
+  case Coll.Nil => ()
+  case Coll.Cons(t, rest) =>
+    Nx.printTok(t)
+    Console.print("\n")
+    Nx.lxPrintAll(rest)

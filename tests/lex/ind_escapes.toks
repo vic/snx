@@ -1,0 +1,10 @@
+str-open 0 ''
+str-part 2 a
+str-part 3 $
+str-part 6 b
+str-part 7 ''
+str-part 10 c
+str-part 11 \n
+str-part 15 d
+str-close 16
+eof 18

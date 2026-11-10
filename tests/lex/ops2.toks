@@ -1,0 +1,25 @@
+id 0 a
+op 2 ==
+id 5 b
+op 7 !=
+id 10 c
+op 12 <=
+id 15 d
+op 17 >=
+id 20 e
+op 22 &&
+id 25 f
+op 27 ||
+id 30 g
+op 32 ->
+id 35 h
+op 37 //
+id 40 i
+op 42 ++
+id 45 j
+op 47 |>
+id 50 k
+op 52 <|
+id 55 l
+op 57 ...
+eof 60

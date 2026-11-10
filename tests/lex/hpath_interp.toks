@@ -1,0 +1,8 @@
+path-open 0
+path-part 0 ~/
+dollar-curly 2
+id 4 x
+op 5 }
+path-part 6 /y
+path-close 6
+eof 6

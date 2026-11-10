@@ -1,0 +1,15 @@
+str-open 0 "
+str-part 1 a
+dollar-curly 2
+op 5 {
+id 6 b
+op 7 =
+int 8 1
+op 9 ;
+op 10 }
+op 11 .
+id 12 b
+op 14 }
+str-part 15 c
+str-close 16
+eof 17

@@ -1,0 +1,4 @@
+str-open 0 ''
+str-part 2 $${x}
+str-close 7
+eof 9

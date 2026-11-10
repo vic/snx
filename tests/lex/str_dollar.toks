@@ -1,0 +1,18 @@
+op 0 [
+str-open 1 "
+str-part 2 a$
+str-close 4
+str-open 6 "
+str-part 7 $${x}
+str-close 12
+str-open 14 "
+str-part 15 $$
+dollar-curly 17
+id 19 y
+op 20 }
+str-close 21
+str-open 23 "
+str-part 24 $
+str-close 25
+op 26 ]
+eof 27

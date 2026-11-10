@@ -1,0 +1,4 @@
+str-open 0 ''
+str-part 5 x
+str-close 6
+eof 8

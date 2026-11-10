@@ -17,10 +17,10 @@ enum Nx.Tok:
   case Nx.TSPath(s: Str, p: I64)           // <a/b>, s = a/b
   case Nx.TOp(s: Str, p: I64)              // punctuation and operators: { } ( ) [ ] ; : . , @ ? = ++ // == != <= >= < > && || -> ! + - * / |> <|
   case Nx.TEof(p: I64)
+  case Nx.TBad(p: I64)                     // Nix's lexer throws here (the parser reports it when it reads this token: the lexer is lazy)
 
 enum Nx.LexResult:
   case Nx.Toks(ts: Coll.List[Nx.Tok])
-  case Nx.LexBad(p: I64)                   // the byte where Nix's lexer refuses
 
 // an attribute path element
 enum Nx.Attr:

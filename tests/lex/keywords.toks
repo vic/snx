@@ -1,0 +1,8 @@
+id 0 let
+id 4 x
+op 6 =
+int 8 1
+op 9 ;
+id 11 in
+id 14 x
+eof 15

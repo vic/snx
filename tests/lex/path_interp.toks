@@ -1,0 +1,8 @@
+path-open 0
+path-part 0 ./a/
+dollar-curly 4
+id 6 x
+op 7 }
+path-part 8 .nix
+path-close 8
+eof 8

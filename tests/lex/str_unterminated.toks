@@ -1,0 +1,5 @@
+str-open 0 "
+str-part 1 a
+dollar-curly 2
+id 4 b
+eof 5

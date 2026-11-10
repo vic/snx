@@ -1,0 +1,10 @@
+id 0 a
+op 2 /
+id 4 b
+path-open 6
+path-part 6 a/b
+path-close 6
+path-open 10
+path-part 10 1/2
+path-close 10
+eof 10

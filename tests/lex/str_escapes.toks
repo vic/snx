@@ -1,0 +1,4 @@
+str-open 0 "
+str-part 1 a\n\x09\x0dq\\\"${x}
+str-close 19
+eof 20

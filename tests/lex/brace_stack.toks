@@ -1,0 +1,7 @@
+str-open 0 "
+dollar-curly 1
+op 3 }
+str-part 4 }
+str-close 5
+op 7 }
+eof 8

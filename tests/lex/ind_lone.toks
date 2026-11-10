@@ -1,0 +1,8 @@
+str-open 0 ''
+str-part 2 a
+str-part 3 $
+str-part 4 'b
+str-part 6 '
+str-part 7 $
+str-close 8
+eof 10

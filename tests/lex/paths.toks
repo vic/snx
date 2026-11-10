@@ -1,0 +1,13 @@
+path-open 0
+path-part 0 ./a/b
+path-close 0
+path-open 6
+path-part 6 /c
+path-close 6
+path-open 9
+path-part 9 ~/d
+path-close 9
+path-open 13
+path-part 13 a/b
+path-close 13
+eof 13

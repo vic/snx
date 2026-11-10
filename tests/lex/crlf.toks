@@ -1,0 +1,6 @@
+id 0 a
+id 3 b
+str-open 10 "
+str-part 11 x\ny\nz
+str-close 17
+eof 18

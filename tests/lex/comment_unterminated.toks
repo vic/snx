@@ -1,0 +1,5 @@
+id 0 a
+op 2 /
+op 3 *
+id 5 b
+eof 6

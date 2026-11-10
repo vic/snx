@@ -1,0 +1,9 @@
+str-open 0 ''
+str-part 2 a
+dollar-curly 3
+op 6 {
+op 7 }
+op 9 }
+str-part 10 b
+str-close 11
+eof 13
