@@ -552,6 +552,8 @@ def Nx.reGrow(stk: Ptr, used: I64): Ptr =
     Nx.reCopy(old, nw, 0, used)
     Nx.aseti(nw, 0, cap * 2)
     Nx.aset(stk, 0, nw)
+    // the cached regex keeps nw past the lambda call that grew it (rt/snx_rt.c stack discipline)
+    Nx.leak()
     nw
 
 def Nx.rePush(s: Ptr, sp: I64, op: I64, a: I64, b: I64, c: I64): I64 =

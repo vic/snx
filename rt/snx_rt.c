@@ -102,7 +102,52 @@ void* Nx__valPtr(void* v) { return v; }
 void* Nx__mark(void) { return g_bump; }
 int64_t Nx__leak(void) { g_pin = g_bump; return 0; }
 // back to mark m when m is in the current chunk (a call that opened a new chunk keeps it) and above the pin
+// probe k (default off): SNX_PROBE=<bits>; bit 0 = no arena release, bit 1 = no numeric args at thunk time,
+// bit 2 = trace forces of thunks re-entered while busy (bit 3: the whole force stack, not only the cycle).
+// Built in only with SNX_CFLAGS=-DSNX_PROBES (tests/build.sh): else every probe is a constant 0 that LTO folds away
+int64_t Nx__probe(int64_t k) {
+#ifndef SNX_PROBES
+  (void)k; return 0;
+#endif
+  static int64_t bits = -1;
+  if (bits < 0) { const char* v = getenv("SNX_PROBE"); bits = v ? strtoll(v, 0, 0) : 0; }
+  return (bits >> k) & 1;
+}
+// probe bit 2: a stack of the thunks being forced, each with the attribute name last selected or looked up when it
+// started; meeting a busy thunk prints the chain from its entry up (the cycle)
+srs_str Nx__symName(int64_t id);
+static struct { void* c; int64_t sym; } g_tr[1 << 16]; static int64_t g_trn, g_trsym = -1;
+int64_t Nx__trSym(int64_t sym) { g_trsym = sym; return 0; }
+int64_t Nx__trPush(void* c) { if (g_trn < (1 << 16)) { g_tr[g_trn].c = c; g_tr[g_trn].sym = g_trsym; } g_trn++; return 0; }
+int64_t Nx__trPop(void) { g_trn--; return 0; }
+int64_t Nx__trBusy(void* c) {
+  int64_t top = g_trn < (1 << 16) ? g_trn : (1 << 16), i = top - 1;
+  while (i >= 0 && g_tr[i].c != c) i--;
+  fprintf(stderr, "snx-probe: busy thunk %p re-entered, depth %lld, entry %lld; chain:\n", c, (long long)g_trn, (long long)i);
+  return i < 0 ? 0 : i;
+}
+int64_t Nx__trTop(void) { return g_trn < (1 << 16) ? g_trn : (1 << 16); }
+void* Nx__trCell(int64_t j) { return g_tr[j].c; }
+int64_t Nx__trSymAt(int64_t j) { return g_tr[j].sym; }
+// probe bit 4: a release poisons the words (0xa5 bytes) and keeps them, and logs the range with its sequence number.
+// A crash on a poisoned word: `call Nx__relFind(addr)` in gdb names the release; SNX_RELSEQ=<n> makes release n
+// return 1 (nx/eval.srs Nx.apply then prints the call and the force stack)
+static struct { uint8_t *b, *e; } *g_rel; static int64_t g_reln, g_relcap;
+int64_t Nx__relProbe(uint8_t* m) {
+  if (!(m >= g_pin && m >= g_chunk && m < g_bump)) return 0;
+  if (g_reln == g_relcap) { g_relcap = g_relcap ? 2 * g_relcap : 1 << 16; g_rel = realloc(g_rel, (size_t)g_relcap * sizeof *g_rel); }
+  g_rel[g_reln].b = m; g_rel[g_reln].e = g_bump;
+  memset(m, 0xa5, (size_t)(g_bump - m));
+  static int64_t want = -2;
+  if (want == -2) { const char* v = getenv("SNX_RELSEQ"); want = v ? strtoll(v, 0, 0) : -1; }
+  return g_reln++ == want;
+}
+int64_t Nx__relFind(uint8_t* a) {
+  for (int64_t i = g_reln - 1; i >= 0; i--) if (a >= g_rel[i].b && a < g_rel[i].e) { fprintf(stderr, "snx-probe: %p in release %lld [%p, %p)\n", a, (long long)i, g_rel[i].b, g_rel[i].e); return i; }
+  fprintf(stderr, "snx-probe: %p in no release\n", a); return -1;
+}
 int64_t Nx__release(uint8_t* m) {
+  if (Nx__probe(0)) return 0;
   if (m >= g_pin && m >= g_chunk && m <= g_bump) { g_bump_left += (size_t)(g_bump - m); g_bump = m; }
   return 0;
 }

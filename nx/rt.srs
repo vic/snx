@@ -47,6 +47,16 @@ extern def Nx.readFile(path: Str): Str
 extern def Nx.isDir(path: Str): Bool
 extern def Nx.getEnv(name: Str): Str
 extern def Nx.eprint(s: Str): Unit
+// env-gated probe bit k (rt/snx_rt.c Nx__probe, SNX_PROBE unset = all off)
+extern def Nx.probe(k: I64): I64
+extern def Nx.trSym(sym: I64): Unit
+extern def Nx.trPush(c: Ptr): Unit
+extern def Nx.trPop(): Unit
+extern def Nx.trBusy(c: Ptr): I64
+extern def Nx.trTop(): I64
+extern def Nx.trCell(j: I64): Ptr
+extern def Nx.trSymAt(j: I64): I64
+extern def Nx.relProbe(m: Ptr): I64
 extern def Nx.timeNow(): I64
 extern def Nx.canonPath(s: Str): Str
 extern def Nx.wordsFrom(a: Ptr, i: I64): Ptr

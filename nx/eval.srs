@@ -33,14 +33,18 @@ def Nx.up(env: Ptr, n: I64): Ptr = if n == 0 then env else Nx.up(Nx.parent(env),
 def Nx.force(c: Ptr): Nx.Val =
   if Nx.isLazy(c) then
     Nx.put(c, Nx.VBusy)
+    if Nx.probe(2) == 1 then Nx.trPush(c) else ()
     val r = Nx.eval(Nx.aget[Ptr](c, 1), Nx.aget[Nx.Code](c, 2))
+    if Nx.probe(2) == 1 then Nx.trPop() else ()
     Nx.put(c, r)
     Nx.leakIf(r)
     r
   else
     val v = Nx.get(c)
     v match
-      case Nx.VBusy => Nx.VErr(Nx.KInfRec, "infinite recursion encountered")
+      case Nx.VBusy =>
+        if Nx.probe(2) == 1 then Nx.trDump(Nx.trBusy(c) * (1 - Nx.probe(3)), Nx.trTop()) else ()
+        Nx.VErr(Nx.KInfRec, "infinite recursion encountered")
       case _ => v
 
 // the value in cell c without running it: Nx.VPending for a thunk not run yet
@@ -67,7 +71,7 @@ def Nx.thunk(env: Ptr, c: Nx.Code): Ptr = c match
   case Nx.CCell(x) => x
   case Nx.CConst(_, x) => x
   case Nx.CNum(op, a, b, early) =>
-    if early && Nx.numReady(env, a) && Nx.numReady(env, b) then Nx.cell(Nx.numOp(op, Nx.ev(env, a), Nx.ev(env, b)))
+    if early && Nx.probe(1) == 0 && Nx.numReady(env, a) && Nx.numReady(env, b) then Nx.cell(Nx.numOp(op, Nx.ev(env, a), Nx.ev(env, b)))
     else Nx.lazy(env, c)
   case _ => Nx.lazy(env, c)
 
@@ -237,6 +241,7 @@ def Nx.withVar(env: Ptr, sym: I64, ups: Coll.List[I64], name: Str): Nx.Val = ups
     s match
       case Nx.VAttrs(n, syms, vals) =>
         val i = Nx.findSym(syms, n, sym)
+        if Nx.probe(2) == 1 then Nx.trSym(sym) else ()
         if i < n then Nx.force(Nx.aget[Ptr](vals, i)) else Nx.withVar(env, sym, rest, name)
       case Nx.VUnion(_, ls) => Nx.cellOfLeaves(ls, sym) match
         case Coll.Some(c) => Nx.force(c)
@@ -340,6 +345,7 @@ def Nx.select(env: Ptr, v: Nx.Val, path: Coll.List[Nx.CKey], d: Coll.Option[Nx.C
 def Nx.selectSym(env: Ptr, v: Nx.Val, sym: I64, rest: Coll.List[Nx.CKey], d: Coll.Option[Nx.Code]): Nx.Val = v match
   case Nx.VAttrs(n, syms, vals) =>
     val i = Nx.findSym(syms, n, sym)
+    if Nx.probe(2) == 1 then Nx.trSym(sym) else ()
     if i < n then Nx.select(env, Nx.force(Nx.aget[Ptr](vals, i)), rest, d) else Nx.selMissing(env, sym, d)
   case Nx.VUnion(_, ls) => Nx.selLeaves(env, ls, sym, rest, d)
   case _ => d match
@@ -375,11 +381,16 @@ def Nx.has(env: Ptr, v: Nx.Val, path: Coll.List[Nx.CKey]): Nx.Val = path match
 def Nx.hasSym(env: Ptr, v: Nx.Val, sym: I64, rest: Coll.List[Nx.CKey]): Nx.Val = v match
   case Nx.VAttrs(n, syms, vals) =>
     val i = Nx.findSym(syms, n, sym)
-    if i < n then Nx.has(env, Nx.force(Nx.aget[Ptr](vals, i)), rest) else Nx.bool(false)
+    if i < n then Nx.hasIn(env, Nx.aget[Ptr](vals, i), rest) else Nx.bool(false)
   case Nx.VUnion(_, ls) => Nx.cellOfLeaves(ls, sym) match
-    case Coll.Some(c) => Nx.has(env, Nx.force(c), rest)
+    case Coll.Some(c) => Nx.hasIn(env, c, rest)
     case Coll.None => Nx.bool(false)
   case _ => Nx.bool(false)
+
+// the value at the end of the path stays unforced: a step forces the set it looks in (eval.cc:1491), not the attribute
+def Nx.hasIn(env: Ptr, c: Ptr, rest: Coll.List[Nx.CKey]): Nx.Val = rest match
+  case Coll.Nil => Nx.bool(true)
+  case Coll.Cons(_, _) => Nx.has(env, Nx.force(c), rest)
 
 // ---- calls ----------------------------------------------------------------------------------------------------
 
@@ -418,7 +429,7 @@ def Nx.apply(f: Nx.Val, arg: Ptr): Nx.Val = f match
       val m = Nx.mark()
       val r = Nx.applyLam(lenv, code, arg)
       // a scalar result and no leak (Nx.release checks the pin): nothing the call allocated in the word arena is reachable
-      if Nx.isScalar(r) then Nx.release(m) else ()
+      if Nx.isScalar(r) then (if Nx.probe(4) == 1 then Nx.relDump(Nx.relProbe(m), code) else Nx.release(m)) else ()
       Nx.aseti(g, Nx.gDepth(), d)
       r
   case Nx.VPrim(id, ar) => Nx.primApp(id, ar, Coll.Nil, 0, arg)

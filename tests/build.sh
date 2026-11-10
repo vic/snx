@@ -13,5 +13,6 @@ done
 srcs+=("$here"/nx/main.srs)
 cd "$SRS"
 timeout 60 "$S2C" lib/prelude.srs s2/coll.srs "${srcs[@]}" > "$B/snx.c"
-timeout 120 zig cc -std=gnu11 -O2 -flto -w -o "$B/snx" "$B/snx.c" "$SRS/rt/srs_rt.c" "$here/rt/snx_rt.c" "$here/rt/snx_hash.c" "$here/rt/snx_fs.c"
+# SNX_CFLAGS=-DSNX_PROBES builds in the SNX_PROBE switches (rt/snx_rt.c Nx__probe)
+timeout 120 zig cc -std=gnu11 -O2 -flto -w ${SNX_CFLAGS:-} -o "$B/snx" "$B/snx.c" "$SRS/rt/srs_rt.c" "$here/rt/snx_rt.c" "$here/rt/snx_hash.c" "$here/rt/snx_fs.c"
 echo "$B/snx"
