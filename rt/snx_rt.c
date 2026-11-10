@@ -76,10 +76,10 @@ int64_t Nx__treeFloatNeg(int64_t bits) {
 }
 
 // ── word arrays: env frames, set and list slots. One bump arena for the whole run, never freed.
-static uint8_t* g_bump; static size_t g_bump_left;
+static uint8_t* g_bump; static size_t g_bump_left; static uint8_t* g_chunk; static uint8_t* g_pin;
 static void* nx_words(int64_t n) {
   size_t sz = (size_t)(n > 0 ? n : 1) * sizeof(void*);
-  if (sz > g_bump_left) { size_t cap = sz > (64u << 20) ? sz : (64u << 20); g_bump = nx_alloc((int64_t)cap); g_bump_left = cap; }
+  if (sz > g_bump_left) { size_t cap = sz > (64u << 20) ? sz : (64u << 20); g_pin = g_chunk = g_bump = nx_alloc((int64_t)cap); g_bump_left = cap; }
   void* p = g_bump; g_bump += sz; g_bump_left -= sz;
   return p;
 }
@@ -91,6 +91,20 @@ int64_t Nx__aseti(int64_t* p, int64_t i, int64_t v) { p[i] = v; return 0; }
 void* Nx__parent(void** f) { return f[0]; }
 void* Nx__frame(void* parent, int64_t n) { void** f = nx_words(n + 1); f[0] = parent; return f; }
 void* Nx__noFrame(void) { return 0; }
+
+// ── stack discipline for the word arena (nx/eval.srs Nx.apply): a lambda call that returns a scalar and let nothing
+// escape gives back the words it took. An escape (a leak) = a pointer into the arena stored where older code can reach
+// it (a forced cell taking a non-scalar value, an import or regex cache entry). A leak pins the arena below the bump
+// pointer of that moment: a call whose mark is under the pin keeps its words. The bump pointer never drops under the
+// pin (a release needs mark >= pin), so the pin stays meaningful after releases.
+
+void* Nx__mark(void) { return g_bump; }
+int64_t Nx__leak(void) { g_pin = g_bump; return 0; }
+// back to mark m when m is in the current chunk (a call that opened a new chunk keeps it) and above the pin
+int64_t Nx__release(uint8_t* m) {
+  if (m >= g_pin && m >= g_chunk && m <= g_bump) { g_bump_left += (size_t)(g_bump - m); g_bump = m; }
+  return 0;
+}
 
 // ── symbols: open-addressing table from bytes to ids, ids in first-seen order
 static srs_str* g_names; static int64_t g_nsyms, g_names_cap;
@@ -139,6 +153,8 @@ __attribute__((constructor)) static void nx_big_stack(int argc, char** argv) {
 // ── cells: one word holding a value (nx/val.srs Nx.cell)
 void* Nx__cell(void* v) { void** c = nx_words(1); *c = v; return c; }
 void* Nx__get(void** c) { return *c; }
+void* Nx__lazy(void* env, void* code) { void** c = nx_words(3); c[0] = 0; c[1] = env; c[2] = code; return c; }
+bool Nx__isLazy(void** c) { return !*c; }
 int64_t Nx__put(void** c, void* v) { *c = v; return 0; }
 
 // a double as std::ostream prints it by default (precision 6, %g): print-ambiguous.cc:93-95

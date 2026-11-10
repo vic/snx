@@ -2,7 +2,7 @@
 // Nx.Val, as Nix's Value: forcing a thunk writes the result into its cell. Frames, sets and lists hold cell pointers, as
 // Nix's Env, Bindings and lists hold Value*: a variable in a lazy position passes its cell on, unforced and unshared by
 // copy, and «repeated» compares lists by cell (print-ambiguous.cc:49) and sets by their Nx.VAttrs object (:33).
-// Only cells hold Nx.VPending and Nx.VBusy.
+// Only cells hold Nx.VBusy; Nx.VPending is what Nx.peek reads in a thunk not run yet.
 
 // why an evaluation failed; tryEval catches Nx.KThrow and Nx.KAssert only
 enum Nx.ErrKind:
@@ -27,7 +27,7 @@ enum Nx.Val:
   case Nx.VLam(env: Ptr, code: Nx.Code)           // code = a Nx.CLam
   case Nx.VPrim(id: I64, arity: I64)
   case Nx.VPrimApp(id: I64, arity: I64, args: Coll.List[Nx.Val])   // args newest first
-  case Nx.VPending(env: Ptr, code: Nx.Code)       // a thunk
+  case Nx.VPending                                 // a thunk not run yet (Nx.peek): its cell holds env and code (Nx.lazy)
   case Nx.VBusy                                   // a thunk being forced: reading it is infinite recursion
   case Nx.VErr(kind: Nx.ErrKind, msg: Str)
   // a primop applied to fewer cells than its arity, newest first: the arguments stay lazy and keep their identity
@@ -62,7 +62,7 @@ enum Nx.Code:
   case Nx.CWith(a: Nx.Code, body: Nx.Code)                // new frame of 1 slot: the set (forced on first lookup)
   case Nx.CLam(arg: Bool, nformals: I64, formals: Ptr, ellipsis: Bool, nslots: I64, body: Nx.Code, name: Str)
   case Nx.CCall(f: Nx.Code, n: I64, args: Ptr)
-  case Nx.CPrimCall(id: I64, n: I64, args: Ptr)           // a base env primop called with exactly its arity
+  case Nx.CPrimCall(id: I64, n: I64, args: Ptr, num: Bool)  // a base env primop called with exactly its arity; num = arithmetic, comparison or bit op
   case Nx.CSelect(e: Nx.Code, path: Coll.List[Nx.CKey], dflt: Coll.Option[Nx.Code])
   case Nx.CHas(e: Nx.Code, path: Coll.List[Nx.CKey])
   case Nx.CIf(c: Nx.Code, t: Nx.Code, e: Nx.Code)
@@ -86,6 +86,9 @@ enum Nx.CDyn:
 extern def Nx.cell(v: Nx.Val): Ptr
 extern def Nx.get(c: Ptr): Nx.Val
 extern def Nx.put(c: Ptr, v: Nx.Val): Unit
+// a thunk: one allocation of 3 words, value (none yet), env, code; Nx.force runs it
+extern def Nx.lazy(env: Ptr, code: Nx.Code): Ptr
+extern def Nx.isLazy(c: Ptr): Bool
 // C arrays of words: a frame is slot 0 = parent frame, slots 1..n = cells
 extern def Nx.arrNew(n: I64): Ptr
 extern def Nx.aget [A: Type] (p: Ptr, i: I64): A
@@ -97,6 +100,10 @@ extern def Nx.parent(f: Ptr): Ptr
 // a frame of n value slots plus the parent link in slot 0
 extern def Nx.frame(parent: Ptr, n: I64): Ptr
 extern def Nx.noFrame(): Ptr
+// the word arena as a stack (rt/snx_rt.c "stack discipline"): Nx.release(Nx.mark()) frees the words taken since
+extern def Nx.mark(): Ptr
+extern def Nx.release(m: Ptr): Unit
+extern def Nx.leak(): Unit
 
 // symbols: ids in first-seen order (attribute order of == and of forcing is this order)
 extern def Nx.intern(s: Str): I64

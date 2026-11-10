@@ -264,7 +264,7 @@ def Nx.grpSet(g: Nx.Groups, order: Coll.List[I64], f: Coll.Option[Ptr], acc: Col
         Nx.aset[Ptr](fr, 1, fc)
         Nx.aset[Ptr](fr, 2, Nx.strCell(Nx.symName(sym)))
         Nx.aset[Ptr](fr, 3, lst)
-        Nx.cell(Nx.VPending(fr, Nx.appCode(2)))
+        Nx.lazy(fr, Nx.appCode(2))
     Nx.grpSet(g, t, f, Coll.Cons(Nx.Pair(sym, c), acc))
 
 def Nx.grpOrder(g: Nx.Groups): Coll.List[I64] = g match

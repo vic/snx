@@ -311,7 +311,7 @@ def Nx.app1(code: Nx.Code, f: Ptr, x: Ptr): Ptr =
   val fr = Nx.frame(Nx.noFrame(), 2)
   Nx.aset[Ptr](fr, 1, f)
   Nx.aset[Ptr](fr, 2, x)
-  Nx.cell(Nx.VPending(fr, code))
+  Nx.lazy(fr, code)
 
 // forceFunction: a function or a set with __functor passes (Nx.VNull), else the error
 def Nx.fnErr(f: Nx.Val): Nx.Val = f match
@@ -428,7 +428,7 @@ def Nx.listsLen(xs: Ptr, i: I64, n: I64, acc: I64): Nx.Val =
 // the forced lists of xs copied one after another into out
 def Nx.listsCopy(xs: Ptr, i: I64, n: I64, out: Ptr, k: I64): Unit =
   if i < n then
-    Nx.get(Nx.aget[Ptr](xs, i)) match
+    Nx.peek(Nx.aget[Ptr](xs, i)) match
       case Nx.VList(m, ys) =>
         Nx.copyCells(ys, 0, out, k, m)
         Nx.listsCopy(xs, i + 1, n, out, k + m)
@@ -482,7 +482,7 @@ def Nx.pSort(a: Ptr, l: Nx.Val): Nx.Val = l match
         Nx.copyCells(xs, 0, arr, 0, n)
         val err = Nx.cell(Nx.fnErr(f))
         if n == 2 then Nx.srtSort2(Nx.SortSt(f, arr, arr, err)) else Nx.srtPeek(Nx.SortSt(f, arr, Nx.arrNew(n), err), 0, n, 0, n)
-        val r = Nx.get(err)
+        val r = Nx.peek(err)
         if Nx.isErr(r) then r else Nx.VList(n, arr)
   case _ => Nx.typeErr("a list", l)
 
@@ -494,13 +494,14 @@ def Nx.deepFirst(xs: Ptr, i: I64, n: I64): Nx.Val =
     if Nx.isErr(v) then v else Nx.deepFirst(xs, i + 1, n)
 
 def Nx.srtLess(f: Nx.Val, x: Ptr, y: Ptr, err: Ptr): Bool =
-  if Nx.isErr(Nx.get(err)) then false
+  if Nx.isErr(Nx.peek(err)) then false
   else
     val r = Nx.callBool(Nx.apply(f, x), y)
     r match
       case Nx.VBool(t) => t
       case _ =>
         Nx.put(err, r)
+        Nx.leakIf(r)
         false
 
 // the comparator, the array being sorted, the merge buffer, the error cell
@@ -747,7 +748,7 @@ def Nx.mapAttrsGo(code: Nx.Code, f: Ptr, syms: Ptr, vals: Ptr, out: Ptr, i: I64,
     Nx.aset[Ptr](fr, 1, f)
     Nx.aset[Ptr](fr, 2, Nx.cell(Nx.VStr(Nx.symName(Nx.ageti(syms, i)), Coll.Nil)))
     Nx.aset[Ptr](fr, 3, Nx.aget[Ptr](vals, i))
-    Nx.aset[Ptr](out, i, Nx.cell(Nx.VPending(fr, code)))
+    Nx.aset[Ptr](out, i, Nx.lazy(fr, code))
     Nx.mapAttrsGo(code, f, syms, vals, out, i + 1, n)
   else out
 
@@ -814,7 +815,8 @@ def Nx.importFile(p0: Str): Nx.Val =
         case Nx.Parsed(e) => Nx.compile(e, p, src) match
           case Nx.Undefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
           case Nx.Compiled(code) =>
-            val c = Nx.cell(Nx.VPending(Nx.noFrame(), code))
+            val c = Nx.lazy(Nx.noFrame(), code)
             Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.insert(m, key, c))
+            Nx.leak()
             Nx.force(c)
         case _ => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))

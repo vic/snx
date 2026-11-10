@@ -29,7 +29,7 @@ def Nx.pv(v: Nx.Val, seen: Ptr): Unit = v match
   case _ => Console.print("<CODE>")
 
 def Nx.pCell(c: Ptr, seen: Ptr): Unit =
-  val v = Nx.get(c)
+  val v = Nx.peek(c)
   v match
     case Nx.VList(n, _) => if n > 0 && !Nx.seenAdd(seen, c) then Console.print("«repeated»") else Nx.pv(v, seen)
     case _ => Nx.pv(v, seen)

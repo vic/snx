@@ -11,6 +11,7 @@ def Nx.reGet(pat: Str): Nx.ReResult =
     case Coll.None =>
       val r = Nx.reCompile(pat)
       Nx.aset[Coll.IMap[Nx.ReResult]](g, Nx.gRegex(), Coll.insert(m, k, r))
+      Nx.leak()
       r
 
 def Nx.reBadErr(pat: Str): Nx.Val = Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("invalid regular expression '", pat), "'"))

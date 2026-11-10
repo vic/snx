@@ -214,7 +214,7 @@ def Nx.scopedFile(n: I64, syms: Ptr, vals: Ptr, p: Str): Nx.Val =
         case Nx.Compiled(code) =>
           val fr = Nx.frame(Nx.noFrame(), n)
           Nx.copyCells(vals, 0, Nx.slots(fr), 0, n)
-          Nx.force(Nx.cell(Nx.VPending(fr, code)))
+          Nx.force(Nx.lazy(fr, code))
     case _ => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))
 
 def Nx.dirDefault(p: Str): Str = if Nx.isDir(p) then Nx.cat(p, "/default.nix") else p

@@ -30,27 +30,69 @@ def Nx.up(env: Ptr, n: I64): Ptr = if n == 0 then env else Nx.up(Nx.parent(env),
 // [L:B4,B5]: a thunk is busy while it runs; meeting it again is infinite recursion. Its result, an error included,
 // replaces it [L:B V1]
 def Nx.force(c: Ptr): Nx.Val =
-  val v = Nx.get(c)
-  v match
-    case Nx.VPending(env, code) =>
-      Nx.put(c, Nx.VBusy)
-      val r = Nx.eval(env, code)
-      Nx.put(c, r)
-      r
-    case Nx.VBusy => Nx.VErr(Nx.KInfRec, "infinite recursion encountered")
-    case _ => v
+  if Nx.isLazy(c) then
+    Nx.put(c, Nx.VBusy)
+    val r = Nx.eval(Nx.aget[Ptr](c, 1), Nx.aget[Nx.Code](c, 2))
+    Nx.put(c, r)
+    Nx.leakIf(r)
+    r
+  else
+    val v = Nx.get(c)
+    v match
+      case Nx.VBusy => Nx.VErr(Nx.KInfRec, "infinite recursion encountered")
+      case _ => v
+
+// the value in cell c without running it: Nx.VPending for a thunk not run yet
+def Nx.peek(c: Ptr): Nx.Val = if Nx.isLazy(c) then Nx.VPending else Nx.get(c)
+
+// a value that holds no word-arena pointer (Nx.apply may free the words of the call that made it)
+def Nx.isScalar(v: Nx.Val): Bool = v match
+  case Nx.VInt(_) => true
+  case Nx.VFloat(_) => true
+  case Nx.VBool(_) => true
+  case Nx.VNull => true
+  case Nx.VStr(_, _) => true
+  case Nx.VPath(_) => true
+  case Nx.VErr(_, _) => true
+  case Nx.VPrim(_, _) => true
+  case _ => false
+
+// v stored where older code reaches it: a non-scalar pins the word arena (rt/snx_rt.c Nx__leak)
+def Nx.leakIf(v: Nx.Val): Unit = if Nx.isScalar(v) then () else Nx.leak()
 
 // the cell of code in a lazy position [L:B1-B3]: a variable passes its cell on, a literal its prebuilt forced cell
 def Nx.thunk(env: Ptr, c: Nx.Code): Ptr = c match
   case Nx.CLocal(up, i) => Nx.aget[Ptr](Nx.up(env, up), i)
   case Nx.CCell(x) => x
   case Nx.CConst(_, x) => x
-  case _ => Nx.cell(Nx.VPending(env, c))
+  case Nx.CPrimCall(id, n, args, num) =>
+    if num && Nx.numArgs(env, args, 0, n) then Nx.cell(Nx.primNow(env, id, n, args, 0)) else Nx.lazy(env, c)
+  case _ => Nx.lazy(env, c)
 
-// a thunk of code that runs in frame f while f is being filled: a slot of f itself may not be set yet
+// a thunk of code that runs in frame f while f is being filled: a slot of f itself may not be set yet. num is false
+// here (Nx.markNum marks call arguments only), so no operand of f is read early
 def Nx.thunkIn(f: Ptr, c: Nx.Code): Ptr = c match
-  case Nx.CLocal(up, i) => if up == 0 then Nx.cell(Nx.VPending(f, c)) else Nx.aget[Ptr](Nx.up(f, up), i)
+  case Nx.CLocal(up, i) => if up == 0 then Nx.lazy(f, c) else Nx.aget[Ptr](Nx.up(f, up), i)
   case _ => Nx.thunk(f, c)
+
+// CPrimCall num (set by Nx.markNum on call arguments only: a set or list element may never be forced): a numeric
+// primop whose operands are numbers already (f (n - 1) with n forced) runs at thunk time. Same value as forced later
+// (an error is a value; these primops force nothing else and end), and no thunk captures the frame.
+
+def Nx.numArgs(env: Ptr, args: Ptr, i: I64, n: I64): Bool =
+  if i == n then true
+  else
+    val a = Nx.aget[Nx.Code](args, i)
+    val ok = a match
+      case Nx.CConst(v, _) => Nx.isNum(v)
+      case Nx.CLocal(up, k) => Nx.isNum(Nx.peek(Nx.aget[Ptr](Nx.up(env, up), k)))
+      case _ => false
+    if ok then Nx.numArgs(env, args, i + 1, n) else false
+
+def Nx.isNum(v: Nx.Val): Bool = v match
+  case Nx.VInt(_) => true
+  case Nx.VFloat(_) => true
+  case _ => false
 
 // dst[i..n) = thunks of src[i..n) in env
 def Nx.thunks(env: Ptr, src: Ptr, dst: Ptr, i: I64, n: I64): Ptr =
@@ -136,7 +178,7 @@ def Nx.eval(env: Ptr, c: Nx.Code): Nx.Val = c match
   case Nx.CLam(_, _, _, _, _, _, _) => Nx.VLam(env, c)
   case Nx.CLamArg(_, _) => Nx.VLam(env, c)
   case Nx.CCall(f, n, args) => Nx.callN(env, Nx.eval(env, f), args, 0, n)
-  case Nx.CPrimCall(id, n, args) => Nx.primNow(env, id, n, args, 0)
+  case Nx.CPrimCall(id, n, args, _) => Nx.primNow(env, id, n, args, 0)
   case Nx.CAppSlots(n) => Nx.appSlots(env, Nx.force(Nx.aget[Ptr](env, 1)), 2, n + 2)
   case Nx.CSelect(e, path, d) => Nx.select(env, Nx.eval(env, e), path, d)
   case Nx.CHas(e, path) => Nx.has(env, Nx.eval(env, e), path)
@@ -349,7 +391,10 @@ def Nx.apply(f: Nx.Val, arg: Ptr): Nx.Val = f match
     if d >= Nx.ageti(g, Nx.gMaxDepth()) then Nx.VErr(Nx.KOther, "stack overflow; max-call-depth exceeded")
     else
       Nx.aseti(g, Nx.gDepth(), d + 1)
+      val m = Nx.mark()
       val r = Nx.applyLam(lenv, code, arg)
+      // a scalar result and no leak (Nx.release checks the pin): nothing the call allocated in the word arena is reachable
+      if Nx.isScalar(r) then Nx.release(m) else ()
       Nx.aseti(g, Nx.gDepth(), d)
       r
   case Nx.VPrim(id, ar) => Nx.primApp(id, ar, Coll.Nil, 0, arg)

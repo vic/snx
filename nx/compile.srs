@@ -48,7 +48,7 @@ def Nx.cp(e: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = e match
   case Nx.ELambda(_, arg, fms, body) => Nx.cpLam(arg, fms, body, sc, cx)
   case Nx.ECall(_, f, args) =>
     val n = Coll.length(args)
-    Nx.cpCall(Nx.cp(f, sc, cx), n, Nx.cpArr(args, sc, cx, Nx.arrNew(n), 0))
+    Nx.cpCall(Nx.cp(f, sc, cx), n, Nx.markNum(Nx.cpArr(args, sc, cx, Nx.arrNew(n), 0), 0, n))
   case Nx.ELet(_, attrs, body) => Nx.cpLet(attrs, body, sc, cx)
   case Nx.EWith(_, a, b) => Nx.CWith(Nx.cp(a, sc, cx), Nx.cp(b, Coll.Cons(Nx.ScWith, sc), cx))
   case Nx.EIf(_, c, t, f) => Nx.CIf(Nx.cp(c, sc, cx), Nx.cp(t, sc, cx), Nx.cp(f, sc, cx))
@@ -64,12 +64,33 @@ def Nx.cp(e: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = e match
 
 // a call; a base env primop given exactly its arity runs without the function value and callN
 def Nx.cpCall(f: Nx.Code, n: I64, args: Ptr): Nx.Code = Nx.fixedCell(f) match
-  case Coll.Some(c) => Nx.cpPrimCall(Nx.get(c), f, n, args)
+  case Coll.Some(c) => Nx.cpPrimCall(Nx.peek(c), f, n, args)
   case Coll.None => Nx.CCall(f, n, args)
 
 def Nx.cpPrimCall(v: Nx.Val, f: Nx.Code, n: I64, args: Ptr): Nx.Code = v match
-  case Nx.VPrim(id, ar) => if ar == n then Nx.CPrimCall(id, n, args) else Nx.CCall(f, n, args)
+  case Nx.VPrim(id, ar) => if ar == n then Nx.CPrimCall(id, n, args, false) else Nx.CCall(f, n, args)
   case _ => Nx.CCall(f, n, args)
+
+// the primops that on numbers force nothing else and always end: arithmetic, <, bit ops (Nx.thunk runs them early)
+def Nx.numPrim(id: I64): Bool = Nx.aget[Nx.Prim](Nx.aget[Ptr](Nx.globals(), Nx.gKinds()), id) match
+  case Nx.PAdd => true
+  case Nx.PSub => true
+  case Nx.PMul => true
+  case Nx.PDiv => true
+  case Nx.PLessThan => true
+  case Nx.PBitAnd => true
+  case Nx.PBitOr => true
+  case Nx.PBitXor => true
+  case _ => false
+
+// args[i..n) of a call: a numeric primop call among them may run at thunk time (val.srs CPrimCall num)
+def Nx.markNum(args: Ptr, i: I64, n: I64): Ptr =
+  if i == n then args
+  else
+    Nx.aget[Nx.Code](args, i) match
+      case Nx.CPrimCall(id, k, a, _) => Nx.aset[Nx.Code](args, i, Nx.CPrimCall(id, k, a, Nx.numPrim(id)))
+      case _ => ()
+    Nx.markNum(args, i + 1, n)
 
 // the cell a call head always names: a base env name (lexical, so fixed) or builtins.<name> (the base sets never
 // change). Only in call heads: a lazy builtins.<name> elsewhere keeps its own thunk, as Nix's (eqValues tests identity)
@@ -79,7 +100,7 @@ def Nx.fixedCell(f: Nx.Code): Coll.Option[Ptr] = f match
     case Nx.CCell(c) => path match
       case Coll.Cons(k, rest) => rest match
         case Coll.Nil => k match
-          case Nx.KSym(sym) => Nx.cellIn(Nx.get(c), sym)
+          case Nx.KSym(sym) => Nx.cellIn(Nx.peek(c), sym)
           case _ => Coll.None
         case _ => Coll.None
       case _ => Coll.None
