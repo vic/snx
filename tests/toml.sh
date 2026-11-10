@@ -2,8 +2,8 @@
 # builtins.fromTOML oracle: nix-conformance lang eval-okay-fromTOML-* (output diffed against .exp) and the cases that must
 # fail (corpora/toml-invalid.nix, eval-fail-fromTOML-*). Compiles nx/toml.srs + nx/tomltest.srs. Exit 0 = all ok.
 WS=$(cd "$(dirname "$0")/.." && pwd)
-SRS=$HOME/hk/srs
-S2C=$XDG_RUNTIME_DIR/srs-build/s2c1
+SRS=${SRS:-$HOME/hk/srs-main}
+S2C=${S2C:-$("$(dirname "$0")/s2c.sh")}
 LANGD=${LANGD:-$HOME/hk/nix-conformance/lang}
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT

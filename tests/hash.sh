@@ -3,8 +3,8 @@
 # RFC 1321 vectors), then the encoders against real nix (nix32 of sha256 "", base64) and base64(1), and decoder round trips.
 set -u
 WS=$(cd "$(dirname "$0")/.." && pwd)
-SRS=${SRS:-$HOME/hk/srs}
-S2C=${S2C:-$XDG_RUNTIME_DIR/srs-build/s2c1}
+SRS=${SRS:-$HOME/hk/srs-main}
+S2C=${S2C:-$("$(dirname "$0")/s2c.sh")}
 OUT=${OUT:-$(mktemp -d)}; mkdir -p "$OUT"
 ( cd "$SRS" && timeout 25 "$S2C" lib/prelude.srs s2/coll.srs "$WS/nx/ast.srs" "$WS/nx/rt.srs" "$WS/nx/hash.srs" "$WS/nx/hashtest.srs" > "$OUT/hashtest.c" ) || { echo "FAIL build (s2c)"; exit 1; }
 timeout 60 zig cc -std=gnu11 -O2 -w -o "$OUT/hashtest" "$OUT/hashtest.c" "$SRS/rt/srs_rt.c" "$WS/rt/snx_rt.c" "$WS/rt/snx_hash.c" -lm || { echo "FAIL build (cc)"; exit 1; }

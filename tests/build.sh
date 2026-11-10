@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Builds snx into $B/snx (B = $XDG_RUNTIME_DIR/snx-build) with the s2c of ~/hk/srs.
+# Builds snx into $B/snx (B = $XDG_RUNTIME_DIR/snx-build) with the s2c that tests/s2c.sh builds from ~/hk/srs-main.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
-SRS=${SRS:-$HOME/hk/srs}
+# ~/hk/srs-main is a jj workspace of ~/hk/srs at its main bookmark (~/hk/srs itself is the srs session's working copy)
+SRS=${SRS:-$HOME/hk/srs-main}
 B=${B:-${XDG_RUNTIME_DIR:-/tmp}/snx-build}
-S2C=${S2C:-${XDG_RUNTIME_DIR:-/tmp}/srs-build/s2c1}
 mkdir -p "$B"
+S2C=${S2C:-$(SRS="$SRS" "$here/tests/s2c.sh")}
 srcs=("$here"/nx/ast.srs "$here"/nx/rt.srs)
 for f in "$here"/nx/*.srs; do
   case $f in */ast.srs|*/rt.srs|*/main.srs|*test.srs|*main.srs) ;; *) srcs+=("$f") ;; esac

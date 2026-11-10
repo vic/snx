@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # compile nx/tree.srs + nx/treetest.srs with s2c1, run, diff against tests/tree.out. Exit 0 = ok.
 WS=$(cd "$(dirname "$0")/.." && pwd)
-SRS=$HOME/hk/srs
-S2C=$XDG_RUNTIME_DIR/srs-build/s2c1
+SRS=${SRS:-$HOME/hk/srs-main}
+S2C=${S2C:-$("$(dirname "$0")/s2c.sh")}
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 cd "$SRS" || exit 2

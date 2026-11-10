@@ -3,8 +3,8 @@
 # byte-equal from nx/retest.srs, and every pattern of an eval-fail-regex-invalid-NNN-*.nix (corpora/regex-invalid.nix
 # entry NNN) must be rejected by Nx.reCompile. Exit 0 = all equal.
 WS=$(cd "$(dirname "$0")/.." && pwd)
-SRS=$HOME/hk/srs
-S2C=$XDG_RUNTIME_DIR/srs-build/s2c1
+SRS=${SRS:-$HOME/hk/srs-main}
+S2C=${S2C:-$("$(dirname "$0")/s2c.sh")}
 LANGD=${CONF:-$HOME/hk/nix-conformance}/lang
 B=$(mktemp -d)
 trap 'rm -rf "$B"' EXIT
