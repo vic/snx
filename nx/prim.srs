@@ -937,6 +937,7 @@ def Nx.importFile(p0: Str): Nx.Val =
           Nx.force(c)
         case Nx.LoadUndefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
         case Nx.LoadBad => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))
+        case Nx.LoadFuel(n) => Nx.VErr(Nx.KOther, Nx.loadFuelMsg(p, n))
 
 // the auto-call test of --arg/-A (nix-instantiate autoCallFunction): a lambda written with a formals set, `{ ... }:` included
 def Nx.pHasFormals(f: Nx.Val): Bool = f match

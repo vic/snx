@@ -14,9 +14,10 @@ enum Nx.Where:
   case Nx.NoPos
 
 // what the parser needs besides the tokens: the source (to tell an indented-string token from an escape), the
-// directory of the file and $HOME
+// directory of the file and $HOME, and the first identifier token of each name (Nx.psFirstId; filled as it is asked,
+// freed with the attr indexes)
 enum Nx.PCx:
-  case Nx.PCx(src: Str, dir: Str, home: Str, all: I64)
+  case Nx.PCx(src: Str, dir: Str, home: Str, ids: Ptr)
 
 // an attribute set while its bindings are added (ExprAttrs in parser-state.hh): each entry keeps the position of its
 // definition for the duplicate error, and a set value stays a set so a later binding can merge into it
@@ -127,7 +128,7 @@ def Nx.psAttrStart(ts: I64): Bool = Nx.psPeek(ts) match
 def Nx.parse(src: Str, dir: Str, home: Str): Nx.ParseResult =
   val v = Nx.lexVec(src)
   Nx.tsBind(v)
-  val r = Nx.psFile(Nx.PCx(src, dir, home, 0))
+  val r = Nx.psFile(Nx.PCx(src, dir, home, Nx.atNew()))
   Nx.tvFree(v)
   r
 
@@ -262,7 +263,7 @@ def Nx.psFormalsBody(cx: Nx.PCx, ts: I64, p: I64, fs: Nx.FSet, arg: Coll.Option[
   case Nx.PBad(q) => Nx.PBad(q)
   case Nx.POk(b, t1) =>
     val Nx.FSet(ell, xs) = fs
-    val dup = Nx.psDupFormal(cx, xs, xs, 0, Nx.psAt(ts), -1, -1)
+    val dup = Nx.psDupFormal(Nx.noFrame(), xs, xs, 0, Nx.psAt(ts), -1, -1)
     if Nx.psLookBad(t1) then Nx.PBad(Nx.psAtW(t1))
     else if dup >= 0 then Nx.PBad(Nx.At(dup))
     else if Nx.psArgIn(xs, arg) then Nx.PBad(Nx.At(p))
@@ -281,22 +282,36 @@ def Nx.psFirstIdx(xs: Coll.List[Nx.FmP], n: Str, i: I64): I64 = xs match
     val Nx.FmP(m, _, _, _) = h
     if Str.eq(m, n) then i else Nx.psFirstIdx(t, n, i + 1)
 
+// the first k formals by name into a new table
+def Nx.psFormalTab(xs: Coll.List[Nx.FmP], k: I64, tab: Ptr): Ptr = xs match
+  case Coll.Nil => tab
+  case Coll.Cons(h, t) =>
+    if k == 0 then tab
+    else
+      val Nx.FmP(n, _, _, _) = h
+      Nx.atPut[Nx.FmP](tab, n, h)
+      Nx.psFormalTab(t, k - 1, tab)
+
 // the reported duplicate: least (symbol, position of a repeat), symbols in creation order: the evaluator's own
 // (eval.hh StaticEvalSymbols, then the builtins) before the file's, these when parser.y first creates them.
 // shortcut: the builtins' order here is primops.cc's, not their registration order, and the oracle keeps symbols of
 // earlier inputs; exact for one duplicated name.
-def Nx.psDupFormal(cx: Nx.PCx, all: Coll.List[Nx.FmP], xs: Coll.List[Nx.FmP], i: I64, body: I64, bestSym: I64, bestPos: I64): I64 = xs match
+// tab: Nx.noFrame() for the first Nx.psTabAt formals, which scan the list (no allocation for the usual short pattern);
+// from there on a table of the formals before, so a pattern is linear in its formals
+def Nx.psTabAt(): I64 = 64
+
+def Nx.psDupFormal(tab: Ptr, all: Coll.List[Nx.FmP], xs: Coll.List[Nx.FmP], i: I64, body: I64, bestSym: I64, bestPos: I64): I64 = xs match
   case Coll.Nil => bestPos
   case Coll.Cons(h, t) =>
+    val tb = if i == Nx.psTabAt() then Nx.psFormalTab(all, i, Nx.atNew()) else tab
     val Nx.FmP(n, q, _, _) = h
-    val f = Nx.psFirstIdx(all, n, 0)
-    if f < i then
+    val repeat = if Nx.ptrEq(tb, Nx.noFrame()) then Nx.psFirstIdx(all, n, 0) < i else !Nx.ptrEq(Nx.atAdd[Nx.FmP](tb, n, h), Nx.noFrame())
+    if repeat then
       val known = Nx.psFind1(Nx.psKnownSyms(), Nx.cat(Nx.cat("|", n), "|"), 0)
-      val Nx.PCx(_, _, _, toks) = cx
-      val sym = if known >= 0 then known else Nx.psFileSyms() + Nx.psSymTime(toks, n, all, body, body)
-      if bestSym < 0 || sym < bestSym then Nx.psDupFormal(cx, all, t, i + 1, body, sym, q)
-      else Nx.psDupFormal(cx, all, t, i + 1, body, bestSym, bestPos)
-    else Nx.psDupFormal(cx, all, t, i + 1, body, bestSym, bestPos)
+      val sym = if known >= 0 then known else Nx.psFileSyms() + Nx.psSymTime(0, n, all, body, body)
+      if bestSym < 0 || sym < bestSym then Nx.psDupFormal(tb, all, t, i + 1, body, sym, q)
+      else Nx.psDupFormal(tb, all, t, i + 1, body, bestSym, bestPos)
+    else Nx.psDupFormal(tb, all, t, i + 1, body, bestSym, bestPos)
 
 // when the symbol n is created before the body: an identifier at its token, a formal's name once its default is read
 def Nx.psSymTime(ts: I64, n: Str, fs: Coll.List[Nx.FmP], body: I64, best: I64): I64 =
@@ -1025,14 +1040,39 @@ def Nx.psMerge(cx: Nx.PCx, j: Nx.BSet, ae: Nx.BSet): Nx.SR =
 // shortcut: a name first created by a string attribute or a formal (after its default) ranks by its first identifier
 def Nx.psSymRank(cx: Nx.PCx, n: Str): I64 =
   val known = Nx.psFind1(Nx.psKnownSyms(), Nx.cat(Nx.cat("|", n), "|"), 0)
-  val Nx.PCx(src, _, _, toks) = cx
-  if known >= 0 then known else Nx.psFileSyms() + Nx.psFirstId(toks, n, Str.len(src))
+  val Nx.PCx(src, _, _, ids) = cx
+  if known >= 0 then known else Nx.psFileSyms() + Nx.psFirstId(ids, n, Str.len(src))
 
-def Nx.psFirstId(ts: I64, n: Str, none: I64): I64 =
-  if ts >= Nx.tsLen() then none
-  else Nx.psPeek(ts) match
-    case Nx.TId(x, q) => if Str.eq(x, n) then q else Nx.psFirstId(ts + 1, n, none)
-    case _ => Nx.psFirstId(ts + 1, n, none)
+// the position of the first identifier token n, or none. ids holds the first token of every name met so far in token
+// order, and under "" (no identifier is empty) how far the tokens were read: a name not there reads on from that
+// point, so the file is read once in all, and no further than the furthest first identifier asked for
+def Nx.psFirstId(ids: Ptr, n: Str, none: I64): I64 =
+  val e = Nx.atFind(ids, n)
+  if Nx.ptrEq(e, Nx.noFrame()) then
+    val f = Nx.atFind(ids, "")
+    val from = if Nx.ptrEq(f, Nx.noFrame()) then 0 else Nx.psReadTo(Nx.atEnt[Nx.Where](f))
+    Nx.psIdsRead(ids, n, from, none)
+  else Nx.psPos(Nx.atEnt[Nx.Tok](e))
+
+def Nx.psReadTo(w: Nx.Where): I64 = w match
+  case Nx.At(i) => i
+  case Nx.NoPos => 0
+
+// the tokens from ts into ids, until the first identifier n
+def Nx.psIdsRead(ids: Ptr, n: Str, ts: I64, none: I64): I64 =
+  if ts >= Nx.tsLen() then
+    Nx.atPut[Nx.Where](ids, "", Nx.At(ts))
+    none
+  else
+    val t = Nx.psPeek(ts)
+    t match
+      case Nx.TId(x, q) =>
+        if Nx.ptrEq(Nx.atFind(ids, x), Nx.noFrame()) then Nx.atPut[Nx.Tok](ids, x, t) else ()
+        if Str.eq(x, n) then
+          Nx.atPut[Nx.Where](ids, "", Nx.At(ts + 1))
+          q
+        else Nx.psIdsRead(ids, n, ts + 1, none)
+      case _ => Nx.psIdsRead(ids, n, ts + 1, none)
 
 // xs (in insertion order) stably sorted by psSymRank; acc = sorted so far, highest first
 def Nx.psBySym(cx: Nx.PCx, xs: Coll.List[Str], acc: Coll.List[Str]): Coll.List[Str] = xs match

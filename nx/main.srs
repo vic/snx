@@ -214,6 +214,7 @@ def Nx.evalTop(path: Str): Nx.Val =
       case Nx.Loaded(code) => Nx.force(Nx.lazy(Nx.noFrame(), code))
       case Nx.LoadUndefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
       case Nx.LoadBad => Nx.VErr(Nx.KOther, "syntax error in an --arg expression")
+      case Nx.LoadFuel(n) => Nx.VErr(Nx.KOther, Nx.loadFuelMsg("(auto arguments)", n))
 
 def Nx.answerEval(path: Str): I64 =
   if !Nx.flagsOk(3) || Nx.flagCount(3, "-A", "--attr") > 1 then 3

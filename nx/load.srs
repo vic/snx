@@ -4,17 +4,31 @@
 // an arena (source text, malloc'd, static). Base env cells, symbol ids and the symbol arrays of sets (words, keys
 // of the position records) are run-wide and copied as they are; the records get the file's new file and source cells.
 
+// LoadFuel: the source is larger than Nx.loadLimit, refused before it is lexed (a bound on the work, not a syntax error)
 enum Nx.LoadResult:
   case Nx.Loaded(c: Nx.Code)
   case Nx.LoadUndefined(p: I64, name: Str)
   case Nx.LoadBad
+  case Nx.LoadFuel(bytes: I64)
 
 // the words: Nx.wbOk then the code, Nx.wbUndef then the offset and the name, or Nx.wbBad
 def Nx.wbOk(): I64 = 0
 def Nx.wbUndef(): I64 = 1
 def Nx.wbBad(): I64 = 2
 
-def Nx.loadFile(src: Str, dir: Str, home: Str, file: Str): Nx.LoadResult =
+// the most source bytes a file may have (128 MiB): 8 times the largest nixpkgs file (hackage-packages.nix, 16.6 MB)
+def Nx.loadLimit(): I64 = 134217728
+
+def Nx.loadFuelMsg(file: Str, bytes: I64): Str =
+  Nx.cat(Nx.cat(Nx.cat(Nx.cat(Nx.cat("file too large to load: ", file), " is "), Nx.intStr(bytes)), " bytes, the limit is "), Nx.cat(Nx.intStr(Nx.loadLimit()), " bytes"))
+
+def Nx.loadFile(src: Str, dir: Str, home: Str, file: Str): Nx.LoadResult = Nx.loadFileMax(src, dir, home, file, Nx.loadLimit())
+
+def Nx.loadFileMax(src: Str, dir: Str, home: Str, file: Str, max: I64): Nx.LoadResult =
+  if Str.len(src) > max then Nx.LoadFuel(Str.len(src))
+  else Nx.loadFileIn(src, dir, home, file)
+
+def Nx.loadFileIn(src: Str, dir: Str, home: Str, file: Str): Nx.LoadResult =
   val b = Nx.loadWords(src, dir, home, file)
   Nx.posCells(Nx.strCell(file), Nx.strCell(src))
   val r = Nx.loadRead(b, Nx.wbGet(b))
