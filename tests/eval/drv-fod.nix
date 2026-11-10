@@ -1,0 +1,1 @@
+let d = derivation { name = "fod"; builder = "/bin/sh"; system = "x86_64-linux"; outputHashMode = "recursive"; outputHash = "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="; }; in { inherit (d) drvPath outPath; }

@@ -1,0 +1,540 @@
+// snx string context and the store paths evaluation makes: primops/context.cc (getContext appendContext hasContext
+// unsafeDiscardStringContext unsafeDiscardOutputDependency addDrvOutputDependencies), primops.cc (placeholder toFile
+// path filterSource storePath outputOf), eval.cc copyPathToStore, libstore/downstream-placeholder.cc. No store is
+// written (SPEC.md "lang/": only the same paths): each path is computed as Nix computes it, and what a later
+// derivation needs of it (a .drv, the references of a text file) stays in the run's store map at Nx.gStore().
+
+extern def Nx.fsExec(path: Str): Bool
+extern def Nx.readLink(path: Str): Str
+
+// what evaluation knows of a store path it made
+enum Nx.StoreObj:
+  case Nx.SoDrv(d: Nx.Drv, hash: Str, deferred: Bool)   // hash = the raw hashDerivationModulo(d, false); "" when deferred
+  case Nx.SoSrc(refs: Coll.List[Str])                    // a copied path or a text file, and the store paths it refers to
+
+def Nx.storeMap(): Coll.IMap[Nx.StoreObj] = Nx.aget[Coll.IMap[Nx.StoreObj]](Nx.globals(), Nx.gStore())
+
+def Nx.soGet(p: Str): Coll.Option[Nx.StoreObj] = Coll.lookup(Nx.storeMap(), Nx.intern(p))
+
+def Nx.soPut(p: Str, o: Nx.StoreObj): Unit =
+  Nx.aset[Coll.IMap[Nx.StoreObj]](Nx.globals(), Nx.gStore(), Coll.insert(Nx.storeMap(), Nx.intern(p), o))
+
+def Nx.evalErr(msg: Str): Nx.Val = Nx.VErr(Nx.KOther, msg)
+
+// s added to the strictly ascending xs
+def Nx.setAdd(xs: Coll.List[Str], s: Str): Coll.List[Str] = xs match
+  case Coll.Nil => Coll.Cons(s, Coll.Nil)
+  case Coll.Cons(h, t) =>
+    if Nx.strLess(s, h) then Coll.Cons(s, xs)
+    else if Str.eq(s, h) then xs
+    else Coll.Cons(h, Nx.setAdd(t, s))
+
+def Nx.strsVal(xs: Coll.List[Str]): Nx.Val =
+  val n = Coll.length(xs)
+  val a = Nx.arrNew(n)
+  Nx.strCells(xs, a, 0)
+  Nx.VList(n, a)
+
+// forceStringNoCtx: the string, or the error for another type or for a context
+def Nx.noCtx(v: Nx.Val): Nx.Val = v match
+  case Nx.VStr(s, c) => c match
+    case Coll.Nil => v
+    case _ => Nx.evalErr(Nx.cat(Nx.cat("the string '", s), "' is not allowed to refer to a store path"))
+  case _ => Nx.typeErr("a string", v)
+
+// ---- placeholders ---------------------------------------------------------------------------------------------
+
+// hashPlaceholder (derivations.cc)
+def Nx.hashPlaceholder(o: Str): Str = Nx.cat("/", Nx.b32(Nx.hashBytes(2, Nx.cat("nix-output:", o))))
+
+// the name of the derivation at a .drv store path
+def Nx.drvNameOf(drv: Str): Str = Str.slice(drv, 44, Str.len(drv) - 4)
+
+// DownstreamPlaceholder::fromSingleDerivedPathBuilt: unknownCaOutput, then unknownDerivation per output of via
+def Nx.phRaw(drv: Str, via: Coll.List[Str], out: Str): Str = via match
+  case Coll.Nil =>
+    val pn = Nx.outputPathName(Nx.drvNameOf(drv), out)
+    Nx.hashBytes(2, Nx.cat(Nx.cat("nix-upstream-output:", Str.slice(drv, 11, 43)), Nx.cat(":", pn)))
+  case Coll.Cons(v, rest) =>
+    val inner = Nx.b32(Nx.foldHash(Nx.phRaw(drv, rest, v), 20))
+    Nx.hashBytes(2, Nx.cat(Nx.cat("nix-computed-output:", inner), Nx.cat(":", out)))
+
+def Nx.placeholderOf(drv: Str, via: Coll.List[Str], out: Str): Str = Nx.cat("/", Nx.b32(Nx.phRaw(drv, via, out)))
+
+// the path an output of d has before it is built (DerivationOutput::path), or Coll.None for a floating one
+def Nx.outPathOf(d: Nx.Drv, out: Str): Coll.Option[Str] = d match
+  case Nx.Drv(name, outs, _, _, _, _, _, _) => Nx.outPathIn(name, outs, out)
+
+def Nx.outPathIn(name: Str, xs: Coll.List[Nx.DrvOutput], out: Str): Coll.Option[Str] = xs match
+  case Coll.Nil => Coll.None
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvOutput(n, k) =>
+      if !Str.eq(n, out) then Nx.outPathIn(name, t, out)
+      else k match
+        case Nx.OutInput(p) => Coll.Some(p)
+        case Nx.OutFixed(m, a, dg) => Coll.Some(Nx.fixedPath(name, out, m, a, dg))
+        case _ => Coll.None
+
+// mkSingleDerivedPathString of drv^via^out: the output's path when it is known, else its placeholder
+def Nx.builtStr(drv: Str, via: Coll.List[Str], out: Str): Nx.Val =
+  val ctx = Coll.Cons(Nx.XBuilt(drv, via, out), Coll.Nil)
+  via match
+    case Coll.Cons(_, _) => Nx.VStr(Nx.placeholderOf(drv, via, out), ctx)
+    case Coll.Nil => Nx.soGet(drv) match
+      case Coll.Some(o) => o match
+        case Nx.SoDrv(d, _, _) =>
+          if !Nx.isOutput(out, Nx.drvOutputs(d)) then Nx.evalErr(Nx.cat(Nx.cat(Nx.cat("derivation '", drv), "' does not have output '"), Nx.cat(out, "'")))
+          else Nx.outPathOf(d, out) match
+            case Coll.Some(p) => Nx.VStr(p, ctx)
+            case Coll.None => Nx.VStr(Nx.placeholderOf(drv, Coll.Nil, out), ctx)
+        case _ => Nx.evalErr(Nx.cat(Nx.cat("path '", drv), "' is not a derivation"))
+      case Coll.None => Nx.evalErr(Nx.cat(Nx.cat("snx: derivation '", drv), "' was not made in this evaluation"))
+
+def Nx.drvOutputs(d: Nx.Drv): Coll.List[Nx.DrvOutput] = d match
+  case Nx.Drv(_, outs, _, _, _, _, _, _) => outs
+
+// prim_placeholder
+def Nx.pPlaceholder(v: Nx.Val): Nx.Val =
+  val s = Nx.noCtx(v)
+  s match
+    case Nx.VStr(o, _) => Nx.VStr(Nx.hashPlaceholder(o), Coll.Nil)
+    case _ => s
+
+// prim_outputOf: coerceToSingleDerivedPath (one Opaque .drv or Built element, the string its rendering), then Built
+def Nx.pOutputOf(dv: Nx.Val, ov: Nx.Val): Nx.Val = dv match
+  case Nx.VStr(s, c) =>
+    val o = Nx.noCtx(ov)
+    o match
+      case Nx.VStr(out, _) => c match
+        case Coll.Cons(e, rest) => rest match
+          case Coll.Nil => Nx.outputOfElem(s, e, out)
+          case _ => Nx.evalErr(Nx.cat(Nx.cat("string '", s), "' has more than one context element"))
+        case Coll.Nil => Nx.evalErr(Nx.cat(Nx.cat("string '", s), "' has no context"))
+      case _ => o
+  case _ => Nx.typeErr("a string", dv)
+
+def Nx.outputOfElem(s: Str, e: Nx.Ctx, out: Str): Nx.Val = e match
+  case Nx.XOpaque(p) =>
+    if !Str.eq(s, p) then Nx.evalErr(Nx.cat(Nx.cat(Nx.cat("path string '", s), "' has context with the different path '"), Nx.cat(p, "'")))
+    else Nx.builtStr(p, Coll.Nil, out)
+  case Nx.XBuilt(d, via, o) =>
+    val want = Nx.builtStr(d, via, o)
+    want match
+      case Nx.VStr(w, _) =>
+        if Str.eq(s, w) then Nx.builtStr(d, Coll.Cons(o, via), out)
+        else Nx.evalErr(Nx.cat(Nx.cat(Nx.cat("string '", s), "' is not the right placeholder for this derivation output. It should be '"), Nx.cat(w, "'")))
+      case _ => want
+  case Nx.XDeep(_) => Nx.evalErr(Nx.cat(Nx.cat("string '", s), "' has a derivation-deep context, which is not a single derived path"))
+
+// ---- context builtins -----------------------------------------------------------------------------------------
+
+def Nx.ctxEq(a: Nx.Ctx, b: Nx.Ctx): Bool = a match
+  case Nx.XOpaque(p) => b match
+    case Nx.XOpaque(q) => Str.eq(p, q)
+    case _ => false
+  case Nx.XDeep(p) => b match
+    case Nx.XDeep(q) => Str.eq(p, q)
+    case _ => false
+  case Nx.XBuilt(p, v, o) => b match
+    case Nx.XBuilt(q, w, u) => Str.eq(p, q) && Str.eq(o, u) && Nx.strsEq(v, w)
+    case _ => false
+
+def Nx.strsEq(a: Coll.List[Str], b: Coll.List[Str]): Bool = a match
+  case Coll.Nil => b match
+    case Coll.Nil => true
+    case _ => false
+  case Coll.Cons(x, xt) => b match
+    case Coll.Cons(y, yt) => Str.eq(x, y) && Nx.strsEq(xt, yt)
+    case _ => false
+
+def Nx.ctxHas(xs: Coll.List[Nx.Ctx], e: Nx.Ctx): Bool = xs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => if Nx.ctxEq(h, e) then true else Nx.ctxHas(t, e)
+
+// the elements once each (NixStringContext is a set)
+def Nx.ctxUniq(xs: Coll.List[Nx.Ctx], acc: Coll.List[Nx.Ctx]): Coll.List[Nx.Ctx] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => if Nx.ctxHas(acc, h) then Nx.ctxUniq(t, acc) else Nx.ctxUniq(t, Coll.Cons(h, acc))
+
+// prim_unsafeDiscardStringContext: coerceToString (to the store), the context dropped
+def Nx.pDiscardCtx(v: Nx.Val): Nx.Val =
+  val s = Nx.coerce(v, false, true)
+  s match
+    case Nx.VStr(t, c) => c match
+      case Coll.Nil => s
+      case _ => Nx.VStr(t, Coll.Nil)
+    case _ => s
+
+// prim_hasContext: forceString, no coercion
+def Nx.pHasCtx(v: Nx.Val): Nx.Val = v match
+  case Nx.VStr(_, c) => c match
+    case Coll.Nil => Nx.bool(false)
+    case _ => Nx.bool(true)
+  case _ => Nx.typeErr("a string", v)
+
+// prim_unsafeDiscardOutputDependency: each DrvDeep becomes an Opaque of its .drv
+def Nx.pDiscardOutDep(v: Nx.Val): Nx.Val =
+  val s = Nx.coerce(v, false, true)
+  s match
+    case Nx.VStr(t, c) => Nx.VStr(t, Nx.deepToOpaque(c, Coll.Nil))
+    case _ => s
+
+def Nx.deepToOpaque(xs: Coll.List[Nx.Ctx], acc: Coll.List[Nx.Ctx]): Coll.List[Nx.Ctx] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => h match
+    case Nx.XDeep(d) => Nx.deepToOpaque(t, Coll.Cons(Nx.XOpaque(d), acc))
+    case _ => Nx.deepToOpaque(t, Coll.Cons(h, acc))
+
+// prim_addDrvOutputDependencies: the one element, an Opaque .drv, becomes DrvDeep (a DrvDeep stays)
+def Nx.pAddDrvOutDeps(v: Nx.Val): Nx.Val =
+  val s = Nx.coerce(v, false, true)
+  s match
+    case Nx.VStr(t, c) =>
+      val u = Nx.ctxUniq(c, Coll.Nil)
+      val n = Coll.length(u)
+      u match
+        case Coll.Cons(e, _) => if n == 1 then Nx.addDeep(t, e) else Nx.ctxCountErr(t, n)
+        case Coll.Nil => Nx.ctxCountErr(t, n)
+    case _ => s
+
+def Nx.ctxCountErr(t: Str, n: I64): Nx.Val =
+  Nx.evalErr(Nx.cat(Nx.cat(Nx.cat("context of string '", t), "' must have exactly one element, but has "), Nx.intStr(n)))
+
+def Nx.addDeep(t: Str, e: Nx.Ctx): Nx.Val = e match
+  case Nx.XOpaque(p) =>
+    if Nx.endsWith(p, ".drv") then Nx.VStr(t, Coll.Cons(Nx.XDeep(p), Coll.Nil))
+    else Nx.evalErr(Nx.cat(Nx.cat("path '", p), "' is not a derivation"))
+  case Nx.XDeep(_) => Nx.VStr(t, Coll.Cons(e, Coll.Nil))
+  case Nx.XBuilt(_, _, o) =>
+    Nx.evalErr(Nx.cat(Nx.cat("`addDrvOutputDependencies` can only act on derivations, not on a derivation output such as '", o), "'"))
+
+// a store path of getContext: Opaque, DrvDeep and the Built outputs (ascending) it has
+enum Nx.CInfo:
+  case Nx.CInfo(path: Str, opaque: Bool, all: Bool, outs: Coll.List[Str])
+
+def Nx.optSet(xs: Coll.List[Str], o: Coll.Option[Str]): Coll.List[Str] = o match
+  case Coll.None => xs
+  case Coll.Some(s) => Nx.setAdd(xs, s)
+
+def Nx.infoAdd(xs: Coll.List[Nx.CInfo], p: Str, op: Bool, all: Bool, o: Coll.Option[Str]): Coll.List[Nx.CInfo] = xs match
+  case Coll.Nil => Coll.Cons(Nx.CInfo(p, op, all, Nx.optSet(Coll.Nil, o)), Coll.Nil)
+  case Coll.Cons(h, t) => h match
+    case Nx.CInfo(hp, ho, ha, hs) =>
+      if Nx.strLess(p, hp) then Coll.Cons(Nx.CInfo(p, op, all, Nx.optSet(Coll.Nil, o)), xs)
+      else if Str.eq(p, hp) then Coll.Cons(Nx.CInfo(hp, ho || op, ha || all, Nx.optSet(hs, o)), t)
+      else Coll.Cons(h, Nx.infoAdd(t, p, op, all, o))
+
+// the infos of a context; a Built of a dynamic derivation has no store path yet (resolveDerivedPath needs a build)
+def Nx.infos(xs: Coll.List[Nx.Ctx], acc: Coll.List[Nx.CInfo]): Coll.Option[Coll.List[Nx.CInfo]] = xs match
+  case Coll.Nil => Coll.Some(acc)
+  case Coll.Cons(h, t) => h match
+    case Nx.XOpaque(p) => Nx.infos(t, Nx.infoAdd(acc, p, true, false, Coll.None))
+    case Nx.XDeep(p) => Nx.infos(t, Nx.infoAdd(acc, p, false, true, Coll.None))
+    case Nx.XBuilt(p, via, o) => via match
+      case Coll.Nil => Nx.infos(t, Nx.infoAdd(acc, p, false, false, Coll.Some(o)))
+      case _ => Coll.None
+
+// prim_getContext
+def Nx.pGetCtx(v: Nx.Val): Nx.Val = v match
+  case Nx.VStr(_, c) => Nx.infos(c, Coll.Nil) match
+    case Coll.Some(is) => Nx.attrsOf(Nx.infoPairs(is, Coll.Nil))
+    case Coll.None => Nx.evalErr("snx: getContext of an output of a dynamic derivation")
+  case _ => Nx.typeErr("a string", v)
+
+def Nx.infoPairs(xs: Coll.List[Nx.CInfo], acc: Coll.List[Nx.Pair]): Coll.List[Nx.Pair] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => h match
+    case Nx.CInfo(p, op, all, outs) =>
+      val a = if op then Coll.Cons(Nx.pair("path", Nx.bool(true)), Coll.Nil) else Coll.Nil
+      val b = if all then Coll.Cons(Nx.pair("allOutputs", Nx.bool(true)), a) else a
+      val ps = outs match
+        case Coll.Nil => b
+        case _ => Coll.Cons(Nx.pair("outputs", Nx.strsVal(outs)), b)
+      Nx.infoPairs(t, Coll.Cons(Nx.pair(p, Nx.attrsOf(ps)), acc))
+
+// prim_appendContext: each name a store path, its set's path / allOutputs / outputs as context elements
+def Nx.pAppendCtx(sv: Nx.Val, av: Nx.Val): Nx.Val = sv match
+  case Nx.VStr(s, c) => av match
+    case Nx.VAttrs(n, syms, vals) =>
+      val r = Nx.appendGo(syms, vals, 0, n, c)
+      r match
+        case Nx.VErr(_, _) => r
+        case Nx.VStr(_, c2) => Nx.VStr(s, c2)
+        case _ => r
+    case _ => Nx.typeErr("a set", av)
+  case _ => Nx.typeErr("a string", sv)
+
+// the context so far rides in a Nx.VStr("", ctx); the first error stops
+def Nx.appendGo(syms: Ptr, vals: Ptr, i: I64, n: I64, ctx: Coll.List[Nx.Ctx]): Nx.Val =
+  if i == n then Nx.VStr("", ctx)
+  else
+    val name = Nx.symName(Nx.ageti(syms, i))
+    if !Nx.isStorePath(name) then Nx.evalErr(Nx.cat(Nx.cat("context key '", name), "' is not a store path"))
+    else
+      val r = Nx.appendOne(name, Nx.force(Nx.aget[Ptr](vals, i)), ctx)
+      r match
+        case Nx.VStr(_, c2) => Nx.appendGo(syms, vals, i + 1, n, c2)
+        case _ => r
+
+def Nx.boolAttr(n: I64, syms: Ptr, vals: Ptr, name: Str): Nx.Val = Nx.slotOf(syms, n, Nx.intern(name)) match
+  case Coll.None => Nx.bool(false)
+  case Coll.Some(j) =>
+    val b = Nx.force(Nx.aget[Ptr](vals, j))
+    b match
+      case Nx.VBool(_) => b
+      case Nx.VErr(_, _) => b
+      case _ => Nx.typeErr("a Boolean", b)
+
+def Nx.appendOne(name: Str, v: Nx.Val, ctx: Coll.List[Nx.Ctx]): Nx.Val = v match
+  case Nx.VAttrs(n, syms, vals) =>
+    val drv = Nx.endsWith(name, ".drv")
+    val pa = Nx.boolAttr(n, syms, vals, "path")
+    val al = Nx.boolAttr(n, syms, vals, "allOutputs")
+    pa match
+      case Nx.VBool(p) => al match
+        case Nx.VBool(a) =>
+          if a && !drv then Nx.evalErr(Nx.cat(Nx.cat("tried to add all-outputs context of ", name), ", which is not a derivation, to a string"))
+          else
+            val c1 = if p then Coll.Cons(Nx.XOpaque(name), ctx) else ctx
+            val c2 = if a then Coll.Cons(Nx.XDeep(name), c1) else c1
+            Nx.slotOf(syms, n, Nx.intern("outputs")) match
+              case Coll.None => Nx.VStr("", c2)
+              case Coll.Some(j) => Nx.appendOuts(name, drv, Nx.force(Nx.aget[Ptr](vals, j)), c2)
+        case _ => al
+      case _ => pa
+  case _ => Nx.typeErr("a set", v)
+
+def Nx.appendOuts(name: Str, drv: Bool, l: Nx.Val, ctx: Coll.List[Nx.Ctx]): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    if n > 0 && !drv then Nx.evalErr(Nx.cat(Nx.cat("tried to add derivation output context of ", name), ", which is not a derivation, to a string"))
+    else Nx.appendOutsGo(name, xs, 0, n, ctx)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.appendOutsGo(name: Str, xs: Ptr, i: I64, n: I64, ctx: Coll.List[Nx.Ctx]): Nx.Val =
+  if i == n then Nx.VStr("", ctx)
+  else
+    val o = Nx.noCtx(Nx.force(Nx.aget[Ptr](xs, i)))
+    o match
+      case Nx.VStr(out, _) => Nx.appendOutsGo(name, xs, i + 1, n, Coll.Cons(Nx.XBuilt(name, Coll.Nil, out), ctx))
+      case _ => o
+
+// ---- store paths of files -------------------------------------------------------------------------------------
+
+def Nx.opaqueStr(p: Str): Nx.Val = Nx.VStr(p, Coll.Cons(Nx.XOpaque(p), Coll.Nil))
+
+// ":PATH" per reference, the references ascending
+def Nx.refsType(t: Str, refs: Coll.List[Str]): Str = refs match
+  case Coll.Nil => t
+  case Coll.Cons(h, r) => Nx.refsType(Nx.cat(Nx.cat(t, ":"), h), r)
+
+// prim_toFile: a text store path (makeFixedOutputPathFromCA with TextInfo); its context may hold store paths only
+def Nx.pToFile(nv: Nx.Val, cv: Nx.Val): Nx.Val =
+  val nm = Nx.noCtx(nv)
+  nm match
+    case Nx.VStr(name, _) => cv match
+      case Nx.VStr(text, c) => Nx.toFileRefs(name, text, c, Coll.Nil)
+      case _ => Nx.typeErr("a string", cv)
+    case _ => nm
+
+def Nx.toFileRefs(name: Str, text: Str, c: Coll.List[Nx.Ctx], refs: Coll.List[Str]): Nx.Val = c match
+  case Coll.Cons(h, t) => h match
+    case Nx.XOpaque(p) => Nx.toFileRefs(name, text, t, Nx.setAdd(refs, p))
+    case _ => Nx.evalErr(Nx.cat(Nx.cat("files created by builtins.toFile may not reference derivations, but ", name), " references one"))
+  case Coll.Nil =>
+    if !Nx.storeNameOk(name) then Nx.evalErr(Nx.cat(Nx.cat("invalid store path name '", name), "'"))
+    else
+      val p = Nx.storePath(Nx.refsType("text", refs), Nx.sha256Hex(text), name)
+      Nx.soPut(p, Nx.SoSrc(refs))
+      Nx.opaqueStr(p)
+
+// NAR strings: the length as 8 bytes little-endian, the bytes, zeros to a multiple of 8
+def Nx.narLenW(sb: Ptr, n: I64, i: I64): Unit =
+  if i == 8 then ()
+  else
+    Nx.sbAdd(sb, Nx.byte(n % 256))
+    Nx.narLenW(sb, n / 256, i + 1)
+
+def Nx.narZeroW(sb: Ptr, k: I64): Unit =
+  if k <= 0 then ()
+  else
+    Nx.sbAdd(sb, Nx.byte(0))
+    Nx.narZeroW(sb, k - 1)
+
+def Nx.narW(sb: Ptr, s: Str): Unit =
+  Nx.narLenW(sb, Str.len(s), 0)
+  Nx.sbAdd(sb, s)
+  Nx.narZeroW(sb, Nx.narPad(Str.len(s)))
+
+// the names of a directory, ascending
+def Nx.dirSorted(p: Str): Coll.List[Str] = Nx.sortStrs(Nx.splitOn(Nx.dirNames(p), 0, 0, 0, Coll.Nil), Coll.Nil)
+
+def Nx.sortStrs(xs: Coll.List[Str], acc: Coll.List[Str]): Coll.List[Str] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => Nx.sortStrs(t, Nx.setAdd(acc, h))
+
+// callPathFilter: the filter's verdict on path p of kind k, a Nx.VBool or the error
+def Nx.filterSays(f: Nx.Val, p: Str, k: I64): Nx.Val =
+  val r = Nx.apply(Nx.apply(f, Nx.cell(Nx.VStr(p, Coll.Nil))), Nx.cell(Nx.VStr(Nx.kindName(k), Coll.Nil)))
+  r match
+    case Nx.VBool(_) => r
+    case Nx.VErr(_, _) => r
+    case _ => Nx.typeErr("a Boolean", r)
+
+// dumpPath (archive.cc) of p into sb, the entries of directories that the filter keeps; Nx.VNull or the error
+def Nx.dumpNode(sb: Ptr, p: Str, filt: Coll.Option[Nx.Val]): Nx.Val =
+  val k = Nx.fsKind(p, false)
+  Nx.narW(sb, "(")
+  Nx.narW(sb, "type")
+  if k == 1 then
+    Nx.narW(sb, "regular")
+    if Nx.fsExec(p) then
+      Nx.narW(sb, "executable")
+      Nx.narW(sb, "")
+    else ()
+    Nx.narW(sb, "contents")
+    val b = Nx.fileBytes(p)
+    if Str.len(b) < 0 then Nx.evalErr(Nx.cat(Nx.cat("reading file '", p), "'"))
+    else
+      Nx.narW(sb, b)
+      Nx.narW(sb, ")")
+      Nx.VNull
+  else if k == 3 then
+    Nx.narW(sb, "symlink")
+    Nx.narW(sb, "target")
+    Nx.narW(sb, Nx.readLink(p))
+    Nx.narW(sb, ")")
+    Nx.VNull
+  else if k == 2 then
+    Nx.narW(sb, "directory")
+    val r = Nx.dumpEntries(sb, p, Nx.dirSorted(p), filt)
+    if Nx.isErr(r) then r
+    else
+      Nx.narW(sb, ")")
+      Nx.VNull
+  else if k == 0 then Nx.evalErr(Nx.cat(Nx.cat("getting status of '", p), "': No such file or directory"))
+  else Nx.evalErr(Nx.cat(Nx.cat("file '", p), "' has an unsupported type"))
+
+def Nx.dumpEntries(sb: Ptr, dir: Str, names: Coll.List[Str], filt: Coll.Option[Nx.Val]): Nx.Val = names match
+  case Coll.Nil => Nx.VNull
+  case Coll.Cons(nm, t) =>
+    val p = Nx.cat(Nx.cat(dir, "/"), nm)
+    val keep = filt match
+      case Coll.None => Nx.bool(true)
+      case Coll.Some(f) => Nx.filterSays(f, p, Nx.fsKind(p, false))
+    keep match
+      case Nx.VBool(yes) =>
+        if !yes then Nx.dumpEntries(sb, dir, t, filt)
+        else
+          Nx.narW(sb, "entry")
+          Nx.narW(sb, "(")
+          Nx.narW(sb, "name")
+          Nx.narW(sb, nm)
+          Nx.narW(sb, "node")
+          val r = Nx.dumpNode(sb, p, filt)
+          if Nx.isErr(r) then r
+          else
+            Nx.narW(sb, ")")
+            Nx.dumpEntries(sb, dir, t, filt)
+      case _ => keep
+
+// the raw SHA-256 of p as a NAR (rec) or of its bytes (flat), in a Nx.VStr, or the error
+def Nx.pathDigest(p: Str, rec: Bool, filt: Coll.Option[Nx.Val]): Nx.Val =
+  if rec then
+    val sb = Nx.sbNew()
+    Nx.narW(sb, "nix-archive-1")
+    val r = Nx.dumpNode(sb, p, filt)
+    if Nx.isErr(r) then r else Nx.VStr(Nx.hashBytes(2, Nx.sbView(sb)), Coll.Nil)
+  else if Nx.fsKind(p, true) != 1 then Nx.evalErr(Nx.cat(Nx.cat("file '", p), "' is not a regular file"))
+  else Nx.VStr(Nx.hashBytes(2, Nx.fileBytes(p)), Coll.Nil)
+
+// addPath without references: the store path of p under name (NAR or flat SHA-256), checked against want
+def Nx.addPath(name: Str, p: Str, rec: Bool, filt: Coll.Option[Nx.Val], want: Coll.Option[Str]): Nx.Val =
+  if !Nx.storeNameOk(name) then Nx.evalErr(Nx.cat(Nx.cat("invalid store path name '", name), "'"))
+  else
+    val d = Nx.pathDigest(p, rec, filt)
+    d match
+      case Nx.VStr(dg, _) =>
+        val sp = Nx.fixedPath(name, "out", if rec then Nx.CaNar else Nx.CaFlat, Nx.HaSha256, dg)
+        val ok = want match
+          case Coll.None => true
+          case Coll.Some(w) => Str.eq(w, dg)
+        if !ok then Nx.evalErr(Nx.cat(Nx.cat("store path mismatch in (possibly filtered) path added from '", p), "'"))
+        else
+          Nx.soPut(sp, Nx.SoSrc(Coll.Nil))
+          Nx.opaqueStr(sp)
+      case _ => d
+
+// copyPathToStore: a path in a string context, once per path in a run (srcToStore)
+def Nx.copyPath(p: Str): Nx.Val =
+  if Nx.endsWith(p, ".drv") then Nx.evalErr("file names are not allowed to end in '.drv'")
+  else
+    val g = Nx.globals()
+    val k = Nx.intern(p)
+    Coll.lookup(Nx.aget[Coll.IMap[Str]](g, Nx.gSrcs()), k) match
+      case Coll.Some(sp) => Nx.opaqueStr(sp)
+      case Coll.None =>
+        val r = Nx.addPath(Nx.baseName(p), p, true, Coll.None, Coll.None)
+        r match
+          case Nx.VStr(sp, _) =>
+            Nx.aset[Coll.IMap[Str]](g, Nx.gSrcs(), Coll.insert(Nx.aget[Coll.IMap[Str]](g, Nx.gSrcs()), k, sp))
+            r
+          case _ => r
+
+// prim_filterSource
+def Nx.pFilterSource(fc: Ptr, pv: Nx.Val): Nx.Val =
+  val p = Nx.pathStr(pv)
+  p match
+    case Nx.VStr(path, _) =>
+      val f = Nx.force(fc)
+      val e = Nx.fnErr(f)
+      if Nx.isErr(e) then e else Nx.addPath(Nx.baseName(path), path, true, Coll.Some(f), Coll.None)
+    case _ => p
+
+// prim_path: path, name, filter, recursive, sha256
+def Nx.pPath(v: Nx.Val): Nx.Val = v match
+  case Nx.VAttrs(n, syms, vals) => Nx.pathArgs(syms, vals, 0, n, Coll.None, "", Coll.None, true, Coll.None)
+  case _ => Nx.typeErr("a set", v)
+
+def Nx.pathArgs(syms: Ptr, vals: Ptr, i: I64, n: I64, path: Coll.Option[Str], name: Str, filt: Coll.Option[Nx.Val], rec: Bool, want: Coll.Option[Str]): Nx.Val =
+  if i == n then path match
+    case Coll.None => Nx.evalErr("missing required 'path' attribute in the first argument to 'builtins.path'")
+    case Coll.Some(p) => Nx.addPath(if Str.len(name) == 0 then Nx.baseName(p) else name, p, rec, filt, want)
+  else
+    val k = Nx.symName(Nx.ageti(syms, i))
+    val x = Nx.force(Nx.aget[Ptr](vals, i))
+    if Nx.isErr(x) then x
+    else if Str.eq(k, "path") then
+      val p = Nx.pathStr(x)
+      p match
+        case Nx.VStr(s, _) => Nx.pathArgs(syms, vals, i + 1, n, Coll.Some(s), name, filt, rec, want)
+        case _ => p
+    else if Str.eq(k, "name") then
+      val s = Nx.noCtx(x)
+      s match
+        case Nx.VStr(t, _) => Nx.pathArgs(syms, vals, i + 1, n, path, t, filt, rec, want)
+        case _ => s
+    else if Str.eq(k, "filter") then
+      val e = Nx.fnErr(x)
+      if Nx.isErr(e) then e else Nx.pathArgs(syms, vals, i + 1, n, path, name, Coll.Some(x), rec, want)
+    else if Str.eq(k, "recursive") then x match
+      case Nx.VBool(b) => Nx.pathArgs(syms, vals, i + 1, n, path, name, filt, b, want)
+      case _ => Nx.typeErr("a Boolean", x)
+    else if Str.eq(k, "sha256") then
+      val s = Nx.noCtx(x)
+      s match
+        case Nx.VStr(t, _) => Nx.parseAnyHash(t, 2) match
+          case Nx.HashOk(_, raw) => Nx.pathArgs(syms, vals, i + 1, n, path, name, filt, rec, Coll.Some(raw))
+          case Nx.HashBad(msg) => Nx.evalErr(msg)
+        case _ => s
+    else Nx.evalErr(Nx.cat(Nx.cat("unsupported argument '", k), "' to 'builtins.path'"))
+
+// prim_storePath: a path in the store, with its store path as an Opaque element
+def Nx.pStorePath(v: Nx.Val): Nx.Val =
+  val p = Nx.pathStr(v)
+  p match
+    case Nx.VStr(s, c) =>
+      val e = Nx.byteAt(s, '/', 11)
+      val sp = if e < 0 then s else Str.slice(s, 0, e)
+      if !Nx.isStorePath(sp) then Nx.evalErr(Nx.cat(Nx.cat("path '", s), "' is not in the Nix store"))
+      else Nx.VStr(s, Coll.Cons(Nx.XOpaque(sp), c))
+    case _ => p

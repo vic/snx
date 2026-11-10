@@ -14,13 +14,21 @@ enum Nx.ErrKind:
   case Nx.KInfRec
   case Nx.KOther
 
-// a string's context: the store paths it refers to (Coll.Nil = none)
+// an element of a string's context (NixStringContextElem): a store path (Opaque), a .drv with its closure and every
+// output (DrvDeep, the context of a drvPath), or one output of a derivation (Built). via = the outputs that lead from
+// drv to the derivation that builds out (dynamic derivations, outputOf), newest first
+enum Nx.Ctx:
+  case Nx.XOpaque(path: Str)
+  case Nx.XDeep(drv: Str)
+  case Nx.XBuilt(drv: Str, via: Coll.List[Str], out: Str)
+
+// a string's context: its elements, unsorted, maybe repeated (Coll.Nil = none)
 enum Nx.Val:
   case Nx.VInt(n: I64)
   case Nx.VFloat(bits: I64)
   case Nx.VBool(b: Bool)
   case Nx.VNull
-  case Nx.VStr(s: Str, ctx: Coll.List[Str])
+  case Nx.VStr(s: Str, ctx: Coll.List[Nx.Ctx])
   case Nx.VPath(s: Str)
   case Nx.VAttrs(n: I64, syms: Ptr, vals: Ptr)    // n names sorted by symbol id (Nx.intern), vals = their n cells
   case Nx.VList(n: I64, xs: Ptr)                  // n cells

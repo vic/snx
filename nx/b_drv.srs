@@ -1,0 +1,502 @@
+// snx derivationStrict (primops.cc derivationStrictInternal) and derivation (primops/derivation.nix, in nx/b_core.srs).
+// The .drv is never written: its path is computeStorePath of the ATerm (nx/drv.srs), and the run's store map keeps it
+// with its hashDerivationModulo(drv, false) (derivations.cc drvHashes), so a later derivation that takes it as an
+// input gets its masked input hash and the closure of a drvPath context without a store.
+// shortcut: no warnings are printed (structured attrs with allowedReferences..., __json); stderr is not compared.
+// shortcut: experimental features are not checked (ca-derivations, impure-derivations, dynamic-derivations,
+// git-hashing): a derivation that needs one evaluates as if it were on; refuse when a case wants the error.
+
+// the state of one derivationStrict, one word per slot (the attributes are read in name order, each may set any)
+def Nx.dsCtx(): I64 = 0        // Coll.List[Nx.Ctx]: first, as Nx.toJson keeps its contexts in slot 0
+def Nx.dsEnv(): I64 = 1        // Coll.List[Nx.DrvEnv], descending (the names come ascending)
+def Nx.dsArgs(): I64 = 2       // Coll.List[Str], newest first
+def Nx.dsBuilder(): I64 = 3    // Coll.Option[Str]
+def Nx.dsSystem(): I64 = 4     // Coll.Option[Str]
+def Nx.dsHash(): I64 = 5       // Coll.Option[Str]: outputHash
+def Nx.dsAlgo(): I64 = 6       // outputHashAlgo as a Nx.hashBytes id, -1 = none
+def Nx.dsMethod(): I64 = 7     // Coll.Option[Nx.CaMethod]: outputHashMode
+def Nx.dsOuts(): I64 = 8       // Coll.List[Str], ascending
+def Nx.dsCa(): I64 = 9         // 1 = __contentAddressed
+def Nx.dsImpure(): I64 = 10    // 1 = __impure
+def Nx.dsIgnore(): I64 = 11    // 1 = __ignoreNulls
+def Nx.dsJson(): I64 = 12      // the builder of the structured attrs JSON, Nx.noFrame() when they are off
+def Nx.dsJsonN(): I64 = 13     // the members written so far
+def Nx.dsLegacy(): I64 = 14    // Coll.Option[Str]: the __json attribute
+def Nx.dsSlots(): I64 = 15
+
+def Nx.dsStr(st: Ptr, k: I64): Str = Nx.aget[Coll.Option[Str]](st, k) match
+  case Coll.Some(s) => s
+  case Coll.None => ""
+
+def Nx.dsSetStr(st: Ptr, k: I64, s: Str): Unit = Nx.aset[Coll.Option[Str]](st, k, Coll.Some(s))
+
+def Nx.dsAddCtx(st: Ptr, c: Coll.List[Nx.Ctx]): Unit = c match
+  case Coll.Nil => ()
+  case _ => Nx.aset[Coll.List[Nx.Ctx]](st, Nx.dsCtx(), Coll.revOnto(c, Nx.aget[Coll.List[Nx.Ctx]](st, Nx.dsCtx())))
+
+// prim_derivationStrict: the name first, then the attributes
+def Nx.pDerivationStrict(v: Nx.Val): Nx.Val = v match
+  case Nx.VAttrs(n, syms, vals) => Nx.slotOf(syms, n, Nx.intern("name")) match
+    case Coll.None => Nx.VErr(Nx.KMissing, "attribute 'name' missing")
+    case Coll.Some(j) =>
+      val nm = Nx.noCtx(Nx.force(Nx.aget[Ptr](vals, j)))
+      nm match
+        case Nx.VStr(name, _) =>
+          if Nx.storeNameOk(name) then Nx.dsRun(name, n, syms, vals)
+          else Nx.evalErr(Nx.cat(Nx.cat("invalid derivation name: name '", name), "' is not valid. Please pass a different 'name'."))
+        case _ => nm
+  case _ => Nx.typeErr("a set", v)
+
+def Nx.dsRun(name: Str, n: I64, syms: Ptr, vals: Ptr): Nx.Val =
+  val sa = Nx.boolAttr(n, syms, vals, "__structuredAttrs")
+  val ig = Nx.boolAttr(n, syms, vals, "__ignoreNulls")
+  sa match
+    case Nx.VBool(structured) => ig match
+      case Nx.VBool(ignore) =>
+        val st = Nx.arrNew(Nx.dsSlots())
+        Nx.aset[Coll.List[Nx.Ctx]](st, Nx.dsCtx(), Coll.Nil)
+        Nx.aset[Coll.List[Nx.DrvEnv]](st, Nx.dsEnv(), Coll.Nil)
+        Nx.aset[Coll.List[Str]](st, Nx.dsArgs(), Coll.Nil)
+        Nx.aset[Coll.Option[Str]](st, Nx.dsBuilder(), Coll.None)
+        Nx.aset[Coll.Option[Str]](st, Nx.dsSystem(), Coll.None)
+        Nx.aset[Coll.Option[Str]](st, Nx.dsHash(), Coll.None)
+        Nx.aseti(st, Nx.dsAlgo(), 0 - 1)
+        Nx.aset[Coll.Option[Nx.CaMethod]](st, Nx.dsMethod(), Coll.None)
+        Nx.aset[Coll.List[Str]](st, Nx.dsOuts(), Coll.Cons("out", Coll.Nil))
+        Nx.aseti(st, Nx.dsCa(), 0)
+        Nx.aseti(st, Nx.dsImpure(), 0)
+        Nx.aseti(st, Nx.dsIgnore(), if ignore then 1 else 0)
+        Nx.aset[Ptr](st, Nx.dsJson(), if structured then Nx.sbNew() else Nx.noFrame())
+        Nx.aseti(st, Nx.dsJsonN(), 0)
+        Nx.aset[Coll.Option[Str]](st, Nx.dsLegacy(), Coll.None)
+        val r = Nx.dsAttrs(st, syms, vals, Nx.byName(syms, n), 0, n)
+        if Nx.isErr(r) then r else Nx.dsFinish(name, st)
+      case _ => ig
+    case _ => sa
+
+def Nx.dsAttrs(st: Ptr, syms: Ptr, vals: Ptr, ord: Ptr, i: I64, n: I64): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val j = Nx.ageti(ord, i)
+    val r = Nx.dsAttr(st, Nx.symName(Nx.ageti(syms, j)), Nx.aget[Ptr](vals, j))
+    if Nx.isErr(r) then r else Nx.dsAttrs(st, syms, vals, ord, i + 1, n)
+
+def Nx.isNullV(v: Nx.Val): Bool = v match
+  case Nx.VNull => true
+  case _ => false
+
+def Nx.dsFlag(st: Ptr, k: I64, v: Nx.Val): Nx.Val = v match
+  case Nx.VBool(b) =>
+    Nx.aseti(st, k, if b then 1 else 0)
+    Nx.VNull
+  case _ => Nx.typeErr("a Boolean", v)
+
+def Nx.dsAttr(st: Ptr, key: Str, c: Ptr): Nx.Val =
+  if Str.eq(key, "__ignoreNulls") then Nx.VNull
+  else
+    val v = Nx.force(c)
+    if Nx.isErr(v) then v
+    else if Nx.ageti(st, Nx.dsIgnore()) == 1 && Nx.isNullV(v) then Nx.VNull
+    else if Str.eq(key, "__contentAddressed") then Nx.dsFlag(st, Nx.dsCa(), v)
+    else if Str.eq(key, "__impure") then Nx.dsFlag(st, Nx.dsImpure(), v)
+    else if Str.eq(key, "args") then v match
+      case Nx.VList(n, xs) => Nx.dsArgList(st, xs, 0, n)
+      case _ => Nx.typeErr("a list", v)
+    else if Nx.ptrEq(Nx.aget[Ptr](st, Nx.dsJson()), Nx.noFrame()) then Nx.dsEnvAttr(st, key, v)
+    else if Str.eq(key, "__structuredAttrs") then Nx.VNull
+    else Nx.dsJsonAttr(st, key, v)
+
+def Nx.dsArgList(st: Ptr, xs: Ptr, i: I64, n: I64): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val s = Nx.coerce(Nx.force(Nx.aget[Ptr](xs, i)), true, true)
+    s match
+      case Nx.VStr(t, c) =>
+        Nx.dsAddCtx(st, c)
+        Nx.aset[Coll.List[Str]](st, Nx.dsArgs(), Coll.Cons(t, Nx.aget[Coll.List[Str]](st, Nx.dsArgs())))
+        Nx.dsArgList(st, xs, i + 1, n)
+      case _ => s
+
+// an attribute without structured attrs: coerceToString (toString rules, paths to the store) into the environment
+def Nx.dsEnvAttr(st: Ptr, key: Str, v: Nx.Val): Nx.Val =
+  val s = Nx.coerce(v, true, true)
+  s match
+    case Nx.VStr(t, c) =>
+      Nx.dsAddCtx(st, c)
+      if Str.eq(key, "__json") then
+        Nx.dsSetStr(st, Nx.dsLegacy(), t)
+        Nx.VNull
+      else
+        Nx.aset[Coll.List[Nx.DrvEnv]](st, Nx.dsEnv(), Coll.Cons(Nx.DrvEnv(key, t), Nx.aget[Coll.List[Nx.DrvEnv]](st, Nx.dsEnv())))
+        if Str.eq(key, "outputs") then Nx.dsOutputs(st, Nx.wsTokens(t, 0, 0, Coll.Nil), Coll.Nil) else Nx.dsSpecial(st, key, t)
+    case _ => s
+
+// builder, system and the output hash attributes, from a string
+def Nx.dsSpecial(st: Ptr, key: Str, t: Str): Nx.Val =
+  if Str.eq(key, "builder") then
+    Nx.dsSetStr(st, Nx.dsBuilder(), t)
+    Nx.VNull
+  else if Str.eq(key, "system") then
+    Nx.dsSetStr(st, Nx.dsSystem(), t)
+    Nx.VNull
+  else if Str.eq(key, "outputHash") then
+    Nx.dsSetStr(st, Nx.dsHash(), t)
+    Nx.VNull
+  else if Str.eq(key, "outputHashAlgo") then
+    Nx.aseti(st, Nx.dsAlgo(), Nx.algoOf(t))
+    Nx.VNull
+  else if Str.eq(key, "outputHashMode") then Nx.dsMode(st, t)
+  else Nx.VNull
+
+// handleHashMode: "recursive" is "nar"
+def Nx.modeOf(t: Str): Coll.Option[Nx.CaMethod] =
+  if Str.eq(t, "recursive") || Str.eq(t, "nar") then Coll.Some(Nx.CaNar)
+  else if Str.eq(t, "flat") then Coll.Some(Nx.CaFlat)
+  else if Str.eq(t, "text") then Coll.Some(Nx.CaText)
+  else if Str.eq(t, "git") then Coll.Some(Nx.CaGit)
+  else Coll.None
+
+def Nx.dsMode(st: Ptr, t: Str): Nx.Val =
+  val m = Nx.modeOf(t)
+  m match
+    case Coll.Some(_) =>
+      Nx.aset[Coll.Option[Nx.CaMethod]](st, Nx.dsMethod(), m)
+      Nx.VNull
+    case Coll.None => Nx.evalErr(Nx.cat(Nx.cat("invalid value '", t), "' for 'outputHashMode' attribute"))
+
+def Nx.isWs(c: I64): Bool = c == 32 || c == 9 || c == 10 || c == 13
+
+// tokenizeString: the runs of s between blanks
+def Nx.wsTokens(s: Str, i: I64, from: I64, acc: Coll.List[Str]): Coll.List[Str] =
+  if i == Str.len(s) then Coll.rev(if i > from then Coll.Cons(Str.slice(s, from, i), acc) else acc)
+  else if Nx.isWs(Str.at(s, i)) then Nx.wsTokens(s, i + 1, i + 1, if i > from then Coll.Cons(Str.slice(s, from, i), acc) else acc)
+  else Nx.wsTokens(s, i + 1, from, acc)
+
+def Nx.strIn(xs: Coll.List[Str], s: Str): Bool = xs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => if Str.eq(h, s) then true else Nx.strIn(t, s)
+
+// handleOutputs
+def Nx.dsOutputs(st: Ptr, xs: Coll.List[Str], acc: Coll.List[Str]): Nx.Val = xs match
+  case Coll.Nil => acc match
+    case Coll.Nil => Nx.evalErr("derivation cannot have an empty set of outputs")
+    case _ =>
+      Nx.aset[Coll.List[Str]](st, Nx.dsOuts(), acc)
+      Nx.VNull
+  case Coll.Cons(o, t) =>
+    if Nx.strIn(acc, o) then Nx.evalErr(Nx.cat(Nx.cat("duplicate derivation output '", o), "'"))
+    else if Str.eq(o, "drvPath") then Nx.evalErr("invalid derivation output name 'drvPath'")
+    else Nx.dsOutputs(st, t, Nx.setAdd(acc, o))
+
+// an attribute with structured attrs: a member of the JSON object (printValueAsJSON, strict, paths to the store)
+def Nx.dsJsonAttr(st: Ptr, key: Str, v: Nx.Val): Nx.Val =
+  val sb = Nx.aget[Ptr](st, Nx.dsJson())
+  val k = Nx.ageti(st, Nx.dsJsonN())
+  Nx.sbAdd(sb, if k == 0 then "{" else ",")
+  Nx.aseti(st, Nx.dsJsonN(), k + 1)
+  val r0 = Nx.jsonStrOut(key, sb)
+  if Nx.isErr(r0) then r0
+  else
+    Nx.sbAdd(sb, ":")
+    val r = Nx.toJson(v, sb, st)
+    if Nx.isErr(r) then r
+    else if Str.eq(key, "builder") then v match
+      case Nx.VStr(t, _) =>
+        Nx.dsSetStr(st, Nx.dsBuilder(), t)
+        Nx.VNull
+      case _ => Nx.typeErr("a string", v)
+    else if Str.eq(key, "outputs") then v match
+      case Nx.VList(n, xs) => Nx.dsOutList(st, xs, 0, n, Coll.Nil)
+      case _ => Nx.typeErr("a list", v)
+    else if Str.eq(key, "system") || Str.eq(key, "outputHash") || Str.eq(key, "outputHashAlgo") || Str.eq(key, "outputHashMode") then
+      val s = Nx.noCtx(v)
+      s match
+        case Nx.VStr(t, _) => Nx.dsSpecial(st, key, t)
+        case _ => s
+    else Nx.VNull
+
+def Nx.dsOutList(st: Ptr, xs: Ptr, i: I64, n: I64, acc: Coll.List[Str]): Nx.Val =
+  if i == n then Nx.dsOutputs(st, Coll.rev(acc), Coll.Nil)
+  else
+    val s = Nx.noCtx(Nx.force(Nx.aget[Ptr](xs, i)))
+    s match
+      case Nx.VStr(t, _) => Nx.dsOutList(st, xs, i + 1, n, Coll.Cons(t, acc))
+      case _ => s
+
+// name := value in the ascending environment
+def Nx.envPut(xs: Coll.List[Nx.DrvEnv], k: Str, v: Str): Coll.List[Nx.DrvEnv] = xs match
+  case Coll.Nil => Coll.Cons(Nx.DrvEnv(k, v), Coll.Nil)
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvEnv(hk, _) =>
+      if Nx.strLess(k, hk) then Coll.Cons(Nx.DrvEnv(k, v), xs)
+      else if Str.eq(k, hk) then Coll.Cons(Nx.DrvEnv(k, v), t)
+      else Coll.Cons(h, Nx.envPut(t, k, v))
+
+// ---- inputs ---------------------------------------------------------------------------------------------------
+
+// out of the derivation that the outputs path lead to from p (DerivedPathMap::ensureSlot), into the ascending inputs
+def Nx.insAdd(xs: Coll.List[Nx.DrvInput], p: Str, path: Coll.List[Str], out: Str): Coll.List[Nx.DrvInput] = xs match
+  case Coll.Nil => Coll.Cons(Nx.DrvInput(p, Nx.nodeAdd(Nx.DrvNode(Coll.Nil, Coll.Nil), path, out)), Coll.Nil)
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvInput(hp, node) =>
+      if Nx.strLess(p, hp) then Coll.Cons(Nx.DrvInput(p, Nx.nodeAdd(Nx.DrvNode(Coll.Nil, Coll.Nil), path, out)), xs)
+      else if Str.eq(p, hp) then Coll.Cons(Nx.DrvInput(hp, Nx.nodeAdd(node, path, out)), t)
+      else Coll.Cons(h, Nx.insAdd(t, p, path, out))
+
+def Nx.nodeAdd(n: Nx.DrvNode, path: Coll.List[Str], out: Str): Nx.DrvNode = n match
+  case Nx.DrvNode(outs, kids) => path match
+    case Coll.Nil => Nx.DrvNode(Nx.setAdd(outs, out), kids)
+    case Coll.Cons(v, rest) => Nx.DrvNode(outs, Nx.kidAdd(kids, v, rest, out))
+
+def Nx.kidAdd(xs: Coll.List[Nx.DrvKid], v: Str, rest: Coll.List[Str], out: Str): Coll.List[Nx.DrvKid] = xs match
+  case Coll.Nil => Coll.Cons(Nx.DrvKid(v, Nx.nodeAdd(Nx.DrvNode(Coll.Nil, Coll.Nil), rest, out)), Coll.Nil)
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvKid(hv, node) =>
+      if Nx.strLess(v, hv) then Coll.Cons(Nx.DrvKid(v, Nx.nodeAdd(Nx.DrvNode(Coll.Nil, Coll.Nil), rest, out)), xs)
+      else if Str.eq(v, hv) then Coll.Cons(Nx.DrvKid(hv, Nx.nodeAdd(node, rest, out)), t)
+      else Coll.Cons(h, Nx.kidAdd(t, v, rest, out))
+
+def Nx.insAll(xs: Coll.List[Nx.DrvInput], p: Str, outs: Coll.List[Nx.DrvOutput]): Coll.List[Nx.DrvInput] = outs match
+  case Coll.Nil => xs
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvOutput(o, _) => Nx.insAll(Nx.insAdd(xs, p, Coll.Nil, o), p, t)
+
+enum Nx.InsR:
+  case Nx.InsOk(ins: Coll.List[Nx.DrvInput], srcs: Coll.List[Str])
+  case Nx.InsErr(msg: Str)
+
+// the context as inputs: Opaque a source, Built an output, DrvDeep the closure of the .drv (every path a source, every
+// .drv in it an input with all its outputs)
+def Nx.dsInputs(xs: Coll.List[Nx.Ctx], ins: Coll.List[Nx.DrvInput], srcs: Coll.List[Str]): Nx.InsR = xs match
+  case Coll.Nil => Nx.InsOk(ins, srcs)
+  case Coll.Cons(h, t) => h match
+    case Nx.XOpaque(p) => Nx.dsInputs(t, ins, Nx.setAdd(srcs, p))
+    case Nx.XBuilt(d, via, o) => Nx.dsInputs(t, Nx.insAdd(ins, d, Coll.rev(via), o), srcs)
+    case Nx.XDeep(d) => Nx.deepGo(Coll.Cons(d, Coll.Nil), Coll.Tip, ins, srcs) match
+      case Nx.InsOk(ins2, srcs2) => Nx.dsInputs(t, ins2, srcs2)
+      case Nx.InsErr(m) => Nx.InsErr(m)
+
+def Nx.inPaths(xs: Coll.List[Nx.DrvInput], acc: Coll.List[Str]): Coll.List[Str] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvInput(p, _) => Nx.inPaths(t, Coll.Cons(p, acc))
+
+// computeFSClosure over the store map: a .drv refers to its inputs and sources, a file to its references
+def Nx.deepGo(work: Coll.List[Str], seen: Coll.IMap[Bool], ins: Coll.List[Nx.DrvInput], srcs: Coll.List[Str]): Nx.InsR = work match
+  case Coll.Nil => Nx.InsOk(ins, srcs)
+  case Coll.Cons(p, t) =>
+    val k = Nx.intern(p)
+    Coll.lookup(seen, k) match
+      case Coll.Some(_) => Nx.deepGo(t, seen, ins, srcs)
+      case Coll.None =>
+        val seen2 = Coll.insert(seen, k, true)
+        val srcs2 = Nx.setAdd(srcs, p)
+        Nx.soGet(p) match
+          case Coll.Some(o) => o match
+            case Nx.SoDrv(d, _, _) => d match
+              case Nx.Drv(_, outs, dins, dsrcs, _, _, _, _) =>
+                Nx.deepGo(Nx.inPaths(dins, Coll.revOnto(dsrcs, t)), seen2, Nx.insAll(ins, p, outs), srcs2)
+            case Nx.SoSrc(refs) => Nx.deepGo(Coll.revOnto(refs, t), seen2, ins, srcs2)
+          case Coll.None =>
+            if Nx.endsWith(p, ".drv") then Nx.InsErr(Nx.cat(Nx.cat("snx: derivation '", p), "' was not made in this evaluation"))
+            else Nx.deepGo(t, seen2, ins, srcs2)
+
+enum Nx.ModR:
+  case Nx.ModOk(ins: Coll.List[Nx.DrvInput], deferred: Bool)
+  case Nx.ModErr(msg: Str)
+
+// the inputs of hashDerivationModulo: each input derivation by its hash modulo (base16) with the outputs taken; a
+// deferred input (floating, impure or itself deferred) makes the derivation deferred
+def Nx.modInputs(xs: Coll.List[Nx.DrvInput], acc: Coll.List[Nx.DrvInput], dfr: Bool): Nx.ModR = xs match
+  case Coll.Nil => Nx.ModOk(acc, dfr)
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvInput(p, node) => Nx.soGet(p) match
+      case Coll.Some(o) => o match
+        case Nx.SoDrv(d, hash, dd) =>
+          if dd then Nx.modInputs(t, acc, true)
+          else node match
+            case Nx.DrvNode(outs, _) => Nx.modOuts(Nx.drvOutputs(d), Nx.b16(hash), outs, p, t, acc, dfr)
+        case _ => Nx.ModErr(Nx.cat(Nx.cat("path '", p), "' is not a derivation"))
+      case Coll.None => Nx.ModErr(Nx.cat(Nx.cat("snx: derivation '", p), "' was not made in this evaluation"))
+
+def Nx.modOuts(have: Coll.List[Nx.DrvOutput], hex: Str, outs: Coll.List[Str], p: Str, rest: Coll.List[Nx.DrvInput], acc: Coll.List[Nx.DrvInput], dfr: Bool): Nx.ModR = outs match
+  case Coll.Nil => Nx.modInputs(rest, acc, dfr)
+  case Coll.Cons(o, t) =>
+    if Nx.isOutput(o, have) then Nx.modOuts(have, hex, t, p, rest, Nx.insAdd(acc, hex, Coll.Nil, o), dfr)
+    else Nx.ModErr(Nx.cat(Nx.cat(Nx.cat("no hash for output '", o), "' of derivation '"), Nx.cat(p, "'")))
+
+// ---- the derivation -------------------------------------------------------------------------------------------
+
+def Nx.algoOfId(a: I64): Coll.Option[Nx.HashAlgo] =
+  if a == 0 then Coll.Some(Nx.HaMd5)
+  else if a == 1 then Coll.Some(Nx.HaSha1)
+  else if a == 2 then Coll.Some(Nx.HaSha256)
+  else if a == 3 then Coll.Some(Nx.HaSha512)
+  else Coll.None
+
+def Nx.zeros(n: I64): Str = if n <= 0 then "" else Nx.cat(Nx.byte(0), Nx.zeros(n - 1))
+
+def Nx.singleOut(outs: Coll.List[Str]): Bool = outs match
+  case Coll.Cons(o, t) => t match
+    case Coll.Nil => Str.eq(o, "out")
+    case _ => false
+  case Coll.Nil => false
+
+def Nx.isText(m: Coll.Option[Nx.CaMethod]): Bool = m match
+  case Coll.Some(x) => x match
+    case Nx.CaText => true
+    case _ => false
+  case Coll.None => false
+
+def Nx.dsFinish(name: Str, st: Ptr): Nx.Val =
+  val jsb = Nx.aget[Ptr](st, Nx.dsJson())
+  val structured = !Nx.ptrEq(jsb, Nx.noFrame())
+  if structured then Nx.sbAdd(jsb, if Nx.ageti(st, Nx.dsJsonN()) == 0 then "{}" else "}") else ()
+  val legacy = Nx.aget[Coll.Option[Str]](st, Nx.dsLegacy())
+  val lj: Coll.Option[Str] = legacy match
+    case Coll.Some(t) => Nx.jNormal(t)
+    case Coll.None => Coll.None
+  val json = if structured then Coll.Some(Nx.sbGet(jsb)) else lj
+  val env0 = Coll.rev(Nx.aget[Coll.List[Nx.DrvEnv]](st, Nx.dsEnv()))
+  val outs = Nx.aget[Coll.List[Str]](st, Nx.dsOuts())
+  val method = Nx.aget[Coll.Option[Nx.CaMethod]](st, Nx.dsMethod())
+  val builder = Nx.dsStr(st, Nx.dsBuilder())
+  val system = Nx.dsStr(st, Nx.dsSystem())
+  val hasLegacy = legacy match
+    case Coll.Some(_) => true
+    case Coll.None => false
+  val noJson = lj match
+    case Coll.Some(_) => false
+    case Coll.None => true
+  if hasLegacy && noJson then Nx.evalErr("snx: the __json attribute is not a JSON object that snx reads")
+  else if Str.len(builder) == 0 then Nx.evalErr("required attribute 'builder' missing")
+  else if Str.len(system) == 0 then Nx.evalErr("required attribute 'system' missing")
+  else if Nx.endsWith(name, ".drv") && !(Nx.isText(method) && Nx.singleOut(outs)) then
+    Nx.evalErr("derivation names are allowed to end in '.drv' only if they produce a single derivation file")
+  else
+    val env1 = json match
+      case Coll.Some(j) => Nx.envPut(env0, "__json", j)
+      case Coll.None => env0
+    val args = Coll.rev(Nx.aget[Coll.List[Str]](st, Nx.dsArgs()))
+    Nx.dsInputs(Nx.aget[Coll.List[Nx.Ctx]](st, Nx.dsCtx()), Coll.Nil, Coll.Nil) match
+      case Nx.InsErr(m) => Nx.evalErr(m)
+      case Nx.InsOk(ins, srcs) =>
+        val base = Nx.Drv(name, Coll.Nil, ins, srcs, system, builder, args, env1)
+        Nx.aget[Coll.Option[Str]](st, Nx.dsHash()) match
+          case Coll.Some(h) => Nx.dsFixed(base, outs, h, Nx.ageti(st, Nx.dsAlgo()), method)
+          case Coll.None =>
+            val ca = Nx.ageti(st, Nx.dsCa()) == 1
+            val impure = Nx.ageti(st, Nx.dsImpure()) == 1
+            if ca && impure then Nx.evalErr("derivation cannot be both content-addressed and impure")
+            else if ca || impure then Nx.dsFloating(base, outs, Nx.ageti(st, Nx.dsAlgo()), method, impure)
+            else Nx.dsInputAddressed(base, outs)
+
+// a Drv with other outputs and environment
+def Nx.withOuts(d: Nx.Drv, outs: Coll.List[Nx.DrvOutput], env: Coll.List[Nx.DrvEnv]): Nx.Drv = d match
+  case Nx.Drv(n, _, ins, srcs, sys, b, args, _) => Nx.Drv(n, outs, ins, srcs, sys, b, args, env)
+
+def Nx.withIns(d: Nx.Drv, ins: Coll.List[Nx.DrvInput]): Nx.Drv = d match
+  case Nx.Drv(n, outs, _, srcs, sys, b, args, env) => Nx.Drv(n, outs, ins, srcs, sys, b, args, env)
+
+def Nx.drvEnv(d: Nx.Drv): Coll.List[Nx.DrvEnv] = d match
+  case Nx.Drv(_, _, _, _, _, _, _, env) => env
+
+def Nx.drvName(d: Nx.Drv): Str = d match
+  case Nx.Drv(n, _, _, _, _, _, _, _) => n
+
+def Nx.drvIns(d: Nx.Drv): Coll.List[Nx.DrvInput] = d match
+  case Nx.Drv(_, _, ins, _, _, _, _, _) => ins
+
+// a fixed output: outputs must be just "out"; newHashAllowEmpty
+def Nx.dsFixed(d: Nx.Drv, outs: Coll.List[Str], h: Str, algo: I64, method: Coll.Option[Nx.CaMethod]): Nx.Val =
+  if !Nx.singleOut(outs) then Nx.evalErr("multiple outputs are not supported in fixed-output derivations")
+  else
+    val parsed = if Str.len(h) == 0 && algo >= 0 then Nx.HashOk(algo, Nx.zeros(Nx.algoSize(algo))) else Nx.parseAnyHash(h, algo)
+    parsed match
+      case Nx.HashBad(m) => Nx.evalErr(m)
+      case Nx.HashOk(a, raw) => Nx.algoOfId(a) match
+        case Coll.None => Nx.evalErr("snx: a fixed output hashed with blake3")
+        case Coll.Some(ha) =>
+          val m = method match
+            case Coll.Some(x) => x
+            case Coll.None => Nx.CaFlat
+          if !Nx.fixedOk(m, ha) then Nx.evalErr("snx: a fixed output method and hash algorithm that Nix refuses")
+          else
+            val name = Nx.drvName(d)
+            val fp = Nx.fixedPath(name, "out", m, ha, raw)
+            val d2 = Nx.withOuts(d, Coll.Cons(Nx.DrvOutput("out", Nx.OutFixed(m, ha, raw)), Coll.Nil), Nx.envPut(Nx.drvEnv(d), "out", fp))
+            val clear = Nx.cat(Nx.cat(Nx.cat("fixed:out:", Nx.methodPrefix(m)), Nx.cat(Nx.drAlgoName(ha), ":")), Nx.cat(Nx.cat(Nx.b16(raw), ":"), fp))
+            Nx.dsResult(d2, Coll.Some(Nx.hashBytes(2, clear)), false)
+
+// content-addressed floating or impure: each output's environment value is its placeholder
+def Nx.dsFloating(d: Nx.Drv, outs: Coll.List[Str], algo: I64, method: Coll.Option[Nx.CaMethod], impure: Bool): Nx.Val =
+  val ha: Coll.Option[Nx.HashAlgo] = if algo < 0 then Coll.Some(Nx.HaSha256) else Nx.algoOfId(algo)
+  ha match
+    case Coll.None => Nx.evalErr("snx: a content-addressed output hashed with blake3")
+    case Coll.Some(a) =>
+      val m = method match
+        case Coll.Some(x) => x
+        case Coll.None => Nx.CaNar
+      val o = if impure then Nx.OutImpure(m, a) else Nx.OutFloating(m, a)
+      Nx.dsResult(Nx.withOuts(d, Nx.sameOuts(outs, o), Nx.envPlaceholders(Nx.drvEnv(d), outs)), Coll.None, true)
+
+def Nx.sameOuts(outs: Coll.List[Str], o: Nx.DrvOut): Coll.List[Nx.DrvOutput] = outs match
+  case Coll.Nil => Coll.Nil
+  case Coll.Cons(h, t) => Coll.Cons(Nx.DrvOutput(h, o), Nx.sameOuts(t, o))
+
+def Nx.envPlaceholders(env: Coll.List[Nx.DrvEnv], outs: Coll.List[Str]): Coll.List[Nx.DrvEnv] = outs match
+  case Coll.Nil => env
+  case Coll.Cons(h, t) => Nx.envPlaceholders(Nx.envPut(env, h, Nx.hashPlaceholder(h)), t)
+
+def Nx.envBlank(env: Coll.List[Nx.DrvEnv], outs: Coll.List[Str]): Coll.List[Nx.DrvEnv] = outs match
+  case Coll.Nil => env
+  case Coll.Cons(h, t) => Nx.envBlank(Nx.envPut(env, h, ""), t)
+
+// input-addressed: fillInOutputPaths, the output paths from the hash of the masked ATerm whose input derivations are
+// their hashes modulo; deferred when an input is
+def Nx.dsInputAddressed(d: Nx.Drv, outs: Coll.List[Str]): Nx.Val =
+  val masked = Nx.withOuts(d, Nx.sameOuts(outs, Nx.OutDeferred), Nx.envBlank(Nx.drvEnv(d), outs))
+  Nx.modInputs(Nx.drvIns(d), Coll.Nil, false) match
+    case Nx.ModErr(m) => Nx.evalErr(m)
+    case Nx.ModOk(ins2, dfr) =>
+      if dfr then Nx.dsResult(masked, Coll.None, true)
+      else
+        val name = Nx.drvName(d)
+        val hex = Nx.b16(Nx.hashBytes(2, Nx.sbView(Nx.drvWrite(Nx.withIns(masked, ins2), false))))
+        val d2 = Nx.fillPaths(masked, outs, hex, name, Coll.Nil, Nx.drvEnv(masked))
+        // a derivation without input derivations hashes modulo to its own ATerm's hash (dsResult computes that)
+        val memo: Coll.Option[Str] = ins2 match
+          case Coll.Nil => Coll.None
+          case _ => Coll.Some(Nx.hashBytes(2, Nx.sbView(Nx.drvWrite(Nx.withIns(d2, ins2), false))))
+        Nx.dsResult(d2, memo, false)
+
+def Nx.fillPaths(d: Nx.Drv, outs: Coll.List[Str], hex: Str, name: Str, acc: Coll.List[Nx.DrvOutput], env: Coll.List[Nx.DrvEnv]): Nx.Drv = outs match
+  case Coll.Nil => Nx.withOuts(d, Coll.rev(acc), env)
+  case Coll.Cons(o, t) =>
+    val p = Nx.storePath(Nx.cat("output:", o), hex, Nx.outputPathName(name, o))
+    Nx.fillPaths(d, t, hex, name, Coll.Cons(Nx.DrvOutput(o, Nx.OutInput(p)), acc), Nx.envPut(env, o, p))
+
+// the drvPath, the store map entry (memo = the hash modulo; Coll.None = the ATerm's own hash), the result set
+def Nx.dsResult(d: Nx.Drv, memo: Coll.Option[Str], deferred: Bool): Nx.Val =
+  val sha = Nx.drvHash(d)
+  val dp = Nx.drvTextPath(d, sha)
+  val h = memo match
+    case Coll.Some(x) => x
+    case Coll.None => if deferred then "" else sha
+  Nx.soPut(dp, Nx.SoDrv(d, h, deferred))
+  val first = Nx.pair("drvPath", Nx.VStr(dp, Coll.Cons(Nx.XDeep(dp), Coll.Nil)))
+  Nx.attrsOf(Coll.Cons(first, Nx.outPairs(d, dp, Nx.drvOutputs(d), Coll.Nil)))
+
+def Nx.outPairs(d: Nx.Drv, dp: Str, xs: Coll.List[Nx.DrvOutput], acc: Coll.List[Nx.Pair]): Coll.List[Nx.Pair] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => h match
+    case Nx.DrvOutput(o, _) =>
+      val s = Nx.outPathOf(d, o) match
+        case Coll.Some(p) => p
+        case Coll.None => Nx.placeholderOf(dp, Coll.Nil, o)
+      Nx.outPairs(d, dp, t, Coll.Cons(Nx.pair(o, Nx.VStr(s, Coll.Cons(Nx.XBuilt(dp, Coll.Nil, o), Coll.Nil))), acc))
+
+// prim derivation: the lambda of derivation.nix (nx/b_core.srs) applied to the argument
+// shortcut: `derivation` itself is a primop, not that lambda (functionArgs gives { }, not { outputs = true; }); bind
+// the evaluated file in the base env when a case looks at the function itself.
+def Nx.pDerivation(a: Ptr): Nx.Val = Nx.apply(Nx.importFile(Nx.cat(Nx.corePrefix(), "derivation.nix")), a)

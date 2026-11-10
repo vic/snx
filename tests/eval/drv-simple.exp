@@ -1,0 +1,1 @@
+{ drvPath = "/nix/store/cxl3gdvrylxaanfsn3n3a8lhnh2jfrc5-simple.drv"; outPath = "/nix/store/i5xvchlm36jash0k9ndh3vya563ls965-simple"; outputName = "out"; type = "derivation"; }

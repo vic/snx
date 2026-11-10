@@ -217,9 +217,9 @@ def Nx.toJson1(v: Nx.Val, sb: Ptr, ctx: Ptr): Nx.Val = v match
     Nx.sbAdd(sb, "null")
     Nx.VNull
   case Nx.VStr(s, c) =>
-    Nx.aset[Coll.List[Str]](ctx, 0, Coll.revOnto(c, Nx.aget[Coll.List[Str]](ctx, 0)))
+    Nx.aset[Coll.List[Nx.Ctx]](ctx, 0, Coll.revOnto(c, Nx.aget[Coll.List[Nx.Ctx]](ctx, 0)))
     Nx.jsonStrOut(s, sb)
-  case Nx.VPath(_) => Nx.todoErr("copying a path to the store")
+  case Nx.VPath(p) => Nx.toJson1(Nx.copyPath(p), sb, ctx)
   case Nx.VList(n, xs) =>
     Nx.sbAdd(sb, "[")
     val r = Nx.jsonItems(xs, 0, n, sb, ctx)
@@ -271,9 +271,9 @@ def Nx.jsonFields(syms: Ptr, vals: Ptr, ord: Ptr, i: I64, n: I64, sb: Ptr, ctx: 
 def Nx.pToJson(v: Nx.Val): Nx.Val =
   val sb = Nx.sbNew()
   val ctx = Nx.arrNew(1)
-  Nx.aset[Coll.List[Str]](ctx, 0, Coll.Nil)
+  Nx.aset[Coll.List[Nx.Ctx]](ctx, 0, Coll.Nil)
   val r = Nx.toJson(v, sb, ctx)
-  if Nx.isErr(r) then r else Nx.VStr(Nx.sbGet(sb), Nx.aget[Coll.List[Str]](ctx, 0))
+  if Nx.isErr(r) then r else Nx.VStr(Nx.sbGet(sb), Nx.aget[Coll.List[Nx.Ctx]](ctx, 0))
 
 // ---- toXML ----------------------------------------------------------------------------------------------------
 

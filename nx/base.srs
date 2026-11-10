@@ -16,6 +16,8 @@ def Nx.gTrue(): I64 = 9
 def Nx.gFalse(): I64 = 10
 def Nx.gInts(): I64 = 11
 def Nx.gIncl(): I64 = 12
+def Nx.gStore(): I64 = 13
+def Nx.gSrcs(): I64 = 14
 
 // the integers 0 until Nx.smallInts() are made once, as the Booleans
 def Nx.smallInts(): I64 = 256
@@ -87,6 +89,8 @@ def Nx.baseEnv(): Nx.Val =
     Nx.aseti(g, Nx.gDepth(), 0)
     Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.Tip)
     Nx.aset[Coll.IMap[Nx.ReResult]](g, Nx.gRegex(), Coll.Tip)
+    Nx.aset[Coll.IMap[Nx.StoreObj]](g, Nx.gStore(), Coll.Tip)
+    Nx.aset[Coll.IMap[Str]](g, Nx.gSrcs(), Coll.Tip)
     if Nx.ageti(g, Nx.gMaxDepth()) == 0 then Nx.aseti(g, Nx.gMaxDepth(), 10000) else ()
     v
 
@@ -209,12 +213,23 @@ def Nx.bsPrims(b: Nx.BB): Unit =
   Nx.bsPrim(b, "__fromJSON", 1, Nx.PFromJson)
   Nx.bsPrim(b, "__unsafeGetAttrPos", 2, Nx.PGetAttrPos)
   Nx.bsPrim(b, "__genericClosure", 1, Nx.PGenericClosure)
+  Nx.bsPrim(b, "derivation", 1, Nx.PDerivation)
+  Nx.bsPrim(b, "derivationStrict", 1, Nx.PDerivationStrict)
+  Nx.bsPrim(b, "placeholder", 1, Nx.PPlaceholder)
+  Nx.bsPrim(b, "__unsafeDiscardStringContext", 1, Nx.PDiscardCtx)
+  Nx.bsPrim(b, "__hasContext", 1, Nx.PHasCtx)
+  Nx.bsPrim(b, "__unsafeDiscardOutputDependency", 1, Nx.PDiscardOutDep)
+  Nx.bsPrim(b, "__addDrvOutputDependencies", 1, Nx.PAddDrvOutDeps)
+  Nx.bsPrim(b, "__getContext", 1, Nx.PGetCtx)
+  Nx.bsPrim(b, "__appendContext", 2, Nx.PAppendCtx)
+  Nx.bsPrim(b, "__storePath", 1, Nx.PStorePath)
+  Nx.bsPrim(b, "__outputOf", 2, Nx.POutputOf)
+  Nx.bsPrim(b, "__toFile", 2, Nx.PToFile)
+  Nx.bsPrim(b, "__filterSource", 2, Nx.PFilterSource)
+  Nx.bsPrim(b, "__path", 1, Nx.PPath)
 
 // later waves (regex, toml, json, xml, hashes, derivations, paths, fetchers, flakes, contexts)
 def Nx.bsTodos(b: Nx.BB): Unit =
-  Nx.bsTodo(b, "derivation", 1)
-  Nx.bsTodo(b, "derivationStrict", 1)
-  Nx.bsTodo(b, "placeholder", 1)
   Nx.bsTodo(b, "break", 1)
   Nx.bsTodo(b, "fetchTarball", 1)
   Nx.bsTodo(b, "fetchTree", 1)
@@ -224,16 +239,5 @@ def Nx.bsTodos(b: Nx.BB): Unit =
   Nx.bsTodo(b, "__getFlake", 1)
   Nx.bsTodo(b, "__parseFlakeRef", 1)
   Nx.bsTodo(b, "__flakeRefToString", 1)
-  Nx.bsTodo(b, "__unsafeDiscardStringContext", 1)
-  Nx.bsTodo(b, "__hasContext", 1)
-  Nx.bsTodo(b, "__unsafeDiscardOutputDependency", 1)
-  Nx.bsTodo(b, "__addDrvOutputDependencies", 1)
-  Nx.bsTodo(b, "__getContext", 1)
-  Nx.bsTodo(b, "__appendContext", 2)
   Nx.bsTodo(b, "__warn", 2)
   Nx.bsTodo(b, "__traceVerbose", 2)
-  Nx.bsTodo(b, "__storePath", 1)
-  Nx.bsTodo(b, "__outputOf", 2)
-  Nx.bsTodo(b, "__toFile", 2)
-  Nx.bsTodo(b, "__filterSource", 2)
-  Nx.bsTodo(b, "__path", 1)

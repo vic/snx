@@ -1,11 +1,16 @@
-// the virtual file system of corepkgs (<nix/fetchurl.nix>): /__corepkgs__/NAME. Only fetchurl.nix is here, as in
-// libexpr/fetchurl.nix without its comments; it needs `derivation` to run.
+// the virtual file system of corepkgs (<nix/fetchurl.nix>): /__corepkgs__/NAME. fetchurl.nix is libexpr/fetchurl.nix
+// and derivation.nix is libexpr/primops/derivation.nix, both without their comments.
 
 def Nx.corePrefix(): Str = "/__corepkgs__/"
 
 def Nx.coreFetchurl(): Str =
   "{ system ? \"\", url, hash ? \"\", md5 ? \"\", sha1 ? \"\", sha256 ? \"\", sha512 ? \"\",\n  outputHash ? if hash != \"\" then hash else if sha512 != \"\" then sha512 else if sha1 != \"\" then sha1 else if md5 != \"\" then md5 else sha256,\n  outputHashAlgo ? if hash != \"\" then \"\" else if sha512 != \"\" then \"sha512\" else if sha1 != \"\" then \"sha1\" else if md5 != \"\" then \"md5\" else \"sha256\",\n  executable ? false, unpack ? false, name ? baseNameOf (toString url), impure ? false,\n}:\nderivation ({\n  builder = \"builtin:fetchurl\";\n  outputHashMode = if unpack || executable then \"recursive\" else \"flat\";\n  inherit name url executable unpack;\n  system = \"builtin\";\n  preferLocalBuild = true;\n  impureEnvVars = [ \"http_proxy\" \"https_proxy\" \"ftp_proxy\" \"all_proxy\" \"no_proxy\" ];\n  urls = [ url ];\n} // (if impure then { __impure = true; } else { inherit outputHashAlgo outputHash; }))\n"
 
+def Nx.coreDerivation(): Str =
+  "drvAttrs@{ outputs ? [ \"out\" ], ... }:\nlet\n  strict = derivationStrict drvAttrs;\n  commonAttrs = drvAttrs // (builtins.listToAttrs outputsList) // {\n    all = map (x: x.value) outputsList;\n    inherit drvAttrs;\n  };\n  outputToAttrListElement = outputName: {\n    name = outputName;\n    value = commonAttrs // {\n      outPath = builtins.getAttr outputName strict;\n      drvPath = strict.drvPath;\n      type = \"derivation\";\n      inherit outputName;\n    };\n  };\n  outputsList = map outputToAttrListElement outputs;\nin\n(builtins.head outputsList).value\n"
+
 // the text of the file at path p; length -1 when it cannot be read
 def Nx.readSrc(p: Str): Str =
-  if Str.eq(p, Nx.cat(Nx.corePrefix(), "fetchurl.nix")) then Nx.coreFetchurl() else Nx.readFile(p)
+  if Str.eq(p, Nx.cat(Nx.corePrefix(), "fetchurl.nix")) then Nx.coreFetchurl()
+  else if Str.eq(p, Nx.cat(Nx.corePrefix(), "derivation.nix")) then Nx.coreDerivation()
+  else Nx.readFile(p)

@@ -70,6 +70,25 @@ srs_str Nx__fileBytes(srs_str path) {
   return (srs_str){b, (int64_t)got};
 }
 
+// a regular file that its owner may execute (dumpPath's "executable", archive.cc), lstat as dumpPath does
+bool Nx__fsExec(srs_str path) {
+  char* c = fs_cstr(path);
+  struct stat st;
+  int r = lstat(c, &st);
+  free(c);
+  return r == 0 && S_ISREG(st.st_mode) && (st.st_mode & S_IXUSR);
+}
+
+// the target of a symlink; length -1 when it cannot be read
+srs_str Nx__readLink(srs_str path) {
+  char* c = fs_cstr(path);
+  uint8_t* b = malloc(4097);
+  if (!b) exit(70);
+  ssize_t n = readlink(c, (char*)b, 4096);
+  free(c);
+  if (n < 0) return (srs_str){(const uint8_t*)"", -1};
+  return (srs_str){b, (int64_t)n};
+}
 
 static double fs_d(int64_t b) { double d; memcpy(&d, &b, sizeof d); return d; }
 

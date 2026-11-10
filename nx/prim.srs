@@ -88,6 +88,20 @@ enum Nx.Prim:
   case Nx.PFromJson
   case Nx.PGetAttrPos
   case Nx.PGenericClosure
+  case Nx.PDerivation
+  case Nx.PDerivationStrict
+  case Nx.PPlaceholder
+  case Nx.PDiscardCtx
+  case Nx.PHasCtx
+  case Nx.PDiscardOutDep
+  case Nx.PAddDrvOutDeps
+  case Nx.PGetCtx
+  case Nx.PAppendCtx
+  case Nx.PStorePath
+  case Nx.POutputOf
+  case Nx.PToFile
+  case Nx.PFilterSource
+  case Nx.PPath
 
 // the arithmetic primops
 enum Nx.Ar:
@@ -196,6 +210,20 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PFromJson => Nx.pFromJson(Nx.force(a))
     case Nx.PGetAttrPos => Nx.pAttrPos(Nx.force(a), Nx.force(b))
     case Nx.PGenericClosure => Nx.pGenericClosure(Nx.force(a))
+    case Nx.PDerivation => Nx.pDerivation(a)
+    case Nx.PDerivationStrict => Nx.pDerivationStrict(Nx.force(a))
+    case Nx.PPlaceholder => Nx.pPlaceholder(Nx.force(a))
+    case Nx.PDiscardCtx => Nx.pDiscardCtx(Nx.force(a))
+    case Nx.PHasCtx => Nx.pHasCtx(Nx.force(a))
+    case Nx.PDiscardOutDep => Nx.pDiscardOutDep(Nx.force(a))
+    case Nx.PAddDrvOutDeps => Nx.pAddDrvOutDeps(Nx.force(a))
+    case Nx.PGetCtx => Nx.pGetCtx(Nx.force(a))
+    case Nx.PAppendCtx => Nx.pAppendCtx(Nx.force(a), Nx.force(b))
+    case Nx.PStorePath => Nx.pStorePath(Nx.force(a))
+    case Nx.POutputOf => Nx.pOutputOf(Nx.force(a), Nx.force(b))
+    case Nx.PToFile => Nx.pToFile(Nx.force(a), Nx.force(b))
+    case Nx.PFilterSource => Nx.pFilterSource(a, Nx.force(b))
+    case Nx.PPath => Nx.pPath(Nx.force(a))
     case Nx.PGetEnv =>
       val s = Nx.force(a)
       s match
@@ -598,7 +626,7 @@ def Nx.pConcatSep(sv: Nx.Val, l: Nx.Val): Nx.Val = sv match
     case _ => Nx.typeErr("a list", l)
   case _ => Nx.typeErr("a string", sv)
 
-def Nx.sepGo(sep: Str, xs: Ptr, i: I64, n: I64, sb: Ptr, ctx: Coll.List[Str]): Nx.Val =
+def Nx.sepGo(sep: Str, xs: Ptr, i: I64, n: I64, sb: Ptr, ctx: Coll.List[Nx.Ctx]): Nx.Val =
   if i == n then Nx.VStr(Nx.sbGet(sb), ctx)
   else
     val s = Nx.coerce(Nx.force(Nx.aget[Ptr](xs, i)), false, true)
