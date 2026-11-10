@@ -1,0 +1,7 @@
+// the C services of rt/snx_rt.c. Pure: each result depends only on the arguments.
+extern def Nx.cat(a: Str, b: Str): Str
+extern def Nx.byte(c: I64): Str
+extern def Nx.floatBits(s: Str): I64
+extern def Nx.intOverflows(s: Str): Bool
+extern def Nx.intValue(s: Str): I64
+extern def Nx.hex64(v: I64): Str

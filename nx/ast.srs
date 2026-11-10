@@ -71,6 +71,15 @@ enum Nx.Expr:
   case Nx.EUpdate(p: I64, a: Nx.Expr, b: Nx.Expr)
   case Nx.EListConcat(p: I64, a: Nx.Expr, b: Nx.Expr)
 
+enum Nx.ParseResult:
+  case Nx.Parsed(e: Nx.Expr)
+  case Nx.ParseBad(p: I64)                 // the byte offset of Nix's error position
+
+// phase signatures (each lives in its own file):
+//   nx/lex.srs    def Nx.lex(src: Str): Nx.LexResult          and  def Nx.printTok(t: Nx.Tok): Unit (one line, for `snx lex`)
+//   nx/parse.srs  def Nx.parse(src: Str, dir: Str, home: Str): Nx.ParseResult   (dir = directory of the file, for ./a)
+//   nx/tree.srs   def Nx.printTree(e: Nx.Expr): Unit         (SPEC.md S-expression, no newline)
+
 // LINE:COL of byte offset p (SPEC.md parse: a line ends at \n, \r\n or a lone \r; the column counts bytes from 1)
 enum Nx.LC:
   case Nx.LineCol(line: I64, col: I64)
