@@ -1,0 +1,95 @@
+// snx values (vic/notes/20261110T1400--eval-core-design__design_eval.md). A slot is one word of a C array made by
+// Nx.arrNew: an env frame, the values of a set, the items of a list. A slot holds a Nx.Val; only slots hold Nx.VPending.
+
+// why an evaluation failed; tryEval catches Nx.KThrow and Nx.KAssert only
+enum Nx.ErrKind:
+  case Nx.KThrow
+  case Nx.KAssert
+  case Nx.KAbort
+  case Nx.KType
+  case Nx.KMissing
+  case Nx.KInfRec
+  case Nx.KOther
+
+// a string's context: the store paths it refers to (Coll.Nil = none)
+enum Nx.Val:
+  case Nx.VInt(n: I64)
+  case Nx.VFloat(bits: I64)
+  case Nx.VBool(b: Bool)
+  case Nx.VNull
+  case Nx.VStr(s: Str, ctx: Coll.List[Str])
+  case Nx.VPath(s: Str)
+  case Nx.VAttrs(n: I64, syms: Ptr, vals: Ptr)    // n names sorted by symbol id (Nx.intern), vals = their slots
+  case Nx.VList(n: I64, xs: Ptr)                  // n slots
+  case Nx.VLam(env: Ptr, code: Nx.Code)           // code = a Nx.CLam
+  case Nx.VPrim(id: I64, arity: I64)
+  case Nx.VPrimApp(id: I64, arity: I64, args: Coll.List[Nx.Val])   // args newest first
+  case Nx.VPending(env: Ptr, code: Nx.Code)       // a thunk
+  case Nx.VBusy                                   // a thunk being forced: reading it is infinite recursion
+  case Nx.VErr(kind: Nx.ErrKind, msg: Str)
+
+// a parameter pattern after scope resolution: slot i of the call frame gets formal i (sorted by symbol id)
+enum Nx.CFormal:
+  case Nx.CFm(sym: I64, dflt: Coll.Option[Nx.Code])
+
+// the operators that take two evaluated operands
+enum Nx.BinOp:
+  case Nx.OEq
+  case Nx.ONe
+  case Nx.OUpdate
+  case Nx.OListConcat
+
+// Nx.Expr after scope resolution (nx/compile.srs): every variable is a frame walk, a with lookup or a builtin
+enum Nx.Code:
+  case Nx.CConst(v: Nx.Val)
+  case Nx.CLocal(up: I64, i: I64)                         // frame up levels out, slot i (slot 0 = parent frame)
+  case Nx.CWithVar(sym: I64, up: I64, name: Str)          // up = levels to the innermost enclosing with frame
+  case Nx.CCurPos(file: Str, line: I64, col: I64)
+  case Nx.CStr(s: Str)
+  case Nx.CPath(s: Str)
+  case Nx.CConcat(forceStr: Bool, n: I64, parts: Ptr)     // parts = n Nx.Code
+  case Nx.CList(n: I64, xs: Ptr)                          // xs = n Nx.Code
+  case Nx.CAttrs(n: I64, syms: Ptr, vals: Ptr, dyn: Coll.List[Nx.CDyn])               // vals = n Nx.Code, in the current frame
+  case Nx.CRecAttrs(n: I64, syms: Ptr, vals: Ptr, dyn: Coll.List[Nx.CDyn])            // vals in a new frame of n slots
+  case Nx.CLet(n: I64, vals: Ptr, body: Nx.Code)          // new frame of n slots, vals in it, body in it
+  case Nx.CWith(a: Nx.Code, body: Nx.Code)                // new frame of 1 slot: the set (forced on first lookup)
+  case Nx.CLam(arg: Bool, nformals: I64, formals: Ptr, ellipsis: Bool, nslots: I64, body: Nx.Code, name: Str)
+  case Nx.CCall(f: Nx.Code, n: I64, args: Ptr)
+  case Nx.CSelect(e: Nx.Code, path: Coll.List[Nx.CKey], dflt: Coll.Option[Nx.Code])
+  case Nx.CHas(e: Nx.Code, path: Coll.List[Nx.CKey])
+  case Nx.CIf(c: Nx.Code, t: Nx.Code, e: Nx.Code)
+  case Nx.CAssert(c: Nx.Code, b: Nx.Code, line: I64, col: I64)
+  case Nx.CNot(a: Nx.Code)
+  case Nx.CAnd(a: Nx.Code, b: Nx.Code)
+  case Nx.COr(a: Nx.Code, b: Nx.Code)
+  case Nx.CImpl(a: Nx.Code, b: Nx.Code)
+  case Nx.CBin(op: Nx.BinOp, a: Nx.Code, b: Nx.Code)
+
+enum Nx.CKey:
+  case Nx.KSym(sym: I64)
+  case Nx.KDyn(e: Nx.Code)
+
+enum Nx.CDyn:
+  case Nx.CDynBind(k: Nx.Code, v: Nx.Code)
+
+// C arrays of word slots (rt/snx_rt.c): program lifetime, never freed (one arena per run)
+extern def Nx.arrNew(n: I64): Ptr
+extern def Nx.aget [A: Type] (p: Ptr, i: I64): A
+extern def Nx.aset [A: Type] (p: Ptr, i: I64, v: A): Unit
+extern def Nx.ageti(p: Ptr, i: I64): I64
+extern def Nx.aseti(p: Ptr, i: I64, v: I64): Unit
+// the frame that slot 0 of frame f points to
+extern def Nx.parent(f: Ptr): Ptr
+// a frame of n value slots plus the parent link in slot 0
+extern def Nx.frame(parent: Ptr, n: I64): Ptr
+extern def Nx.noFrame(): Ptr
+
+// symbols: ids in first-seen order (attribute order of == and of forcing is this order)
+extern def Nx.intern(s: Str): I64
+extern def Nx.symName(id: I64): Str
+// the index of sym in the n sorted ids at syms, or n when absent (binary search); use Nx.slotOf
+extern def Nx.findSym(syms: Ptr, n: I64, sym: I64): I64
+
+def Nx.slotOf(syms: Ptr, n: I64, sym: I64): Coll.Option[I64] =
+  val i = Nx.findSym(syms, n, sym)
+  if i < n then Coll.Some(i) else Coll.None
