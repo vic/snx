@@ -1,5 +1,8 @@
-// snx values (vic/notes/20261110T1400--eval-core-design__design_eval.md). A slot is one word of a C array made by
-// Nx.arrNew: an env frame, the values of a set, the items of a list. A slot holds a Nx.Val; only slots hold Nx.VPending.
+// snx values (vic/notes/20261110T1400--eval-core-design__design_eval.md). A cell (Nx.cell) is one word that holds a
+// Nx.Val, as Nix's Value: forcing a thunk writes the result into its cell. Frames, sets and lists hold cell pointers, as
+// Nix's Env, Bindings and lists hold Value*: a variable in a lazy position passes its cell on, unforced and unshared by
+// copy, and «repeated» compares lists by cell (print-ambiguous.cc:49) and sets by their Nx.VAttrs object (:33).
+// Only cells hold Nx.VPending and Nx.VBusy.
 
 // why an evaluation failed; tryEval catches Nx.KThrow and Nx.KAssert only
 enum Nx.ErrKind:
@@ -19,8 +22,8 @@ enum Nx.Val:
   case Nx.VNull
   case Nx.VStr(s: Str, ctx: Coll.List[Str])
   case Nx.VPath(s: Str)
-  case Nx.VAttrs(n: I64, syms: Ptr, vals: Ptr)    // n names sorted by symbol id (Nx.intern), vals = their slots
-  case Nx.VList(n: I64, xs: Ptr)                  // n slots
+  case Nx.VAttrs(n: I64, syms: Ptr, vals: Ptr)    // n names sorted by symbol id (Nx.intern), vals = their n cells
+  case Nx.VList(n: I64, xs: Ptr)                  // n cells
   case Nx.VLam(env: Ptr, code: Nx.Code)           // code = a Nx.CLam
   case Nx.VPrim(id: I64, arity: I64)
   case Nx.VPrimApp(id: I64, arity: I64, args: Coll.List[Nx.Val])   // args newest first
@@ -72,7 +75,11 @@ enum Nx.CKey:
 enum Nx.CDyn:
   case Nx.CDynBind(k: Nx.Code, v: Nx.Code)
 
-// C arrays of word slots (rt/snx_rt.c): program lifetime, never freed (one arena per run)
+// a new cell holding v, and its value (rt/snx_rt.c; cells, frames and arrays live until the run ends)
+extern def Nx.cell(v: Nx.Val): Ptr
+extern def Nx.get(c: Ptr): Nx.Val
+extern def Nx.put(c: Ptr, v: Nx.Val): Unit
+// C arrays of words: a frame is slot 0 = parent frame, slots 1..n = cells
 extern def Nx.arrNew(n: I64): Ptr
 extern def Nx.aget [A: Type] (p: Ptr, i: I64): A
 extern def Nx.aset [A: Type] (p: Ptr, i: I64, v: A): Unit

@@ -132,3 +132,8 @@ __attribute__((constructor)) static void nx_big_stack(int argc, char** argv) {
   setenv("SNX_STACK_SET", "1", 1);
   execv("/proc/self/exe", argv);
 }
+
+// ── cells: one word holding a value (nx/val.srs Nx.cell)
+void* Nx__cell(void* v) { void** c = nx_words(1); *c = v; return c; }
+void* Nx__get(void** c) { return *c; }
+int64_t Nx__put(void** c, void* v) { *c = v; return 0; }
