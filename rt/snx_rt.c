@@ -723,3 +723,22 @@ bool Nx__atPut(nx_atab* t, srs_str n, void* x) {
   t->v[j] = x;
   return fresh;
 }
+
+// ── token vector (nx/lex.srs): the lexer's tokens in order; the parser reads them by index (Nx__tsBind). One array
+// serves every file in turn (Nx.tvFree empties it), so its pages are touched once
+typedef struct { void** p; int64_t n, cap; } nx_tv;
+static nx_tv g_tv;
+void* Nx__tvNew(void) { g_tv.n = 0; return &g_tv; }
+void* Nx__tvPush(nx_tv* v, void* x) {
+  if (v->n == v->cap) { v->cap = v->cap ? 2 * v->cap : 256; v->p = realloc(v->p, (size_t)v->cap * sizeof *v->p); if (!v->p) { fputs("snx: out of memory\n", stderr); exit(70); } }
+  v->p[v->n++] = x;
+  return v;
+}
+int64_t Nx__tvLen(nx_tv* v) { return v->n; }
+void* Nx__tvAt(nx_tv* v, int64_t i) { return v->p[i]; }
+// a file's tokens done: an array grown past 1M tokens (8 MB: one huge file) goes back rather than stay resident
+int64_t Nx__tvFree(nx_tv* v) { v->n = 0; if (v->cap > 1 << 20) { free(v->p); v->p = 0; v->cap = 0; } return 0; }
+static nx_tv* g_ts;
+int64_t Nx__tsBind(nx_tv* v) { g_ts = v; return 0; }
+void* Nx__tsAt(int64_t i) { return g_ts->p[i < g_ts->n ? i : g_ts->n - 1]; }
+int64_t Nx__tsLen(void) { return g_ts->n; }

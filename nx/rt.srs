@@ -98,6 +98,16 @@ extern def Nx.wbFree(b: Ptr): Unit
 // a loaded file's position records get its file and source cells (nx/load.srs)
 extern def Nx.posCells(file: Ptr, src: Ptr): Unit
 extern def Nx.posMove(old: Ptr, key: Ptr): Unit
+// the token vector (nx/lex.srs): pointers pushed in order, read back by index; one array reused file after file
+extern def Nx.tvNew(): Ptr
+extern def Nx.tvPush [A: Type] (v: Ptr, x: A): Ptr
+extern def Nx.tvLen(v: Ptr): I64
+extern def Nx.tvAt [A: Type] (v: Ptr, i: I64): A
+extern def Nx.tvFree(v: Ptr): Unit
+// the token vector the parser reads (nx/parse.srs Nx.parse): token i (the last one past the end), and the count
+extern def Nx.tsBind(v: Ptr): Unit
+extern def Nx.tsAt [A: Type] (i: I64): A
+extern def Nx.tsLen(): I64
 // <STRING> run ([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})+ and <IND_STRING> run ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i;
 // no backslash, CR or NUL in [i, e) (unescapeStr returns the bytes as they are); a NUL in [i, e)
 extern def Nx.lxStrRun(s: Str, i: I64): I64
