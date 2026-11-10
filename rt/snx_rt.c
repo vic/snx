@@ -137,3 +137,11 @@ __attribute__((constructor)) static void nx_big_stack(int argc, char** argv) {
 void* Nx__cell(void* v) { void** c = nx_words(1); *c = v; return c; }
 void* Nx__get(void** c) { return *c; }
 int64_t Nx__put(void** c, void* v) { *c = v; return 0; }
+
+// a double as std::ostream prints it by default (precision 6, %g): print-ambiguous.cc:93-95
+srs_str Nx__floatShow(int64_t bits) {
+  double d; memcpy(&d, &bits, sizeof d);
+  char buf[64]; int n = snprintf(buf, sizeof buf, "%g", d);
+  uint8_t* p = nx_alloc(n); memcpy(p, buf, (size_t)n);
+  return (srs_str){p, n};
+}

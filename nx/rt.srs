@@ -5,3 +5,4 @@ extern def Nx.floatBits(s: Str): I64
 extern def Nx.intOverflows(s: Str): Bool
 extern def Nx.intValue(s: Str): I64
 extern def Nx.hex64(v: I64): Str
+extern def Nx.floatShow(bits: I64): Str
