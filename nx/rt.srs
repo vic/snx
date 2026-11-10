@@ -37,6 +37,11 @@ extern def Nx.floatFixed(bits: I64): Str
 extern def Nx.sbNew(): Ptr
 extern def Nx.sbAdd(b: Ptr, s: Str): Unit
 extern def Nx.sbGet(b: Ptr): Str
+extern def Nx.sbScratch(): Ptr
+extern def Nx.sbView(b: Ptr): Str
+// an ATerm string: sbAddQ quoted as it is, sbAddEsc quoted with " \ newline CR tab escaped
+extern def Nx.sbAddQ(b: Ptr, s: Str): Unit
+extern def Nx.sbAddEsc(b: Ptr, s: Str): Unit
 extern def Nx.escStr(s: Str): Str
 extern def Nx.readFile(path: Str): Str
 extern def Nx.isDir(path: Str): Bool

@@ -265,12 +265,23 @@ srs_str Nx__floatFixed(int64_t bits) { return nx_fmt("%f", nx_d(bits)); }
 // string builder
 typedef struct { uint8_t* p; int64_t n, cap; } nx_sb;
 void* Nx__sbNew(void) { nx_sb* b = calloc(1, sizeof *b); return b; }
+// room for k more bytes in b
+static void nx_sbRoom(nx_sb* b, int64_t k) {
+  if (b->n + k <= b->cap) return;
+  int64_t cap = b->cap ? b->cap : 64; while (cap < b->n + k) cap *= 2;
+  b->p = realloc(b->p, (size_t)cap); if (!b->p) { fputs("snx: out of memory\n", stderr); exit(70); } b->cap = cap;
+}
 int64_t Nx__sbAdd(nx_sb* b, srs_str s) {
-  if (b->n + s.n > b->cap) { int64_t cap = b->cap ? b->cap : 64; while (cap < b->n + s.n) cap *= 2; b->p = realloc(b->p, (size_t)cap); if (!b->p) { fputs("snx: out of memory\n", stderr); exit(70); } b->cap = cap; }
+  nx_sbRoom(b, s.n);
   memcpy(b->p + b->n, s.p, (size_t)s.n); b->n += s.n;
   return 0;
 }
 srs_str Nx__sbGet(nx_sb* b) { uint8_t* p = nx_alloc(b->n); memcpy(p, b->p, (size_t)b->n); return (srs_str){p, b->n}; }
+// the one reusable builder (snx is single-threaded), emptied on each call: one user at a time
+static nx_sb nx_scratch;
+void* Nx__sbScratch(void) { nx_scratch.n = 0; return &nx_scratch; }
+// the bytes of b without a copy, valid until b is next changed
+srs_str Nx__sbView(nx_sb* b) { return (srs_str){b->p, b->n}; }
 
 // s quoted as print.cc:32-62 printLiteralString: \" \\ \n \r \t \${, all else verbatim
 srs_str Nx__escStr(srs_str s) {
@@ -339,4 +350,25 @@ srs_str Nx__attrName(srs_str s) {
   if (ok) { uint8_t c = s.p[0]; if ((c >= '0' && c <= '9') || c == '-' || c == '\'') ok = false; }
   for (int64_t i = 0; ok && i < s.n; i++) { uint8_t c = s.p[i]; if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '\'')) ok = false; }
   return ok ? s : Nx__escStr(s);
+}
+
+// ATerm strings (derivations.cc): printUnquotedString = s in quotes; printString also escapes " \ newline CR tab
+int64_t Nx__sbAddQ(nx_sb* b, srs_str s) {
+  nx_sbRoom(b, s.n + 2);
+  b->p[b->n] = '"'; memcpy(b->p + b->n + 1, s.p, (size_t)s.n); b->p[b->n + 1 + s.n] = '"'; b->n += s.n + 2;
+  return 0;
+}
+int64_t Nx__sbAddEsc(nx_sb* b, srs_str s) {
+  nx_sbRoom(b, 2 * s.n + 2);
+  uint8_t* o = b->p + b->n; *o++ = '"';
+  for (int64_t i = 0; i < s.n; i++) {
+    uint8_t c = s.p[i];
+    if (c == '"' || c == '\\') { *o++ = '\\'; *o++ = c; }
+    else if (c == '\n') { *o++ = '\\'; *o++ = 'n'; }
+    else if (c == '\r') { *o++ = '\\'; *o++ = 'r'; }
+    else if (c == '\t') { *o++ = '\\'; *o++ = 't'; }
+    else *o++ = c;
+  }
+  *o++ = '"'; b->n = o - b->p;
+  return 0;
 }

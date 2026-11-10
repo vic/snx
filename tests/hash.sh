@@ -20,6 +20,13 @@ for f in empty abc mil; do
     t "${algos[$i]} $f" "$want" "$(timeout 2 "$OUT/hashtest" hash $i "$OUT/$f")"
   done
 done
+# sha256 on both block paths (SHA extensions when the CPU has them, and the portable one), lengths around a block
+for n in 55 56 63 64 65 119 120 128 1000; do head -c $n "$OUT/mil" > "$OUT/len$n"; done
+for f in empty abc mil len55 len56 len63 len64 len65 len119 len120 len128 len1000; do
+  want=$(sha256sum < "$OUT/$f" | cut -d' ' -f1)
+  t "sha256 $f" "$want" "$(timeout 2 "$OUT/hashtest" hash 2 "$OUT/$f")"
+  t "sha256 portable $f" "$want" "$(SNX_SHA_PORTABLE=1 timeout 2 "$OUT/hashtest" hash 2 "$OUT/$f")"
+done
 t "sha256 abc FIPS" ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad "$(timeout 2 "$OUT/hashtest" hash 2 "$OUT/abc")"
 for f in empty abc; do
   hex=$(sha256sum < "$OUT/$f" | cut -d' ' -f1); printf "$(printf %s "$hex" | sed 's/../\\x&/g')" > "$OUT/raw"

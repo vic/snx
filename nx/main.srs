@@ -58,11 +58,11 @@ def Nx.answerNar(src: Str): I64 =
 def Nx.answerDrv(path: Str, src: Str): I64 =
   Nx.drvParse(src, Nx.drvFileName(path)) match
     case Nx.DrvOk(d) =>
-      val aterm = Nx.drvUnparse(d, false)
+      val sha = Nx.drvHash(d)
       Console.print("ok ")
-      Console.print(Nx.drvTextPath(d, aterm))
+      Console.print(Nx.drvTextPath(d, sha))
       Console.print(" ")
-      Console.print(Nx.sha256Hex(aterm))
+      Console.print(Nx.b16(sha))
       Console.print("\n")
       0
     case Nx.DrvBad =>

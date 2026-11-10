@@ -115,6 +115,69 @@ static void sha256_block(Hctx* c, const uint8_t* p) {
   for (int i = 0; i < 8; i++) c->h[i] = (uint32_t)(c->h[i] + v[i]);
 }
 
+#if defined(__x86_64__)
+#include <immintrin.h>
+#include <cpuid.h>
+static uint32_t K256[64];
+
+// nb SHA-256 blocks with the x86 SHA extensions; state is a..h. Four rounds a step: the state as ABEF and CDGH, the
+// schedule in four registers W[g-4..g-1] (sha256msg1 adds sigma0, alignr brings W[t-7], sha256msg2 adds sigma1).
+__attribute__((target("sha,sse4.1")))
+static void sha256_ni(uint32_t state[8], const uint8_t* p, size_t nb) {
+  const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
+  __m128i t = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i*)&state[0]), 0xB1);
+  __m128i s1 = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i*)&state[4]), 0x1B);
+  __m128i s0 = _mm_alignr_epi8(t, s1, 8);
+  s1 = _mm_blend_epi16(s1, t, 0xF0);
+  for (; nb; nb--, p += 64) {
+    __m128i abef = s0, cdgh = s1, w[4];
+    for (int g = 0; g < 16; g++) {
+      __m128i m;
+      if (g < 4) m = w[g] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 16 * g)), mask);
+      else {
+        __m128i x = _mm_sha256msg1_epu32(w[g & 3], w[(g + 1) & 3]);
+        x = _mm_add_epi32(x, _mm_alignr_epi8(w[(g + 3) & 3], w[(g + 2) & 3], 4));
+        m = w[g & 3] = _mm_sha256msg2_epu32(x, w[(g + 3) & 3]);
+      }
+      m = _mm_add_epi32(m, _mm_loadu_si128((const __m128i*)&K256[4 * g]));
+      s1 = _mm_sha256rnds2_epu32(s1, s0, m);
+      s0 = _mm_sha256rnds2_epu32(s0, s1, _mm_shuffle_epi32(m, 0x0E));
+    }
+    s0 = _mm_add_epi32(s0, abef);
+    s1 = _mm_add_epi32(s1, cdgh);
+  }
+  t = _mm_shuffle_epi32(s0, 0x1B);
+  s1 = _mm_shuffle_epi32(s1, 0xB1);
+  _mm_storeu_si128((__m128i*)&state[0], _mm_blend_epi16(t, s1, 0xF0));
+  _mm_storeu_si128((__m128i*)&state[4], _mm_alignr_epi8(s1, t, 8));
+}
+
+// the CPU has SHA, SSSE3 and SSE4.1, and SNX_SHA_PORTABLE (set for the known-answer test of the portable path) is unset
+static bool sha_ni(void) {
+  static int ok = -1;
+  if (ok < 0) {
+    unsigned a, b, c, d, c1 = 0;
+    ok = !getenv("SNX_SHA_PORTABLE") && __get_cpuid(1, &a, &b, &c1, &d) && (c1 >> 9 & 1) && (c1 >> 19 & 1)
+      && __get_cpuid_count(7, 0, &a, &b, &c, &d) && (b >> 29 & 1);
+    for (int i = 0; i < 64; i++) K256[i] = (uint32_t)(K512[i] >> 32);
+  }
+  return ok;
+}
+#endif
+
+static void sha256_blocks(Hctx* c, const uint8_t* p, size_t nb) {
+#if defined(__x86_64__)
+  if (sha_ni()) {
+    uint32_t s[8];
+    for (int i = 0; i < 8; i++) s[i] = (uint32_t)c->h[i];
+    sha256_ni(s, p, nb);
+    for (int i = 0; i < 8; i++) c->h[i] = s[i];
+    return;
+  }
+#endif
+  for (; nb; nb--, p += 64) sha256_block(c, p);
+}
+
 static void sha512_block(Hctx* c, const uint8_t* p) {
   uint64_t w[80], v[8];
   for (int i = 0; i < 16; i++) { w[i] = 0; for (int j = 0; j < 8; j++) w[i] = w[i] << 8 | p[8*i+j]; }
@@ -154,7 +217,7 @@ static void h_block(Hctx* c, const uint8_t* p) {
   switch (c->algo) {
     case MD5: md5_block(c, p); break;
     case SHA1: sha1_block(c, p); break;
-    case SHA256: sha256_block(c, p); break;
+    case SHA256: sha256_blocks(c, p, 1); break;
     default: sha512_block(c, p); break;
   }
 }
@@ -168,6 +231,7 @@ static void h_update(Hctx* c, const uint8_t* p, size_t n) {
     if (c->blen < c->block) return;
     h_block(c, c->buf); c->blen = 0;
   }
+  if (c->algo == SHA256 && n >= 64) { size_t nb = n / 64; sha256_blocks(c, p, nb); p += 64 * nb; n -= 64 * nb; }
   for (; n >= c->block; p += c->block, n -= c->block) h_block(c, p);
   memcpy(c->buf, p, n); c->blen = n;
 }

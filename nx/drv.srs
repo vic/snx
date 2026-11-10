@@ -453,29 +453,7 @@ def Nx.drvParse(bytes: Str, name: Str): Nx.DrvResult =
 
 // ---- unparse ---------------------------------------------------------------------------------------------------
 
-// printUnquotedString
-def Nx.dwRaw(sb: Ptr, s: Str): Unit =
-  Nx.sbAdd(sb, "\"")
-  Nx.sbAdd(sb, s)
-  Nx.sbAdd(sb, "\"")
-
-def Nx.escapes(c: I64): Bool = c == '"' || c == '\\' || c == 10 || c == 13 || c == 9
-
-def Nx.escape(c: I64): Str = if c == 10 then "\\n" else if c == 13 then "\\r" else if c == 9 then "\\t" else Nx.cat("\\", Nx.byte(c))
-
-def Nx.dwEscRun(sb: Ptr, s: Str, b: I64, i: I64): Unit =
-  if i >= Str.len(s) then Nx.sbAdd(sb, Str.slice(s, b, i))
-  else if Nx.escapes(Str.at(s, i)) then
-    Nx.sbAdd(sb, Str.slice(s, b, i))
-    Nx.sbAdd(sb, Nx.escape(Str.at(s, i)))
-    Nx.dwEscRun(sb, s, i + 1, i + 1)
-  else Nx.dwEscRun(sb, s, b, i + 1)
-
-// printString: " \ newline CR tab escaped, every other byte as it is
-def Nx.dwEsc(sb: Ptr, s: Str): Unit =
-  Nx.sbAdd(sb, "\"")
-  Nx.dwEscRun(sb, s, 0, 0)
-  Nx.sbAdd(sb, "\"")
+// printUnquotedString and printString are Nx.sbAddQ and Nx.sbAddEsc (rt/snx_rt.c)
 
 def Nx.dwSep(sb: Ptr, first: Bool): Unit = if first then () else Nx.sbAdd(sb, ",")
 
@@ -484,29 +462,31 @@ def Nx.dwStrs(sb: Ptr, xs: Coll.List[Str], esc: Bool, first: Bool): Unit = xs ma
   case Coll.Nil => Nx.sbAdd(sb, "]")
   case Coll.Cons(h, t) =>
     Nx.dwSep(sb, first)
-    if esc then Nx.dwEsc(sb, h) else Nx.dwRaw(sb, h)
+    if esc then Nx.sbAddEsc(sb, h) else Nx.sbAddQ(sb, h)
     Nx.dwStrs(sb, t, esc, false)
 
-def Nx.dwOut3(sb: Ptr, a: Str, b: Str, c: Str): Unit =
+// ,"path","PREFIXALGO","hash"
+def Nx.dwOut3(sb: Ptr, path: Str, pre: Str, algo: Str, hash: Str): Unit =
   Nx.sbAdd(sb, ",")
-  Nx.dwRaw(sb, a)
-  Nx.sbAdd(sb, ",")
-  Nx.dwRaw(sb, b)
-  Nx.sbAdd(sb, ",")
-  Nx.dwRaw(sb, c)
+  Nx.sbAddQ(sb, path)
+  Nx.sbAdd(sb, ",\"")
+  Nx.sbAdd(sb, pre)
+  Nx.sbAdd(sb, algo)
+  Nx.sbAdd(sb, "\",")
+  Nx.sbAddQ(sb, hash)
 
 def Nx.dwOut(sb: Ptr, drvName: Str, o: Nx.DrvOutput, mask: Bool): Unit = o match
   case Nx.DrvOutput(name, kind) =>
     Nx.sbAdd(sb, "(")
-    Nx.dwRaw(sb, name)
+    Nx.sbAddQ(sb, name)
     kind match
-      case Nx.OutInput(p) => Nx.dwOut3(sb, if mask then "" else p, "", "")
+      case Nx.OutInput(p) => Nx.dwOut3(sb, if mask then "" else p, "", "", "")
       case Nx.OutFixed(m, a, dg) =>
         val p = if mask then "" else Nx.fixedPath(drvName, name, m, a, dg)
-        Nx.dwOut3(sb, p, Nx.cat(Nx.methodPrefix(m), Nx.algoName(a)), Nx.b16(dg))
-      case Nx.OutFloating(m, a) => Nx.dwOut3(sb, "", Nx.cat(Nx.methodPrefix(m), Nx.algoName(a)), "")
-      case Nx.OutDeferred => Nx.dwOut3(sb, "", "", "")
-      case Nx.OutImpure(m, a) => Nx.dwOut3(sb, "", Nx.cat(Nx.methodPrefix(m), Nx.algoName(a)), "impure")
+        Nx.dwOut3(sb, p, Nx.methodPrefix(m), Nx.algoName(a), Nx.b16(dg))
+      case Nx.OutFloating(m, a) => Nx.dwOut3(sb, "", Nx.methodPrefix(m), Nx.algoName(a), "")
+      case Nx.OutDeferred => Nx.dwOut3(sb, "", "", "", "")
+      case Nx.OutImpure(m, a) => Nx.dwOut3(sb, "", Nx.methodPrefix(m), Nx.algoName(a), "impure")
     Nx.sbAdd(sb, ")")
 
 def Nx.dwOuts(sb: Ptr, drvName: Str, xs: Coll.List[Nx.DrvOutput], mask: Bool, first: Bool): Unit = xs match
@@ -536,7 +516,7 @@ def Nx.dwKids(sb: Ptr, xs: Coll.List[Nx.DrvKid], first: Bool): Unit = xs match
     h match
       case Nx.DrvKid(name, node) =>
         Nx.sbAdd(sb, "(")
-        Nx.dwRaw(sb, name)
+        Nx.sbAddQ(sb, name)
         Nx.sbAdd(sb, ",")
         Nx.dwNode(sb, node)
         Nx.sbAdd(sb, ")")
@@ -549,7 +529,7 @@ def Nx.dwInputs(sb: Ptr, xs: Coll.List[Nx.DrvInput], first: Bool): Unit = xs mat
     h match
       case Nx.DrvInput(path, node) =>
         Nx.sbAdd(sb, "(")
-        Nx.dwRaw(sb, path)
+        Nx.sbAddQ(sb, path)
         Nx.sbAdd(sb, ",")
         Nx.dwNode(sb, node)
         Nx.sbAdd(sb, ")")
@@ -568,9 +548,9 @@ def Nx.dwEnv(sb: Ptr, xs: Coll.List[Nx.DrvEnv], outs: Coll.List[Nx.DrvOutput], m
     h match
       case Nx.DrvEnv(name, value) =>
         Nx.sbAdd(sb, "(")
-        Nx.dwEsc(sb, name)
+        Nx.sbAddEsc(sb, name)
         Nx.sbAdd(sb, ",")
-        Nx.dwEsc(sb, if mask && Nx.isOutput(name, outs) then "" else value)
+        Nx.sbAddEsc(sb, if mask && Nx.isOutput(name, outs) then "" else value)
         Nx.sbAdd(sb, ")")
     Nx.dwEnv(sb, t, outs, mask, false)
 
@@ -583,10 +563,10 @@ def Nx.hasDynDep(xs: Coll.List[Nx.DrvInput]): Bool = xs match
         case Coll.Nil => Nx.hasDynDep(t)
         case _ => true
 
-// Derivation::unparse (no actualInputs)
-def Nx.drvUnparse(d: Nx.Drv, maskOutputs: Bool): Str = d match
+// Derivation::unparse (no actualInputs), into the reusable builder; its bytes are valid until the builder's next use
+def Nx.drvWrite(d: Nx.Drv, maskOutputs: Bool): Ptr = d match
   case Nx.Drv(name, outs, ins, srcs, sys, builder, args, env) =>
-    val sb = Nx.sbNew()
+    val sb = Nx.sbScratch()
     Nx.sbAdd(sb, if Nx.hasDynDep(ins) then "DrvWithVersion(\"xp-dyn-drv\",[" else "Derive([")
     Nx.dwOuts(sb, name, outs, maskOutputs, true)
     Nx.sbAdd(sb, ",[")
@@ -594,15 +574,20 @@ def Nx.drvUnparse(d: Nx.Drv, maskOutputs: Bool): Str = d match
     Nx.sbAdd(sb, ",[")
     Nx.dwStrs(sb, srcs, false, true)
     Nx.sbAdd(sb, ",")
-    Nx.dwRaw(sb, sys)
+    Nx.sbAddQ(sb, sys)
     Nx.sbAdd(sb, ",")
-    Nx.dwEsc(sb, builder)
+    Nx.sbAddEsc(sb, builder)
     Nx.sbAdd(sb, ",[")
     Nx.dwStrs(sb, args, true, true)
     Nx.sbAdd(sb, ",[")
     Nx.dwEnv(sb, env, outs, maskOutputs, true)
     Nx.sbAdd(sb, ")")
-    Nx.sbGet(sb)
+    sb
+
+def Nx.drvUnparse(d: Nx.Drv, maskOutputs: Bool): Str = Nx.sbGet(Nx.drvWrite(d, maskOutputs))
+
+// the raw SHA-256 of the ATerm, hashed where it was written
+def Nx.drvHash(d: Nx.Drv): Str = Nx.hashBytes(2, Nx.sbView(Nx.drvWrite(d, false)))
 
 // ---- the path of a derivation ----------------------------------------------------------------------------------
 
@@ -629,18 +614,16 @@ def Nx.dwSrcRefs(sb: Ptr, srcs: Coll.List[Str]): Unit = srcs match
     Nx.sbAdd(sb, q)
     Nx.dwSrcRefs(sb, st)
 
-// computeStorePath given the ATerm: the text path of NAME.drv with the input derivations and sources as references
-def Nx.drvTextPath(d: Nx.Drv, aterm: Str): Str = d match
+// computeStorePath given the ATerm's raw SHA-256: the text path of NAME.drv with the input derivations and sources as
+// references
+def Nx.drvTextPath(d: Nx.Drv, sha: Str): Str = d match
   case Nx.Drv(name, _, ins, srcs, _, _, _, _) =>
-    val sb = Nx.sbNew()
+    val sb = Nx.sbScratch()
     Nx.sbAdd(sb, "text")
     Nx.dwRefs(sb, ins, srcs)
-    Nx.storePath(Nx.sbGet(sb), Nx.sha256Hex(aterm), Nx.cat(name, ".drv"))
+    Nx.storePath(Nx.sbGet(sb), Nx.b16(sha), Nx.cat(name, ".drv"))
 
-def Nx.drvPath(d: Nx.Drv): Str = Nx.drvTextPath(d, Nx.drvUnparse(d, false))
-
-// the raw SHA-256 of the ATerm
-def Nx.drvHash(d: Nx.Drv): Str = Nx.hashBytes(2, Nx.drvUnparse(d, false))
+def Nx.drvPath(d: Nx.Drv): Str = Nx.drvTextPath(d, Nx.drvHash(d))
 
 // ---- structured attrs: __json as nlohmann::json::parse reads it and dump() writes it ------------------------------
 
