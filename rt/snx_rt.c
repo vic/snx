@@ -157,8 +157,30 @@ int64_t Nx__release(uint8_t* m) {
 // ── symbols: open-addressing table from bytes to ids, ids in first-seen order
 static srs_str* g_names; static int64_t g_nsyms, g_names_cap;
 static int64_t* g_tab; static int64_t g_tab_cap;
-static uint64_t nx_hash(srs_str s) { uint64_t h = 1469598103934665603ull; for (int64_t i = 0; i < s.n; i++) { h ^= s.p[i]; h *= 1099511628211ull; } return h; }
-// a string's 64-bit FNV-1a (nx/parse.srs keys its attribute index by it; equal names are still compared)
+// words, not bytes: 8-byte loads over the string, the last one overlapping its end (4-byte loads below 8 bytes, the
+// bytes below 4), each multiplied in; the length is mixed in so overlaps of different lengths differ
+static inline uint64_t nx_mix(uint64_t h, uint64_t w) { h = (h ^ w) * 0x9e3779b97f4a7c15ull; return h ^ (h >> 29); }
+static uint64_t nx_hash(srs_str s) {
+  const uint8_t* p = s.p; int64_t n = s.n; uint64_t h = 0x243f6a8885a308d3ull ^ (uint64_t)n, w; uint32_t a, b;
+  if (n >= 8) {
+    for (int64_t i = 0; i + 8 < n; i += 8) { memcpy(&w, p + i, 8); h = nx_mix(h, w); }
+    memcpy(&w, p + n - 8, 8); h = nx_mix(h, w);
+  } else if (n >= 4) { memcpy(&a, p, 4); memcpy(&b, p + n - 4, 4); h = nx_mix(h, (uint64_t)a << 32 | b); }
+  else if (n > 0) h = nx_mix(h, (uint64_t)p[0] << 16 | (uint64_t)p[n >> 1] << 8 | p[n - 1]);
+  return nx_mix(h, 0);
+}
+// n bytes at a and b equal: words as nx_hash loads them (an overlapping last word), no call for a short name
+static inline bool nx_same(const uint8_t* a, const uint8_t* b, int64_t n) {
+  uint64_t x, y; uint32_t u, v;
+  if (n >= 8) {
+    for (int64_t i = 0; i + 8 < n; i += 8) { memcpy(&x, a + i, 8); memcpy(&y, b + i, 8); if (x != y) return false; }
+    memcpy(&x, a + n - 8, 8); memcpy(&y, b + n - 8, 8); return x == y;
+  }
+  if (n >= 4) { memcpy(&u, a, 4); memcpy(&v, b, 4); if (u != v) return false; memcpy(&u, a + n - 4, 4); memcpy(&v, b + n - 4, 4); return u == v; }
+  for (int64_t i = 0; i < n; i++) if (a[i] != b[i]) return false;
+  return true;
+}
+// a string's 64-bit hash (nx/parse.srs keys its attribute index by it; equal names are still compared)
 int64_t Nx__strKey(srs_str s) { return (int64_t)nx_hash(s); }
 static void nx_tab_grow(void) {
   int64_t cap = g_tab_cap ? g_tab_cap * 2 : 4096;
@@ -171,7 +193,7 @@ static void nx_tab_grow(void) {
 int64_t Nx__intern(srs_str s) {
   if (2 * (g_nsyms + 1) > g_tab_cap) nx_tab_grow();
   uint64_t j = nx_hash(s) & (uint64_t)(g_tab_cap - 1);
-  for (; g_tab[j] >= 0; j = (j + 1) & (uint64_t)(g_tab_cap - 1)) { srs_str o = g_names[g_tab[j]]; if (o.n == s.n && memcmp(o.p, s.p, (size_t)s.n) == 0) return g_tab[j]; }
+  for (; g_tab[j] >= 0; j = (j + 1) & (uint64_t)(g_tab_cap - 1)) { srs_str o = g_names[g_tab[j]]; if (o.n == s.n && nx_same(o.p, s.p, s.n)) return g_tab[j]; }
   if (g_nsyms == g_names_cap) { g_names_cap = g_names_cap ? g_names_cap * 2 : 4096; g_names = realloc(g_names, (size_t)g_names_cap * sizeof *g_names); if (!g_names) { fputs("snx: out of memory\n", stderr); exit(70); } }
   uint8_t* copy = nx_alloc(s.n); memcpy(copy, s.p, (size_t)s.n);
   g_names[g_nsyms] = (srs_str){copy, s.n};
@@ -704,7 +726,7 @@ void* Nx__atNew(void) { nx_atab* t = calloc(1, sizeof *t); if (!t) { fputs("snx:
 int64_t Nx__atFreeAll(void) { while (g_atabs) { nx_atab* t = g_atabs; g_atabs = t->next; free(t->k); free(t->v); free(t); } return 0; }
 static int64_t nx_at_slot(nx_atab* t, srs_str n) {
   uint64_t m = (uint64_t)t->cap - 1, j = nx_hash(n) & m;
-  for (; t->v[j]; j = (j + 1) & m) if (t->k[j].n == n.n && memcmp(t->k[j].p, n.p, (size_t)n.n) == 0) return (int64_t)j;
+  for (; t->v[j]; j = (j + 1) & m) if (t->k[j].n == n.n && nx_same(t->k[j].p, n.p, n.n)) return (int64_t)j;
   return (int64_t)j;
 }
 void* Nx__atFind(nx_atab* t, srs_str n) { return t->cap ? t->v[nx_at_slot(t, n)] : 0; }
