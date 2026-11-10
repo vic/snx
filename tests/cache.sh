@@ -49,6 +49,11 @@ for e in "$C"/*; do printf X | dd of="$e" bs=1 seek=60 conv=notrunc 2>/dev/null;
 run corrupt     '"b2 c3 d v2"'    miss  "$f"
 for e in "$C"/*; do head -c 30 "$e" > "$e.t" && mv "$e.t" "$e"; done
 run truncated   '"b2 c3 d v2"'    miss  "$f"
+# the stack limit is in the key: a replay under a smaller stack (SNX_STACK_SET=1: no re-exec) must not take the default-stack hit
+run stack-default '"b2 c3 d v2"'  hit   "$f"
+(ulimit -s 8192; export SNX_STACK_SET=1; run stack-small '"b2 c3 d v2"' miss "$f"; exit $fail) || fail=1
+(ulimit -s 8192; export SNX_STACK_SET=1; run stack-small-warm '"b2 c3 d v2"' hit "$f"; exit $fail) || fail=1
+run stack-default-warm '"b2 c3 d v2"' hit "$f"
 echo 'builtins.currentTime > 0' > "$t/time.nix"
 run time        'true'            skip  "$t/time.nix"
 run time-again  'true'            skip  "$t/time.nix"

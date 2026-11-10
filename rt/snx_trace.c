@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 
 typedef struct { const uint8_t* p; int64_t n; } srs_str;
 
@@ -376,7 +377,7 @@ static bool make_key(void) {
   if (el <= 0 || (size_t)el >= sizeof exe || stat("/proc/self/exe", &es) != 0) { free(b.p); return false; }
   int64_t et[5];
   st_tuple(&es, et);
-  b_add(&b, "snx-cache-3", 12); b_u64(&b, (uint64_t)el); b_add(&b, exe, (size_t)el);
+  b_add(&b, "snx-cache-4", 12); b_u64(&b, (uint64_t)el); b_add(&b, exe, (size_t)el);
   for (int j = 0; j < 4; j++) b_u64(&b, (uint64_t)et[j]);
   int64_t ac = rt_argc();
   b_u64(&b, (uint64_t)ac);
@@ -384,7 +385,9 @@ static bool make_key(void) {
   char cwd[4096];
   if (!getcwd(cwd, sizeof cwd)) { free(b.p); return false; }
   b_u64(&b, strlen(cwd)); b_add(&b, cwd, strlen(cwd));
-  static const char* env[] = {"SNX_PROBE", "SNX_RELSEQ", "SNX_SHA_PORTABLE", "SNX_CACHE_STORE", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"};
+  struct rlimit rl;  // the stack limit the evaluator runs under (after the big-stack re-exec): a smaller one can crash what a hit answers
+  b_u64(&b, getrlimit(RLIMIT_STACK, &rl) == 0 ? (uint64_t)rl.rlim_cur : 0);
+  static const char* env[] = {"SNX_PROBE", "SNX_RELSEQ", "SNX_SHA_PORTABLE", "SNX_CACHE_STORE", "SNX_STACK_SET", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"};
   for (size_t i = 0; i < sizeof env / sizeof *env; i++) {
     const char* v = getenv(env[i]);
     b_u64(&b, v ? strlen(v) + 1 : 0); if (v) b_add(&b, v, strlen(v));
