@@ -6,3 +6,40 @@ extern def Nx.intOverflows(s: Str): Bool
 extern def Nx.intValue(s: Str): I64
 extern def Nx.hex64(v: I64): Str
 extern def Nx.floatShow(bits: I64): Str
+// eval core services (rt/snx_rt.c "eval core services")
+extern def Nx.globals(): Ptr
+extern def Nx.ptrEq(a: Ptr, b: Ptr): Bool
+extern def Nx.slots(f: Ptr): Ptr
+extern def Nx.sortPairs(keys: Ptr, vals: Ptr, n: I64): Unit
+extern def Nx.byName(syms: Ptr, n: I64): Ptr
+extern def Nx.strLess(a: Str, b: Str): Bool
+extern def Nx.seenNew(): Ptr
+extern def Nx.seenAdd(set: Ptr, p: Ptr): Bool
+extern def Nx.iadd(a: I64, b: I64): I64
+extern def Nx.isub(a: I64, b: I64): I64
+extern def Nx.imul(a: I64, b: I64): I64
+extern def Nx.addOv(a: I64, b: I64): Bool
+extern def Nx.subOv(a: I64, b: I64): Bool
+extern def Nx.mulOv(a: I64, b: I64): Bool
+extern def Nx.idiv(a: I64, b: I64): I64
+extern def Nx.fadd(a: I64, b: I64): I64
+extern def Nx.fsub(a: I64, b: I64): I64
+extern def Nx.fmul(a: I64, b: I64): I64
+extern def Nx.fdiv(a: I64, b: I64): I64
+extern def Nx.flt(a: I64, b: I64): Bool
+extern def Nx.feq(a: I64, b: I64): Bool
+extern def Nx.fOfInt(i: I64): I64
+extern def Nx.intStr(i: I64): Str
+extern def Nx.floatFixed(bits: I64): Str
+extern def Nx.sbNew(): Ptr
+extern def Nx.sbAdd(b: Ptr, s: Str): Unit
+extern def Nx.sbGet(b: Ptr): Str
+extern def Nx.escStr(s: Str): Str
+extern def Nx.readFile(path: Str): Str
+extern def Nx.isDir(path: Str): Bool
+extern def Nx.getEnv(name: Str): Str
+extern def Nx.eprint(s: Str): Unit
+extern def Nx.timeNow(): I64
+extern def Nx.canonPath(s: Str): Str
+extern def Nx.wordsFrom(a: Ptr, i: I64): Ptr
+extern def Nx.attrName(s: Str): Str

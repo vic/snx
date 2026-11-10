@@ -1,0 +1,1 @@
+[ (builtins.stringLength "abc") (builtins.substring 1 2 "abcd") (builtins.substring 2 (-1) "abcd") (builtins.concatStringsSep ", " [ "a" "b" ]) (builtins.typeOf [ ]) (builtins.typeOf 1.0) (builtins.isFunction map) ]

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # The nix-conformance adapter of snx (nix-conformance README.md "Writing an adapter").
-# SNX = the snx binary, default $XDG_RUNTIME_DIR/snx-build/snx.
+# SNX = the snx binary, default $XDG_RUNTIME_DIR/snx-build/snx. check and eval take the file as an absolute path.
 op=$1 file=$2
 shift 2
 snx=${SNX:-${XDG_RUNTIME_DIR:-/tmp}/snx-build/snx}
 case $op in
   parse) exec timeout 5 "$snx" parse "$file" ;;
   nar) exec timeout 5 "$snx" nar "$file" ;;
+  check) exec timeout 5 "$snx" check "$(realpath -s "$file")" ;;
+  eval) exec timeout 5 "$snx" eval "$(realpath -s "$file")" "$@" ;;
   *) exit 3 ;;
 esac

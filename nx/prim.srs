@@ -1,0 +1,748 @@
+// snx primops (primops.cc). A primop gets its arguments as cells (Nx.prim), forces what it needs and gives a value in
+// weak head normal form or the error. nx/base.srs registers each with its name and arity; a later wave adds a case
+// here, its line in Nx.prim and its registration.
+
+enum Nx.Prim:
+  case Nx.PTodo
+  case Nx.PTypeOf
+  case Nx.PIsNull
+  case Nx.PIsFunction
+  case Nx.PIsInt
+  case Nx.PIsFloat
+  case Nx.PIsString
+  case Nx.PIsBool
+  case Nx.PIsPath
+  case Nx.PIsAttrs
+  case Nx.PIsList
+  case Nx.PThrow
+  case Nx.PAbort
+  case Nx.PTryEval
+  case Nx.PSeq
+  case Nx.PDeepSeq
+  case Nx.PToString
+  case Nx.PImport
+  case Nx.PTrace
+  case Nx.PAdd
+  case Nx.PSub
+  case Nx.PMul
+  case Nx.PDiv
+  case Nx.PLessThan
+  case Nx.PMap
+  case Nx.PLength
+  case Nx.PElemAt
+  case Nx.PHead
+  case Nx.PTail
+  case Nx.PAttrNames
+  case Nx.PAttrValues
+  case Nx.PGetAttr
+  case Nx.PHasAttr
+  case Nx.PRemoveAttrs
+  case Nx.PListToAttrs
+  case Nx.PFilter
+  case Nx.PFoldl
+  case Nx.PGenList
+  case Nx.PConcatLists
+  case Nx.PConcatStringsSep
+  case Nx.PStringLength
+  case Nx.PSubstring
+  case Nx.PFunctionArgs
+  case Nx.PMapAttrs
+  case Nx.PIntersectAttrs
+  case Nx.PCatAttrs
+  case Nx.PElem
+  case Nx.PAll
+  case Nx.PAny
+  case Nx.PSort
+  case Nx.PConcatMap
+  case Nx.PAddErrorContext
+  case Nx.PGetEnv
+
+// the arithmetic primops
+enum Nx.Ar:
+  case Nx.ArAdd
+  case Nx.ArSub
+  case Nx.ArMul
+  case Nx.ArDiv
+
+// primop id applied to its cells a, b, c (those past its arity repeat the last)
+def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
+  val g = Nx.globals()
+  Nx.aget[Nx.Prim](Nx.aget[Ptr](g, Nx.gKinds()), id) match
+    case Nx.PTodo => Nx.todoErr(Nx.symName(Nx.ageti(Nx.aget[Ptr](g, Nx.gNames()), id)))
+    case Nx.PTypeOf => Nx.pTypeOf(Nx.force(a))
+    case Nx.PIsNull => Nx.pIs(Nx.force(a), "null")
+    case Nx.PIsFunction => Nx.pIs(Nx.force(a), "lambda")
+    case Nx.PIsInt => Nx.pIs(Nx.force(a), "int")
+    case Nx.PIsFloat => Nx.pIs(Nx.force(a), "float")
+    case Nx.PIsString => Nx.pIs(Nx.force(a), "string")
+    case Nx.PIsBool => Nx.pIs(Nx.force(a), "bool")
+    case Nx.PIsPath => Nx.pIs(Nx.force(a), "path")
+    case Nx.PIsAttrs => Nx.pIs(Nx.force(a), "set")
+    case Nx.PIsList => Nx.pIs(Nx.force(a), "list")
+    case Nx.PThrow => Nx.pThrow(Nx.KThrow, Nx.force(a))
+    case Nx.PAbort => Nx.pThrow(Nx.KAbort, Nx.force(a))
+    case Nx.PTryEval => Nx.pTryEval(a)
+    case Nx.PSeq =>
+      val x = Nx.force(a)
+      if Nx.isErr(x) then x else Nx.force(b)
+    case Nx.PDeepSeq =>
+      val x = Nx.deepForce(Nx.force(a), Nx.seenNew())
+      if Nx.isErr(x) then x else Nx.force(b)
+    case Nx.PToString => Nx.coerce(Nx.force(a), true, false)
+    case Nx.PImport => Nx.importVal(Nx.force(a))
+    case Nx.PTrace => Nx.pTrace(Nx.force(a), b)
+    case Nx.PAdd => Nx.arith(Nx.ArAdd, Nx.force(a), Nx.force(b))
+    case Nx.PSub => Nx.arith(Nx.ArSub, Nx.force(a), Nx.force(b))
+    case Nx.PMul => Nx.arith(Nx.ArMul, Nx.force(a), Nx.force(b))
+    case Nx.PDiv => Nx.arith(Nx.ArDiv, Nx.force(a), Nx.force(b))
+    case Nx.PLessThan => Nx.lessThan(Nx.force(a), Nx.force(b))
+    case Nx.PMap => Nx.pMap(a, Nx.force(b))
+    case Nx.PLength =>
+      val l = Nx.force(a)
+      l match
+        case Nx.VList(n, _) => Nx.VInt(n)
+        case _ => Nx.typeErr("a list", l)
+    case Nx.PElemAt => Nx.pElemAt(Nx.force(a), Nx.force(b))
+    case Nx.PHead => Nx.pElemAt(Nx.force(a), Nx.VInt(0))
+    case Nx.PTail => Nx.pTail(Nx.force(a))
+    case Nx.PAttrNames => Nx.pAttrNames(Nx.force(a), true)
+    case Nx.PAttrValues => Nx.pAttrNames(Nx.force(a), false)
+    case Nx.PGetAttr => Nx.pGetAttr(Nx.force(a), Nx.force(b), false)
+    case Nx.PHasAttr => Nx.pGetAttr(Nx.force(a), Nx.force(b), true)
+    case Nx.PRemoveAttrs => Nx.pRemoveAttrs(Nx.force(a), Nx.force(b))
+    case Nx.PListToAttrs => Nx.pListToAttrs(Nx.force(a))
+    case Nx.PFilter => Nx.pFilter(a, Nx.force(b))
+    case Nx.PFoldl => Nx.pFoldl(a, b, Nx.force(c))
+    case Nx.PGenList => Nx.pGenList(a, Nx.force(b))
+    case Nx.PConcatLists => Nx.pConcatLists(Nx.force(a))
+    case Nx.PConcatStringsSep => Nx.pConcatSep(Nx.force(a), Nx.force(b))
+    case Nx.PStringLength =>
+      val s = Nx.coerce(Nx.force(a), false, true)
+      s match
+        case Nx.VStr(t, _) => Nx.VInt(Str.len(t))
+        case _ => s
+    case Nx.PSubstring => Nx.pSubstring(Nx.force(a), Nx.force(b), c)
+    case Nx.PFunctionArgs => Nx.pFunctionArgs(Nx.force(a))
+    case Nx.PMapAttrs => Nx.pMapAttrs(a, Nx.force(b))
+    case Nx.PIntersectAttrs => Nx.pIntersect(Nx.force(a), Nx.force(b))
+    case Nx.PCatAttrs => Nx.pCatAttrs(Nx.force(a), Nx.force(b))
+    case Nx.PElem => Nx.pElem(a, Nx.force(b))
+    case Nx.PAll => Nx.pAnyAll(a, Nx.force(b), false)
+    case Nx.PAny => Nx.pAnyAll(a, Nx.force(b), true)
+    case Nx.PSort => Nx.pSort(a, Nx.force(b))
+    case Nx.PConcatMap => Nx.pConcatMap(a, Nx.force(b))
+    case Nx.PAddErrorContext => Nx.force(b)
+    case Nx.PGetEnv =>
+      val s = Nx.force(a)
+      s match
+        case Nx.VStr(t, _) => Nx.VStr(Nx.getEnv(t), Coll.Nil)
+        case _ => Nx.typeErr("a string", s)
+
+// ---- types ----------------------------------------------------------------------------------------------------
+
+// prim_typeOf (primops.cc:572)
+def Nx.typeName(v: Nx.Val): Str = v match
+  case Nx.VInt(_) => "int"
+  case Nx.VFloat(_) => "float"
+  case Nx.VBool(_) => "bool"
+  case Nx.VNull => "null"
+  case Nx.VStr(_, _) => "string"
+  case Nx.VPath(_) => "path"
+  case Nx.VAttrs(_, _, _) => "set"
+  case Nx.VList(_, _) => "list"
+  case _ => "lambda"
+
+def Nx.pTypeOf(v: Nx.Val): Nx.Val = if Nx.isErr(v) then v else Nx.VStr(Nx.typeName(v), Coll.Nil)
+
+def Nx.pIs(v: Nx.Val, t: Str): Nx.Val = if Nx.isErr(v) then v else Nx.VBool(Str.eq(Nx.typeName(v), t))
+
+def Nx.isFunction(v: Nx.Val): Bool = Str.eq(Nx.typeName(v), "lambda")
+
+// ---- errors ---------------------------------------------------------------------------------------------------
+
+// throw and abort coerce their message to a string (prim_throw, prim_abort)
+def Nx.pThrow(k: Nx.ErrKind, v: Nx.Val): Nx.Val =
+  val s = Nx.coerce(v, false, true)
+  s match
+    case Nx.VStr(t, _) => Nx.VErr(k, t)
+    case _ => s
+
+// prim_tryEval: a thrown error or a failed assertion is { success = false; value = false; }, other errors pass
+def Nx.pTryEval(a: Ptr): Nx.Val =
+  val v = Nx.force(a)
+  v match
+    case Nx.VErr(k, _) => k match
+      case Nx.KThrow => Nx.tryRes(false, Nx.cell(Nx.VBool(false)))
+      case Nx.KAssert => Nx.tryRes(false, Nx.cell(Nx.VBool(false)))
+      case _ => v
+    case _ => Nx.tryRes(true, a)
+
+def Nx.tryRes(ok: Bool, value: Ptr): Nx.Val =
+  Nx.attrsOf(Coll.Cons(Nx.pair("success", Nx.VBool(ok)), Coll.Cons(Nx.Pair(Nx.intern("value"), value), Coll.Nil)))
+
+def Nx.pTrace(x: Nx.Val, b: Ptr): Nx.Val = x match
+  case Nx.VErr(_, _) => x
+  case Nx.VStr(s, _) =>
+    Nx.eprint(Nx.cat(Nx.cat("trace: ", s), "\n"))
+    Nx.force(b)
+  case _ =>
+    Nx.eprint(Nx.cat(Nx.cat("trace: «", Nx.showType(x)), "»\n"))
+    Nx.force(b)
+
+// ---- numbers (primops.cc:4270-4385) ---------------------------------------------------------------------------
+
+def Nx.arith(op: Nx.Ar, x: Nx.Val, y: Nx.Val): Nx.Val =
+  if Nx.isErr(x) then x
+  else if Nx.isErr(y) then y
+  else x match
+    case Nx.VInt(a) => y match
+      case Nx.VInt(b) => Nx.intOp(op, a, b)
+      case Nx.VFloat(b) => Nx.floatOp(op, Nx.fOfInt(a), b)
+      case _ => Nx.typeErr("an integer or a float", y)
+    case Nx.VFloat(a) => y match
+      case Nx.VInt(b) => Nx.floatOp(op, a, Nx.fOfInt(b))
+      case Nx.VFloat(b) => Nx.floatOp(op, a, b)
+      case _ => Nx.typeErr("an integer or a float", y)
+    case _ => Nx.typeErr("an integer or a float", x)
+
+def Nx.overflow(): Nx.Val = Nx.VErr(Nx.KOther, "integer overflow")
+
+def Nx.intOp(op: Nx.Ar, a: I64, b: I64): Nx.Val = op match
+  case Nx.ArAdd => if Nx.addOv(a, b) then Nx.overflow() else Nx.VInt(Nx.iadd(a, b))
+  case Nx.ArSub => if Nx.subOv(a, b) then Nx.overflow() else Nx.VInt(Nx.isub(a, b))
+  case Nx.ArMul => if Nx.mulOv(a, b) then Nx.overflow() else Nx.VInt(Nx.imul(a, b))
+  case Nx.ArDiv =>
+    if b == 0 then Nx.VErr(Nx.KOther, "division by zero")
+    else if b == 0 - 1 && Nx.subOv(0, a) then Nx.overflow()
+    else Nx.VInt(Nx.idiv(a, b))
+
+def Nx.floatOp(op: Nx.Ar, a: I64, b: I64): Nx.Val = op match
+  case Nx.ArAdd => Nx.VFloat(Nx.fadd(a, b))
+  case Nx.ArSub => Nx.VFloat(Nx.fsub(a, b))
+  case Nx.ArMul => Nx.VFloat(Nx.fmul(a, b))
+  case Nx.ArDiv => if Nx.feq(b, Nx.fOfInt(0)) then Nx.VErr(Nx.KOther, "division by zero") else Nx.VFloat(Nx.fdiv(a, b))
+
+// ---- lists ----------------------------------------------------------------------------------------------------
+
+// f applied to the cells of a frame: (slot 1) (slot 2) .. (slot n)
+def Nx.appCode(nargs: I64): Nx.Code =
+  val args = Nx.arrNew(nargs)
+  Nx.appArgs(args, 0, nargs)
+  Nx.CCall(Nx.CLocal(0, 1), nargs, args)
+
+def Nx.appArgs(args: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.aset[Nx.Code](args, i, Nx.CLocal(0, i + 2))
+    Nx.appArgs(args, i + 1, n)
+  else ()
+
+// a thunk of f x
+def Nx.app1(code: Nx.Code, f: Ptr, x: Ptr): Ptr =
+  val fr = Nx.frame(Nx.noFrame(), 2)
+  Nx.aset[Ptr](fr, 1, f)
+  Nx.aset[Ptr](fr, 2, x)
+  Nx.cell(Nx.VPending(fr, code))
+
+// forceFunction: a function or a set with __functor passes (Nx.VNull), else the error
+def Nx.fnErr(f: Nx.Val): Nx.Val = f match
+  case Nx.VAttrs(n, syms, _) => if Nx.findSym(syms, n, Nx.intern("__functor")) < n then Nx.VNull else Nx.typeErr("a function", f)
+  case _ => if Nx.isFunction(f) then Nx.VNull else Nx.typeErr("a function", f)
+
+// prim_map: the list of thunks f x (the function is forced when the list is not empty)
+def Nx.pMap(a: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    if n == 0 then l
+    else
+      val e = Nx.fnErr(Nx.force(a))
+      if Nx.isErr(e) then e else Nx.VList(n, Nx.mapCells(Nx.appCode(1), a, xs, Nx.arrNew(n), 0, n))
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.mapCells(code: Nx.Code, f: Ptr, xs: Ptr, out: Ptr, i: I64, n: I64): Ptr =
+  if i < n then
+    Nx.aset[Ptr](out, i, Nx.app1(code, f, Nx.aget[Ptr](xs, i)))
+    Nx.mapCells(code, f, xs, out, i + 1, n)
+  else out
+
+def Nx.pGenList(a: Ptr, nv: Nx.Val): Nx.Val = nv match
+  case Nx.VInt(n) =>
+    if n < 0 then Nx.VErr(Nx.KOther, "cannot create a list of negative size")
+    else
+      val e = Nx.fnErr(Nx.force(a))
+      if Nx.isErr(e) then e else Nx.VList(n, Nx.genCells(Nx.appCode(1), a, Nx.arrNew(n), 0, n))
+  case _ => Nx.typeErr("an integer", nv)
+
+def Nx.genCells(code: Nx.Code, f: Ptr, out: Ptr, i: I64, n: I64): Ptr =
+  if i < n then
+    Nx.aset[Ptr](out, i, Nx.app1(code, f, Nx.cell(Nx.VInt(i))))
+    Nx.genCells(code, f, out, i + 1, n)
+  else out
+
+def Nx.pElemAt(l: Nx.Val, iv: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) => iv match
+    case Nx.VInt(i) => if i < 0 || i >= n then Nx.VErr(Nx.KOther, "list index out of bounds") else Nx.force(Nx.aget[Ptr](xs, i))
+    case _ => Nx.typeErr("an integer", iv)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.pTail(l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) => if n == 0 then Nx.VErr(Nx.KOther, "'tail' called on an empty list") else Nx.VList(n - 1, Nx.wordsFrom(xs, 1))
+  case _ => Nx.typeErr("a list", l)
+
+// the result of calling f on x, a Nx.VBool or the error
+def Nx.callBool(f: Nx.Val, x: Ptr): Nx.Val =
+  val r = Nx.apply(f, x)
+  r match
+    case Nx.VBool(_) => r
+    case _ => Nx.typeErr("a Boolean", r)
+
+def Nx.pFilter(a: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    if n == 0 then l
+    else Nx.filterGo(Nx.force(a), xs, 0, n, Nx.arrNew(n), 0)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.filterGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, out: Ptr, k: I64): Nx.Val =
+  if i == n then Nx.VList(k, out)
+  else
+    val x = Nx.aget[Ptr](xs, i)
+    val r = Nx.callBool(f, x)
+    r match
+      case Nx.VBool(t) =>
+        if t then
+          Nx.aset[Ptr](out, k, x)
+          Nx.filterGo(f, xs, i + 1, n, out, k + 1)
+        else Nx.filterGo(f, xs, i + 1, n, out, k)
+      case _ => r
+
+// prim_foldlStrict: each step's result is forced
+def Nx.pFoldl(op: Ptr, nul: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) => if n == 0 then Nx.force(nul) else Nx.foldGo(Nx.force(op), nul, xs, 0, n)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.foldGo(f: Nx.Val, acc: Ptr, xs: Ptr, i: I64, n: I64): Nx.Val =
+  val r = Nx.apply(Nx.apply(f, acc), Nx.aget[Ptr](xs, i))
+  if Nx.isErr(r) || i + 1 == n then r else Nx.foldGo(f, Nx.cell(r), xs, i + 1, n)
+
+def Nx.pAnyAll(a: Ptr, l: Nx.Val, any: Bool): Nx.Val = l match
+  case Nx.VList(n, xs) => if n == 0 then Nx.VBool(!any) else Nx.anyGo(Nx.force(a), xs, 0, n, any)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.anyGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, any: Bool): Nx.Val =
+  if i == n then Nx.VBool(!any)
+  else
+    val r = Nx.callBool(f, Nx.aget[Ptr](xs, i))
+    r match
+      case Nx.VBool(t) => if (t && any) || (!t && !any) then r else Nx.anyGo(f, xs, i + 1, n, any)
+      case _ => r
+
+def Nx.pElem(x: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) => Nx.elemGo(x, xs, 0, n)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.elemGo(x: Ptr, xs: Ptr, i: I64, n: I64): Nx.Val =
+  if i == n then Nx.VBool(false)
+  else
+    val r = Nx.eqCells(x, Nx.aget[Ptr](xs, i))
+    r match
+      case Nx.VBool(t) => if t then r else Nx.elemGo(x, xs, i + 1, n)
+      case _ => r
+
+// the lists of l, each forced: their total length, or the error
+def Nx.listsLen(xs: Ptr, i: I64, n: I64, acc: I64): Nx.Val =
+  if i == n then Nx.VInt(acc)
+  else
+    val v = Nx.force(Nx.aget[Ptr](xs, i))
+    v match
+      case Nx.VList(m, _) => Nx.listsLen(xs, i + 1, n, acc + m)
+      case _ => Nx.typeErr("a list", v)
+
+// the forced lists of xs copied one after another into out
+def Nx.listsCopy(xs: Ptr, i: I64, n: I64, out: Ptr, k: I64): Unit =
+  if i < n then
+    Nx.get(Nx.aget[Ptr](xs, i)) match
+      case Nx.VList(m, ys) =>
+        Nx.copyCells(ys, 0, out, k, m)
+        Nx.listsCopy(xs, i + 1, n, out, k + m)
+      case _ => Nx.listsCopy(xs, i + 1, n, out, k)
+  else ()
+
+def Nx.pConcatLists(l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    val t = Nx.listsLen(xs, 0, n, 0)
+    t match
+      case Nx.VInt(m) =>
+        val out = Nx.arrNew(m)
+        Nx.listsCopy(xs, 0, n, out, 0)
+        Nx.VList(m, out)
+      case _ => t
+  case _ => Nx.typeErr("a list", l)
+
+// prim_concatMap: f on each element, the results concatenated
+def Nx.pConcatMap(a: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    if n == 0 then l
+    else
+      val f = Nx.force(a)
+      val rs = Nx.arrNew(n)
+      val e = Nx.concatMapGo(f, xs, rs, 0, n)
+      if Nx.isErr(e) then e else Nx.pConcatLists(Nx.VList(n, rs))
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.concatMapGo(f: Nx.Val, xs: Ptr, rs: Ptr, i: I64, n: I64): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val r = Nx.apply(f, Nx.aget[Ptr](xs, i))
+    r match
+      case Nx.VList(_, _) =>
+        Nx.aset[Ptr](rs, i, Nx.cell(r))
+        Nx.concatMapGo(f, xs, rs, i + 1, n)
+      case _ => Nx.typeErr("a list", r)
+
+// prim_sort: peeksort (libutil/include/nix/util/sort.hh), the comparator called on the same pairs in the same order
+// as Nix, since a comparator that throws or is no strict weak order shows the difference. err holds its first error;
+// after it every comparison is false and the result is dropped.
+def Nx.pSort(a: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    if n == 0 then l
+    else
+      val e = Nx.deepFirst(xs, 0, n)
+      if Nx.isErr(e) then e
+      else
+        val f = Nx.force(a)
+        val arr = Nx.arrNew(n)
+        Nx.copyCells(xs, 0, arr, 0, n)
+        val err = Nx.cell(Nx.fnErr(f))
+        if n == 2 then Nx.srtSort2(Nx.SortSt(f, arr, arr, err)) else Nx.srtPeek(Nx.SortSt(f, arr, Nx.arrNew(n), err), 0, n, 0, n)
+        val r = Nx.get(err)
+        if Nx.isErr(r) then r else Nx.VList(n, arr)
+  case _ => Nx.typeErr("a list", l)
+
+// every element forced (prim_sort forces them before sorting)
+def Nx.deepFirst(xs: Ptr, i: I64, n: I64): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val v = Nx.force(Nx.aget[Ptr](xs, i))
+    if Nx.isErr(v) then v else Nx.deepFirst(xs, i + 1, n)
+
+def Nx.srtLess(f: Nx.Val, x: Ptr, y: Ptr, err: Ptr): Bool =
+  if Nx.isErr(Nx.get(err)) then false
+  else
+    val r = Nx.callBool(Nx.apply(f, x), y)
+    r match
+      case Nx.VBool(t) => t
+      case _ =>
+        Nx.put(err, r)
+        false
+
+// the comparator, the array being sorted, the merge buffer, the error cell
+enum Nx.SortSt:
+  case Nx.SortSt(f: Nx.Val, arr: Ptr, buf: Ptr, err: Ptr)
+
+// comp(arr[i], arr[j]), or its negation (the weakly-increasing scans use std::not_fn(comp))
+def Nx.srtLt(s: Nx.SortSt, i: I64, j: I64, neg: Bool): Bool = s match
+  case Nx.SortSt(f, arr, _, err) =>
+    val r = Nx.srtLess(f, Nx.aget[Ptr](arr, i), Nx.aget[Ptr](arr, j), err)
+    if neg then !r else r
+
+def Nx.srtSwap(s: Nx.SortSt, i: I64, j: I64): Unit = s match
+  case Nx.SortSt(_, arr, _, _) =>
+    val x = Nx.aget[Ptr](arr, i)
+    Nx.aset[Ptr](arr, i, Nx.aget[Ptr](arr, j))
+    Nx.aset[Ptr](arr, j, x)
+
+def Nx.srtSort2(s: Nx.SortSt): Unit = if Nx.srtLt(s, 1, 0, false) then Nx.srtSwap(s, 0, 1) else ()
+
+def Nx.srtInsertion(s: Nx.SortSt, b: I64, cur: I64, e: I64): Unit =
+  if cur < e then
+    Nx.srtInsertOne(s, b, cur)
+    Nx.srtInsertion(s, b, cur + 1, e)
+  else ()
+
+def Nx.srtInsertOne(s: Nx.SortSt, b: I64, p: I64): Unit =
+  if p != b && Nx.srtLt(s, p, p - 1, false) then
+    Nx.srtSwap(s, p, p - 1)
+    Nx.srtInsertOne(s, b, p - 1)
+  else ()
+
+// strictlyDecreasingPrefix / Suffix (neg: weaklyIncreasing)
+def Nx.srtDecPrefix(s: Nx.SortSt, b: I64, e: I64, neg: Bool): I64 =
+  if b == e then b else if b + 1 != e && Nx.srtLt(s, b + 1, b, neg) then Nx.srtDecPrefix(s, b + 1, e, neg) else b + 1
+
+def Nx.srtDecSuffix(s: Nx.SortSt, b: I64, e: I64, neg: Bool): I64 =
+  if b == e then e else if e - 1 > b && Nx.srtLt(s, e - 1, e - 2, neg) then Nx.srtDecSuffix(s, b, e - 1, neg) else e - 1
+
+def Nx.srtReverse(s: Nx.SortSt, i: I64, j: I64): Unit =
+  if i < j - 1 then
+    Nx.srtSwap(s, i, j - 1)
+    Nx.srtReverse(s, i + 1, j - 1)
+  else ()
+
+// mergeSortedRunsInPlace: arr[b..m) and arr[m..e) through buf; on a tie the left one first
+def Nx.srtMerge(s: Nx.SortSt, b: I64, m: I64, e: I64): Unit = s match
+  case Nx.SortSt(f, arr, buf, err) =>
+    Nx.copyCells(arr, b, buf, 0, e - b)
+    Nx.srtMergeGo(f, arr, buf, err, 0, m - b, m - b, e - b, b)
+
+def Nx.srtMergeGo(f: Nx.Val, arr: Ptr, buf: Ptr, err: Ptr, l: I64, lm: I64, r: I64, re: I64, o: I64): Unit =
+  if l == lm then Nx.copyCells(buf, r, arr, o, re - r)
+  else if r == re then Nx.copyCells(buf, l, arr, o, lm - l)
+  else if !Nx.srtLess(f, Nx.aget[Ptr](buf, r), Nx.aget[Ptr](buf, l), err) then
+    Nx.aset[Ptr](arr, o, Nx.aget[Ptr](buf, l))
+    Nx.srtMergeGo(f, arr, buf, err, l + 1, lm, r, re, o + 1)
+  else
+    Nx.aset[Ptr](arr, o, Nx.aget[Ptr](buf, r))
+    Nx.srtMergeGo(f, arr, buf, err, l, lm, r + 1, re, o + 1)
+
+// peeksortImpl; at most 16 elements go to insertion sort (sort.hh insertionsortThreshold)
+def Nx.srtPeek(s: Nx.SortSt, b: I64, e: I64, lre: I64, rrb: I64): Unit =
+  if lre == e || rrb == b then ()
+  else if e - b <= 16 then Nx.srtInsertion(s, b, b + 1, e)
+  else
+    val mid = b + (e - b) / 2
+    if mid <= lre then
+      Nx.srtPeek(s, lre, e, lre + 1, rrb)
+      Nx.srtMerge(s, b, lre, e)
+    else if mid >= rrb then
+      Nx.srtPeek(s, b, rrb, lre, rrb - 1)
+      Nx.srtMerge(s, b, rrb, e)
+    else
+      val weak = !Nx.srtLt(s, mid, mid - 1, false)
+      val i = Nx.srtDecSuffix(s, lre, mid, weak)
+      val j = Nx.srtDecPrefix(s, mid - 1, rrb, weak)
+      if weak then () else Nx.srtReverse(s, i, j)
+      if i == b && j == e then ()
+      else if mid - i < j - mid then
+        Nx.srtPeek(s, b, i, lre, i - 1)
+        Nx.srtPeek(s, i, e, j, rrb)
+        Nx.srtMerge(s, b, i, e)
+      else
+        Nx.srtPeek(s, b, j, lre, i)
+        Nx.srtPeek(s, j, e, j + 1, rrb)
+        Nx.srtMerge(s, b, j, e)
+
+// ---- strings --------------------------------------------------------------------------------------------------
+
+def Nx.pConcatSep(sv: Nx.Val, l: Nx.Val): Nx.Val = sv match
+  case Nx.VStr(sep, ctx) => l match
+    case Nx.VList(n, xs) => Nx.sepGo(sep, xs, 0, n, Nx.sbNew(), ctx)
+    case _ => Nx.typeErr("a list", l)
+  case _ => Nx.typeErr("a string", sv)
+
+def Nx.sepGo(sep: Str, xs: Ptr, i: I64, n: I64, sb: Ptr, ctx: Coll.List[Str]): Nx.Val =
+  if i == n then Nx.VStr(Nx.sbGet(sb), ctx)
+  else
+    val s = Nx.coerce(Nx.force(Nx.aget[Ptr](xs, i)), false, true)
+    s match
+      case Nx.VStr(t, c2) =>
+        if i > 0 then Nx.sbAdd(sb, sep) else ()
+        Nx.sbAdd(sb, t)
+        Nx.sepGo(sep, xs, i + 1, n, sb, Coll.revOnto(c2, ctx))
+      case _ => s
+
+// prim_substring: a negative length means the rest; a start past the end gives ""
+def Nx.pSubstring(sv: Nx.Val, lv: Nx.Val, c: Ptr): Nx.Val = sv match
+  case Nx.VInt(start) => lv match
+    case Nx.VInt(len) =>
+      if start < 0 then Nx.VErr(Nx.KOther, "negative start position in 'substring'")
+      else
+        val s = Nx.coerce(Nx.force(c), false, true)
+        s match
+          case Nx.VStr(t, ctx) =>
+            val n = Str.len(t)
+            if start >= n then Nx.VStr("", ctx)
+            else
+              val e = if len < 0 || len > n - start then n else start + len
+              Nx.VStr(Str.slice(t, start, e), ctx)
+          case _ => s
+    case _ => Nx.typeErr("an integer", lv)
+  case _ => Nx.typeErr("an integer", sv)
+
+// ---- sets -----------------------------------------------------------------------------------------------------
+
+// attrNames (names = true) or attrValues, in the order of the names' bytes
+def Nx.pAttrNames(v: Nx.Val, names: Bool): Nx.Val = v match
+  case Nx.VAttrs(n, syms, vals) =>
+    val ord = Nx.byName(syms, n)
+    Nx.VList(n, Nx.namesGo(syms, vals, ord, Nx.arrNew(n), 0, n, names))
+  case _ => Nx.typeErr("a set", v)
+
+def Nx.namesGo(syms: Ptr, vals: Ptr, ord: Ptr, out: Ptr, i: I64, n: I64, names: Bool): Ptr =
+  if i < n then
+    val j = Nx.ageti(ord, i)
+    val c = if names then Nx.cell(Nx.VStr(Nx.symName(Nx.ageti(syms, j)), Coll.Nil)) else Nx.aget[Ptr](vals, j)
+    Nx.aset[Ptr](out, i, c)
+    Nx.namesGo(syms, vals, ord, out, i + 1, n, names)
+  else out
+
+// getAttr, or hasAttr when has
+def Nx.pGetAttr(nv: Nx.Val, sv: Nx.Val, has: Bool): Nx.Val = nv match
+  case Nx.VStr(name, _) => sv match
+    case Nx.VAttrs(n, syms, vals) =>
+      val i = Nx.findSym(syms, n, Nx.intern(name))
+      if has then Nx.VBool(i < n)
+      else if i < n then Nx.force(Nx.aget[Ptr](vals, i))
+      else Nx.VErr(Nx.KMissing, Nx.cat(Nx.cat("attribute '", name), "' missing"))
+    case _ => Nx.typeErr("a set", sv)
+  case _ => Nx.typeErr("a string", nv)
+
+// the names of the strings of a list as a set of null values (for membership), or the error
+def Nx.nameSet(xs: Ptr, i: I64, n: I64, acc: Coll.List[Nx.Pair]): Nx.Val =
+  if i == n then Nx.attrsOf(acc)
+  else
+    val v = Nx.force(Nx.aget[Ptr](xs, i))
+    v match
+      case Nx.VStr(s, _) => Nx.nameSet(xs, i + 1, n, Coll.Cons(Nx.Pair(Nx.intern(s), Nx.noFrame()), acc))
+      case _ => Nx.typeErr("a string", v)
+
+// the attributes of x whose names are (keep = true) or are not (keep = false) in the set m
+def Nx.filterAttrs(n: I64, syms: Ptr, vals: Ptr, m: Nx.Val, keep: Bool): Nx.Val = m match
+  case Nx.VAttrs(k, ks, _) =>
+    val os = Nx.arrNew(n)
+    val ov = Nx.arrNew(n)
+    Nx.VAttrs(Nx.filterGo2(n, syms, vals, k, ks, keep, os, ov, 0, 0), os, ov)
+  case _ => m
+
+def Nx.filterGo2(n: I64, syms: Ptr, vals: Ptr, k: I64, ks: Ptr, keep: Bool, os: Ptr, ov: Ptr, i: I64, o: I64): I64 =
+  if i == n then o
+  else
+    val s = Nx.ageti(syms, i)
+    val inM = Nx.findSym(ks, k, s) < k
+    if (inM && keep) || (!inM && !keep) then
+      Nx.aseti(os, o, s)
+      Nx.aset[Ptr](ov, o, Nx.aget[Ptr](vals, i))
+      Nx.filterGo2(n, syms, vals, k, ks, keep, os, ov, i + 1, o + 1)
+    else Nx.filterGo2(n, syms, vals, k, ks, keep, os, ov, i + 1, o)
+
+def Nx.pRemoveAttrs(sv: Nx.Val, l: Nx.Val): Nx.Val = sv match
+  case Nx.VAttrs(n, syms, vals) => l match
+    case Nx.VList(m, xs) => Nx.filterAttrs(n, syms, vals, Nx.nameSet(xs, 0, m, Coll.Nil), false)
+    case _ => Nx.typeErr("a list", l)
+  case _ => Nx.typeErr("a set", sv)
+
+// intersectAttrs e1 e2: the attributes of e2 whose names e1 has
+def Nx.pIntersect(x: Nx.Val, y: Nx.Val): Nx.Val = x match
+  case Nx.VAttrs(_, _, _) => y match
+    case Nx.VAttrs(n, syms, vals) => Nx.filterAttrs(n, syms, vals, x, true)
+    case _ => Nx.typeErr("a set", y)
+  case _ => Nx.typeErr("a set", x)
+
+// prim_listToAttrs: { name, value } elements, the first of a name wins, values stay lazy
+def Nx.pListToAttrs(l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) => Nx.l2aGo(xs, 0, n, Nx.intern("name"), Nx.intern("value"), Coll.Nil)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.l2aGo(xs: Ptr, i: I64, n: I64, sName: I64, sValue: I64, acc: Coll.List[Nx.Pair]): Nx.Val =
+  if i == n then Nx.attrsOf(Coll.rev(acc))
+  else
+    val e = Nx.force(Nx.aget[Ptr](xs, i))
+    e match
+      case Nx.VAttrs(k, syms, vals) =>
+        val ni = Nx.findSym(syms, k, sName)
+        val vi = Nx.findSym(syms, k, sValue)
+        if ni == k then Nx.VErr(Nx.KMissing, "attribute 'name' missing")
+        else if vi == k then Nx.VErr(Nx.KMissing, "attribute 'value' missing")
+        else
+          val nv = Nx.force(Nx.aget[Ptr](vals, ni))
+          nv match
+            case Nx.VStr(s, _) => Nx.l2aGo(xs, i + 1, n, sName, sValue, Coll.Cons(Nx.Pair(Nx.intern(s), Nx.aget[Ptr](vals, vi)), acc))
+            case _ => Nx.typeErr("a string", nv)
+      case _ => Nx.typeErr("a set", e)
+
+def Nx.pCatAttrs(nv: Nx.Val, l: Nx.Val): Nx.Val = nv match
+  case Nx.VStr(name, _) => l match
+    case Nx.VList(n, xs) => Nx.catGo(Nx.intern(name), xs, 0, n, Nx.arrNew(n), 0)
+    case _ => Nx.typeErr("a list", l)
+  case _ => Nx.typeErr("a string", nv)
+
+def Nx.catGo(sym: I64, xs: Ptr, i: I64, n: I64, out: Ptr, k: I64): Nx.Val =
+  if i == n then Nx.VList(k, out)
+  else
+    val e = Nx.force(Nx.aget[Ptr](xs, i))
+    e match
+      case Nx.VAttrs(m, syms, vals) =>
+        val j = Nx.findSym(syms, m, sym)
+        if j < m then
+          Nx.aset[Ptr](out, k, Nx.aget[Ptr](vals, j))
+          Nx.catGo(sym, xs, i + 1, n, out, k + 1)
+        else Nx.catGo(sym, xs, i + 1, n, out, k)
+      case _ => Nx.typeErr("a set", e)
+
+// prim_mapAttrs: value i = the thunk f name_i value_i
+def Nx.pMapAttrs(a: Ptr, sv: Nx.Val): Nx.Val = sv match
+  case Nx.VAttrs(n, syms, vals) => Nx.VAttrs(n, syms, Nx.mapAttrsGo(Nx.appCode(2), a, syms, vals, Nx.arrNew(n), 0, n))
+  case _ => Nx.typeErr("a set", sv)
+
+def Nx.mapAttrsGo(code: Nx.Code, f: Ptr, syms: Ptr, vals: Ptr, out: Ptr, i: I64, n: I64): Ptr =
+  if i < n then
+    val fr = Nx.frame(Nx.noFrame(), 3)
+    Nx.aset[Ptr](fr, 1, f)
+    Nx.aset[Ptr](fr, 2, Nx.cell(Nx.VStr(Nx.symName(Nx.ageti(syms, i)), Coll.Nil)))
+    Nx.aset[Ptr](fr, 3, Nx.aget[Ptr](vals, i))
+    Nx.aset[Ptr](out, i, Nx.cell(Nx.VPending(fr, code)))
+    Nx.mapAttrsGo(code, f, syms, vals, out, i + 1, n)
+  else out
+
+// prim_functionArgs: formal name = whether it has a default
+def Nx.pFunctionArgs(f: Nx.Val): Nx.Val = f match
+  case Nx.VLam(_, code) => code match
+    case Nx.CLam(_, nf, fms, _, _, _, _) =>
+      val syms = Nx.arrNew(nf)
+      val vals = Nx.arrNew(nf)
+      Nx.fargsGo(fms, syms, vals, 0, nf)
+      Nx.VAttrs(nf, syms, vals)
+    case _ => Nx.VAttrs(0, Nx.arrNew(0), Nx.arrNew(0))
+  case Nx.VPrim(_, _) => Nx.VAttrs(0, Nx.arrNew(0), Nx.arrNew(0))
+  case Nx.VPrimPart(_, _, _) => Nx.VAttrs(0, Nx.arrNew(0), Nx.arrNew(0))
+  case _ => Nx.typeErr("a function", f)
+
+def Nx.fargsGo(fms: Ptr, syms: Ptr, vals: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.aget[Nx.CFormal](fms, i) match
+      case Nx.CFm(sym, d) =>
+        Nx.aseti(syms, i, sym)
+        val has: Bool = d match
+          case Coll.Some(_) => true
+          case Coll.None => false
+        Nx.aset[Ptr](vals, i, Nx.cell(Nx.VBool(has)))
+        Nx.fargsGo(fms, syms, vals, i + 1, n)
+  else ()
+
+// ---- import ---------------------------------------------------------------------------------------------------
+
+// realisePath: the argument coerced to a string (a set by __toString or outPath) that must be absolute
+def Nx.importVal(v: Nx.Val): Nx.Val = v match
+  case Nx.VPath(s) => Nx.importFile(s)
+  case _ =>
+    val s = Nx.coerce(v, false, false)
+    s match
+      case Nx.VStr(t, _) => if Str.at(t, 0) == '/' then Nx.importFile(t) else Nx.VErr(Nx.KOther, Nx.cat("not an absolute path: ", t))
+      case _ => s
+
+// the directory part of an absolute path
+def Nx.dirName(p: Str): Str = Nx.dirFrom(p, Str.len(p) - 1)
+
+def Nx.dirFrom(p: Str, i: I64): Str =
+  if i <= 0 then "/"
+  else if Str.at(p, i) == '/' then Str.slice(p, 0, i)
+  else Nx.dirFrom(p, i - 1)
+
+// evalFile: a file is parsed, compiled and evaluated once per run (a directory means its default.nix)
+def Nx.importFile(p0: Str): Nx.Val =
+  val p = if Nx.isDir(p0) then Nx.cat(p0, "/default.nix") else p0
+  val key = Nx.intern(p)
+  val g = Nx.globals()
+  // the base env first: it sets up the import table
+  val m: Coll.IMap[Ptr] = Nx.baseEnv() match
+    case _ => Nx.aget[Coll.IMap[Ptr]](g, Nx.gImports())
+  Coll.node(m, key) match
+    case Coll.Bin(_, _, c, _, _) => Nx.force(c)
+    case Coll.Tip =>
+      val src = Nx.readFile(p)
+      if Str.len(src) < 0 then Nx.VErr(Nx.KOther, Nx.cat("cannot read ", p))
+      else Nx.parse(src, Nx.dirName(p), Nx.getEnv("HOME")) match
+        case Nx.Parsed(e) => Nx.compile(e, p, src) match
+          case Nx.Undefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
+          case Nx.Compiled(code) =>
+            val c = Nx.cell(Nx.VPending(Nx.noFrame(), code))
+            Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.insert(m, key, c))
+            Nx.force(c)
+        case _ => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))

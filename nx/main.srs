@@ -1,13 +1,22 @@
 // snx: the command line. `snx parse FILE` answers as nix-conformance SPEC.md "parse": `ok TREE` or `error LINE:COL`,
-// with FILE read as /case/input.nix and $HOME as /home/case. Exit 3 = an operation snx does not have yet.
+// with FILE read as /case/input.nix and $HOME as /home/case. `snx check FILE`: exit 0 iff FILE parses and has no
+// undefined variable. `snx eval FILE [FLAG...]`: the value as `nix-instantiate --eval --strict FILE` prints it, exit 1
+// on an error (its message on stderr). FILE of check and eval is an absolute path. Exit 3 = an operation or flag snx
+// does not have yet.
 
 enum Nx.Op:
   case Nx.OpParse
   case Nx.OpNar
+  case Nx.OpCheck
+  case Nx.OpEval
   case Nx.OpUnknown
 
 def Nx.op(s: Str): Nx.Op =
-  if Str.eq(s, "parse") then Nx.OpParse else if Str.eq(s, "nar") then Nx.OpNar else Nx.OpUnknown
+  if Str.eq(s, "parse") then Nx.OpParse
+  else if Str.eq(s, "nar") then Nx.OpNar
+  else if Str.eq(s, "check") then Nx.OpCheck
+  else if Str.eq(s, "eval") then Nx.OpEval
+  else Nx.OpUnknown
 
 def Nx.answerParse(src: Str): I64 =
   Nx.parse(src, "/case", "/home/case") match
@@ -43,13 +52,63 @@ def Nx.answerNar(src: Str): I64 =
       Console.print("error\n")
       0
 
+def Nx.printPos(src: Str, p: I64): Unit = Nx.lineCol(src, p) match
+  case Nx.LineCol(l, c) =>
+    Console.eprintI64(l)
+    Console.eprint(":")
+    Console.eprintI64(c)
+
+def Nx.answerCheck(path: Str, src: Str): I64 =
+  Nx.parse(src, Nx.dirName(path), Nx.getEnv("HOME")) match
+    case Nx.Parsed(e) => Nx.compile(e, path, src) match
+      case Nx.Undefined(p, name) =>
+        Console.eprint("error: undefined variable '")
+        Console.eprint(name)
+        Console.eprint("' at ")
+        Nx.printPos(src, p)
+        Console.eprint("\n")
+        1
+      case Nx.Compiled(_) => 0
+    case _ =>
+      Console.eprint("error: syntax error\n")
+      1
+
+// the nix-instantiate flags snx knows (the rest exit 3): --eval and --strict (eval is always strict), --no-show-trace,
+// --extra-experimental-features X (the features of later waves do not change core evaluation), --max-call-depth N
+def Nx.flagsOk(i: I64): Bool =
+  if i >= Args.count() then true
+  else
+    val f = Args.at(i)
+    if Str.eq(f, "--eval") || Str.eq(f, "--strict") || Str.eq(f, "--no-show-trace") then Nx.flagsOk(i + 1)
+    else if Str.eq(f, "--extra-experimental-features") then Nx.flagsOk(i + 2)
+    else if Str.eq(f, "--max-call-depth") && i + 1 < Args.count() then
+      Nx.aseti(Nx.globals(), Nx.gMaxDepth(), Nx.intValue(Args.at(i + 1)))
+      Nx.flagsOk(i + 2)
+    else false
+
+def Nx.answerEval(path: Str): I64 =
+  if !Nx.flagsOk(3) then 3
+  else
+    val v = Nx.importFile(path)
+    val r = if Nx.isErr(v) then v else Nx.deepForce(v, Nx.seenNew())
+    r match
+      case Nx.VErr(_, msg) =>
+        Console.eprint("error: ")
+        Console.eprint(msg)
+        Console.eprint("\n")
+        1
+      case _ =>
+        Nx.printTop(v)
+        Console.print("\n")
+        0
+
 def main(): I64 =
   handle r = Srs.Arena()
   handle c = Srs.Console()
   handle a = Srs.Args()
   handle f = Srs.Files()
   if Args.count() < 3 then
-    Console.eprint("usage: snx parse|nar FILE\n")
+    Console.eprint("usage: snx parse|nar|check|eval FILE\n")
     2
   else
     val src = Files.read(Args.at(2))
@@ -60,4 +119,6 @@ def main(): I64 =
       Nx.op(Args.at(1)) match
         case Nx.OpParse => Nx.answerParse(src)
         case Nx.OpNar => Nx.answerNar(src)
+        case Nx.OpCheck => Nx.answerCheck(Args.at(2), src)
+        case Nx.OpEval => Nx.answerEval(Args.at(2))
         case Nx.OpUnknown => 3

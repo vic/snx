@@ -30,6 +30,9 @@ enum Nx.Val:
   case Nx.VPending(env: Ptr, code: Nx.Code)       // a thunk
   case Nx.VBusy                                   // a thunk being forced: reading it is infinite recursion
   case Nx.VErr(kind: Nx.ErrKind, msg: Str)
+  // a primop applied to fewer cells than its arity, newest first: the arguments stay lazy and keep their identity
+  // (callFunction's tPrimOpApp chain holds Value*; builtins.elem id [ id ] is true by eqValues' pointer test)
+  case Nx.VPrimPart(id: I64, arity: I64, args: Coll.List[Ptr])
 
 // a parameter pattern after scope resolution: slot i of the call frame gets formal i (sorted by symbol id)
 enum Nx.CFormal:
@@ -68,6 +71,7 @@ enum Nx.Code:
   case Nx.COr(a: Nx.Code, b: Nx.Code)
   case Nx.CImpl(a: Nx.Code, b: Nx.Code)
   case Nx.CBin(op: Nx.BinOp, a: Nx.Code, b: Nx.Code)
+  case Nx.CLamArg(body: Nx.Code, name: Str)               // x: body, a frame of 1 slot: the argument (CLam = a pattern)
 
 enum Nx.CKey:
   case Nx.KSym(sym: I64)

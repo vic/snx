@@ -1,0 +1,214 @@
+// snx base env (createBaseEnv, primops.cc:5143; addPrimOp eval.cc:519-547; addConstant eval.cc:465-483): every name a Nix
+// file sees before its own bindings, each with its cell. A name `__x` is `__x` in scope and `x` in builtins; any other
+// name is both (eval.cc:536-538). Built once per run: Nx.globals() keeps it (slots in Nx.gBase..).
+
+// the run-wide words of Nx.globals()
+def Nx.gReady(): I64 = 0
+def Nx.gBase(): I64 = 1
+def Nx.gKinds(): I64 = 2
+def Nx.gNames(): I64 = 3
+def Nx.gDepth(): I64 = 4
+def Nx.gImports(): I64 = 5
+def Nx.gMaxDepth(): I64 = 6
+
+// the capacity of the builder arrays: more names than Nix has
+def Nx.bsCap(): I64 = 512
+
+// scope names and cells, builtins names and cells, primop kinds and name symbols, the three counts
+enum Nx.BB:
+  case Nx.BB(ss: Ptr, sc: Ptr, bs: Ptr, bc: Ptr, pk: Ptr, pn: Ptr, cnt: Ptr)
+
+def Nx.bbScope(b: Nx.BB, sym: I64, c: Ptr): Unit = b match
+  case Nx.BB(ss, sc, _, _, _, _, cnt) =>
+    val i = Nx.ageti(cnt, 0)
+    Nx.aseti(ss, i, sym)
+    Nx.aset[Ptr](sc, i, c)
+    Nx.aseti(cnt, 0, i + 1)
+
+def Nx.bbBuiltin(b: Nx.BB, sym: I64, c: Ptr): Unit = b match
+  case Nx.BB(_, _, bs, bc, _, _, cnt) =>
+    val i = Nx.ageti(cnt, 1)
+    Nx.aseti(bs, i, sym)
+    Nx.aset[Ptr](bc, i, c)
+    Nx.aseti(cnt, 1, i + 1)
+
+// name without a leading __
+def Nx.bareName(name: Str): Str =
+  if Str.len(name) > 2 && Str.at(name, 0) == '_' && Str.at(name, 1) == '_' then Str.slice(name, 2, Str.len(name)) else name
+
+def Nx.bsConst(b: Nx.BB, name: Str, v: Nx.Val): Unit =
+  val c = Nx.cell(v)
+  Nx.bbScope(b, Nx.intern(name), c)
+  Nx.bbBuiltin(b, Nx.intern(Nx.bareName(name)), c)
+
+def Nx.bsPrim(b: Nx.BB, name: Str, arity: I64, k: Nx.Prim): Unit = b match
+  case Nx.BB(_, _, _, _, pk, pn, cnt) =>
+    val id = Nx.ageti(cnt, 2)
+    Nx.aset[Nx.Prim](pk, id, k)
+    Nx.aseti(pn, id, Nx.intern(Nx.bareName(name)))
+    Nx.aseti(cnt, 2, id + 1)
+    Nx.bsConst(b, name, Nx.VPrim(id, arity))
+
+// a primop of a later wave: it exists, and calling it fails honestly
+def Nx.bsTodo(b: Nx.BB, name: Str, arity: I64): Unit = Nx.bsPrim(b, name, arity, Nx.PTodo)
+
+def Nx.todoErr(name: Str): Nx.Val = Nx.VErr(Nx.KOther, Nx.cat("snx: not implemented: ", name))
+
+// the scope as a set: n names sorted by symbol id, their cells
+def Nx.baseEnv(): Nx.Val =
+  val g = Nx.globals()
+  if Nx.ageti(g, Nx.gReady()) == 1 then Nx.aget[Nx.Val](g, Nx.gBase())
+  else
+    val b = Nx.BB(Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(Nx.bsCap()), Nx.arrNew(3))
+    val v = Nx.bsBuild(b)
+    Nx.aset[Nx.Val](g, Nx.gBase(), v)
+    Nx.aseti(g, Nx.gReady(), 1)
+    Nx.aseti(g, Nx.gDepth(), 0)
+    Nx.aset[Coll.IMap[Ptr]](g, Nx.gImports(), Coll.Tip)
+    if Nx.ageti(g, Nx.gMaxDepth()) == 0 then Nx.aseti(g, Nx.gMaxDepth(), 10000) else ()
+    v
+
+def Nx.bsBuild(b: Nx.BB): Nx.Val = b match
+  case Nx.BB(ss, sc, bs, bc, pk, pn, cnt) =>
+    val g = Nx.globals()
+    Nx.aset[Ptr](g, Nx.gKinds(), pk)
+    Nx.aset[Ptr](g, Nx.gNames(), pn)
+    val bcell = Nx.cell(Nx.VNull)
+    Nx.bbScope(b, Nx.intern("builtins"), bcell)
+    Nx.bbBuiltin(b, Nx.intern("builtins"), bcell)
+    Nx.bsConsts(b)
+    Nx.bsPrims(b)
+    Nx.bsTodos(b)
+    val ns = Nx.ageti(cnt, 0)
+    val nb = Nx.ageti(cnt, 1)
+    Nx.sortPairs(ss, sc, ns)
+    Nx.sortPairs(bs, bc, nb)
+    Nx.put(bcell, Nx.VAttrs(nb, bs, bc))
+    Nx.VAttrs(ns, ss, sc)
+
+// primops.cc:5153-5391
+def Nx.bsConsts(b: Nx.BB): Unit =
+  Nx.bsConst(b, "true", Nx.VBool(true))
+  Nx.bsConst(b, "false", Nx.VBool(false))
+  Nx.bsConst(b, "null", Nx.VNull)
+  Nx.bsConst(b, "__currentTime", Nx.VInt(Nx.timeNow()))
+  Nx.bsConst(b, "__currentSystem", Nx.VStr("x86_64-linux", Coll.Nil))
+  Nx.bsConst(b, "__nixVersion", Nx.VStr("2.34.8", Coll.Nil))
+  Nx.bsConst(b, "__storeDir", Nx.VStr("/nix/store", Coll.Nil))
+  Nx.bsConst(b, "__langVersion", Nx.VInt(6))
+  Nx.bsConst(b, "__nixPath", Nx.todoErr("nixPath"))
+
+// this wave's primops (arity = the length of .args, primops.cc)
+def Nx.bsPrims(b: Nx.BB): Unit =
+  Nx.bsPrim(b, "__typeOf", 1, Nx.PTypeOf)
+  Nx.bsPrim(b, "isNull", 1, Nx.PIsNull)
+  Nx.bsPrim(b, "__isFunction", 1, Nx.PIsFunction)
+  Nx.bsPrim(b, "__isInt", 1, Nx.PIsInt)
+  Nx.bsPrim(b, "__isFloat", 1, Nx.PIsFloat)
+  Nx.bsPrim(b, "__isString", 1, Nx.PIsString)
+  Nx.bsPrim(b, "__isBool", 1, Nx.PIsBool)
+  Nx.bsPrim(b, "__isPath", 1, Nx.PIsPath)
+  Nx.bsPrim(b, "__isAttrs", 1, Nx.PIsAttrs)
+  Nx.bsPrim(b, "__isList", 1, Nx.PIsList)
+  Nx.bsPrim(b, "throw", 1, Nx.PThrow)
+  Nx.bsPrim(b, "abort", 1, Nx.PAbort)
+  Nx.bsPrim(b, "__tryEval", 1, Nx.PTryEval)
+  Nx.bsPrim(b, "__seq", 2, Nx.PSeq)
+  Nx.bsPrim(b, "__deepSeq", 2, Nx.PDeepSeq)
+  Nx.bsPrim(b, "toString", 1, Nx.PToString)
+  Nx.bsPrim(b, "import", 1, Nx.PImport)
+  Nx.bsPrim(b, "__trace", 2, Nx.PTrace)
+  Nx.bsPrim(b, "__add", 2, Nx.PAdd)
+  Nx.bsPrim(b, "__sub", 2, Nx.PSub)
+  Nx.bsPrim(b, "__mul", 2, Nx.PMul)
+  Nx.bsPrim(b, "__div", 2, Nx.PDiv)
+  Nx.bsPrim(b, "__lessThan", 2, Nx.PLessThan)
+  Nx.bsPrim(b, "map", 2, Nx.PMap)
+  Nx.bsPrim(b, "__length", 1, Nx.PLength)
+  Nx.bsPrim(b, "__elemAt", 2, Nx.PElemAt)
+  Nx.bsPrim(b, "__head", 1, Nx.PHead)
+  Nx.bsPrim(b, "__tail", 1, Nx.PTail)
+  Nx.bsPrim(b, "__attrNames", 1, Nx.PAttrNames)
+  Nx.bsPrim(b, "__attrValues", 1, Nx.PAttrValues)
+  Nx.bsPrim(b, "__getAttr", 2, Nx.PGetAttr)
+  Nx.bsPrim(b, "__hasAttr", 2, Nx.PHasAttr)
+  Nx.bsPrim(b, "removeAttrs", 2, Nx.PRemoveAttrs)
+  Nx.bsPrim(b, "__listToAttrs", 1, Nx.PListToAttrs)
+  Nx.bsPrim(b, "__filter", 2, Nx.PFilter)
+  Nx.bsPrim(b, "__foldl'", 3, Nx.PFoldl)
+  Nx.bsPrim(b, "__genList", 2, Nx.PGenList)
+  Nx.bsPrim(b, "__concatLists", 1, Nx.PConcatLists)
+  Nx.bsPrim(b, "__concatStringsSep", 2, Nx.PConcatStringsSep)
+  Nx.bsPrim(b, "__stringLength", 1, Nx.PStringLength)
+  Nx.bsPrim(b, "__substring", 3, Nx.PSubstring)
+  Nx.bsPrim(b, "__functionArgs", 1, Nx.PFunctionArgs)
+  Nx.bsPrim(b, "__mapAttrs", 2, Nx.PMapAttrs)
+  Nx.bsPrim(b, "__intersectAttrs", 2, Nx.PIntersectAttrs)
+  Nx.bsPrim(b, "__catAttrs", 2, Nx.PCatAttrs)
+  Nx.bsPrim(b, "__elem", 2, Nx.PElem)
+  Nx.bsPrim(b, "__all", 2, Nx.PAll)
+  Nx.bsPrim(b, "__any", 2, Nx.PAny)
+  Nx.bsPrim(b, "__sort", 2, Nx.PSort)
+  Nx.bsPrim(b, "__concatMap", 2, Nx.PConcatMap)
+  Nx.bsPrim(b, "__addErrorContext", 2, Nx.PAddErrorContext)
+  Nx.bsPrim(b, "__getEnv", 1, Nx.PGetEnv)
+
+// later waves (regex, toml, json, xml, hashes, derivations, paths, fetchers, flakes, contexts)
+def Nx.bsTodos(b: Nx.BB): Unit =
+  Nx.bsTodo(b, "derivation", 1)
+  Nx.bsTodo(b, "derivationStrict", 1)
+  Nx.bsTodo(b, "placeholder", 1)
+  Nx.bsTodo(b, "baseNameOf", 1)
+  Nx.bsTodo(b, "dirOf", 1)
+  Nx.bsTodo(b, "break", 1)
+  Nx.bsTodo(b, "scopedImport", 2)
+  Nx.bsTodo(b, "fromTOML", 1)
+  Nx.bsTodo(b, "fetchTarball", 1)
+  Nx.bsTodo(b, "fetchTree", 1)
+  Nx.bsTodo(b, "fetchGit", 1)
+  Nx.bsTodo(b, "fetchMercurial", 1)
+  Nx.bsTodo(b, "__fetchurl", 1)
+  Nx.bsTodo(b, "__getFlake", 1)
+  Nx.bsTodo(b, "__parseFlakeRef", 1)
+  Nx.bsTodo(b, "__flakeRefToString", 1)
+  Nx.bsTodo(b, "__unsafeDiscardStringContext", 1)
+  Nx.bsTodo(b, "__hasContext", 1)
+  Nx.bsTodo(b, "__unsafeDiscardOutputDependency", 1)
+  Nx.bsTodo(b, "__addDrvOutputDependencies", 1)
+  Nx.bsTodo(b, "__getContext", 1)
+  Nx.bsTodo(b, "__appendContext", 2)
+  Nx.bsTodo(b, "__genericClosure", 1)
+  Nx.bsTodo(b, "__ceil", 1)
+  Nx.bsTodo(b, "__floor", 1)
+  Nx.bsTodo(b, "__warn", 2)
+  Nx.bsTodo(b, "__traceVerbose", 2)
+  Nx.bsTodo(b, "__toPath", 1)
+  Nx.bsTodo(b, "__storePath", 1)
+  Nx.bsTodo(b, "__pathExists", 1)
+  Nx.bsTodo(b, "__readFile", 1)
+  Nx.bsTodo(b, "__findFile", 2)
+  Nx.bsTodo(b, "__hashFile", 2)
+  Nx.bsTodo(b, "__readFileType", 1)
+  Nx.bsTodo(b, "__readDir", 1)
+  Nx.bsTodo(b, "__outputOf", 2)
+  Nx.bsTodo(b, "__toXML", 1)
+  Nx.bsTodo(b, "__toJSON", 1)
+  Nx.bsTodo(b, "__fromJSON", 1)
+  Nx.bsTodo(b, "__toFile", 2)
+  Nx.bsTodo(b, "__filterSource", 2)
+  Nx.bsTodo(b, "__path", 1)
+  Nx.bsTodo(b, "__unsafeGetAttrPos", 2)
+  Nx.bsTodo(b, "__zipAttrsWith", 2)
+  Nx.bsTodo(b, "__partition", 2)
+  Nx.bsTodo(b, "__groupBy", 2)
+  Nx.bsTodo(b, "__bitAnd", 2)
+  Nx.bsTodo(b, "__bitOr", 2)
+  Nx.bsTodo(b, "__bitXor", 2)
+  Nx.bsTodo(b, "__hashString", 2)
+  Nx.bsTodo(b, "__convertHash", 1)
+  Nx.bsTodo(b, "__match", 2)
+  Nx.bsTodo(b, "__split", 2)
+  Nx.bsTodo(b, "__replaceStrings", 3)
+  Nx.bsTodo(b, "__parseDrvName", 1)
+  Nx.bsTodo(b, "__compareVersions", 2)
+  Nx.bsTodo(b, "__splitVersion", 1)

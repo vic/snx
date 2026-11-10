@@ -1,0 +1,1 @@
+rec { a = b + 1; b = 2; c = { inherit a; }; }

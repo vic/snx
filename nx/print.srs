@@ -1,0 +1,52 @@
+// snx printer: print-ambiguous.cc:10-100, as `nix-instantiate --eval --strict` prints (nix-instantiate.cc:68-72) after
+// the value is forced deeply. One seen set per output: a non-empty set already printed (keyed by its value array, Nix's
+// Bindings*) or a non-empty list already printed (keyed by its cell, Nix's Value*) prints «repeated».
+// A name is printed as printAttributeName does (print.cc:129; the .exp files of Nix 2.34.8 quote "if" and "0").
+
+def Nx.printTop(v: Nx.Val): Unit = Nx.pv(v, Nx.seenNew())
+
+def Nx.pv(v: Nx.Val, seen: Ptr): Unit = v match
+  case Nx.VInt(n) => Console.printI64(n)
+  case Nx.VFloat(b) => Console.print(Nx.floatShow(b))
+  case Nx.VBool(b) => if b then Console.print("true") else Console.print("false")
+  case Nx.VNull => Console.print("null")
+  case Nx.VStr(s, _) => Console.print(Nx.escStr(s))
+  case Nx.VPath(s) => Console.print(s)
+  case Nx.VAttrs(n, syms, vals) =>
+    if n > 0 && !Nx.seenAdd(seen, vals) then Console.print("«repeated»")
+    else
+      Console.print("{ ")
+      Nx.pAttrs(syms, vals, Nx.byName(syms, n), 0, n, seen)
+      Console.print("}")
+  case Nx.VList(n, xs) =>
+    Console.print("[ ")
+    Nx.pList(xs, 0, n, seen)
+    Console.print("]")
+  case Nx.VLam(_, _) => Console.print("<LAMBDA>")
+  case Nx.VPrim(_, _) => Console.print("<PRIMOP>")
+  case Nx.VPrimPart(_, _, _) => Console.print("<PRIMOP-APP>")
+  case Nx.VBusy => Console.print("«potential infinite recursion»")
+  case _ => Console.print("<CODE>")
+
+def Nx.pCell(c: Ptr, seen: Ptr): Unit =
+  val v = Nx.get(c)
+  v match
+    case Nx.VList(n, _) => if n > 0 && !Nx.seenAdd(seen, c) then Console.print("«repeated»") else Nx.pv(v, seen)
+    case _ => Nx.pv(v, seen)
+
+def Nx.pAttrs(syms: Ptr, vals: Ptr, ord: Ptr, i: I64, n: I64, seen: Ptr): Unit =
+  if i < n then
+    val j = Nx.ageti(ord, i)
+    Console.print(Nx.attrName(Nx.symName(Nx.ageti(syms, j))))
+    Console.print(" = ")
+    Nx.pCell(Nx.aget[Ptr](vals, j), seen)
+    Console.print("; ")
+    Nx.pAttrs(syms, vals, ord, i + 1, n, seen)
+  else ()
+
+def Nx.pList(xs: Ptr, i: I64, n: I64, seen: Ptr): Unit =
+  if i < n then
+    Nx.pCell(Nx.aget[Ptr](xs, i), seen)
+    Console.print(" ")
+    Nx.pList(xs, i + 1, n, seen)
+  else ()
