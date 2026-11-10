@@ -1,0 +1,1 @@
+[ 8 14 6 2 3 -3 3 "-fa-bi-r-" -1 -1 1 [ "1" "2" "3" "pre" "4" "x" ] { name = "hello"; version = "2.10-bin"; } { name = "foo"; version = ""; } { b = [ "bar" "baz" ]; f = [ "foo" ]; } { right = [ 3 4 ]; wrong = [ 1 2 ]; } { a = [ 1 3 ]; b = [ 2 ]; } "c.nix" "" "/a/b" "." "/" [ { key = 1; } { key = 2; } { key = 3; } { key = 4; } ] ]

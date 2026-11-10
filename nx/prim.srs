@@ -59,9 +59,35 @@ enum Nx.Prim:
   case Nx.PMatch
   case Nx.PSplit
   case Nx.PFromToml
+  case Nx.PBaseNameOf
+  case Nx.PDirOf
+  case Nx.PCeil
+  case Nx.PFloor
+  case Nx.PToPath
+  case Nx.PPathExists
+  case Nx.PReadFile
+  case Nx.PFindFile
+  case Nx.PHashFile
+  case Nx.PReadFileType
+  case Nx.PReadDir
+  case Nx.PZipAttrsWith
+  case Nx.PPartition
+  case Nx.PGroupBy
   case Nx.PBitAnd
   case Nx.PBitOr
   case Nx.PBitXor
+  case Nx.PHashString
+  case Nx.PConvertHash
+  case Nx.PReplaceStrings
+  case Nx.PParseDrvName
+  case Nx.PCompareVersions
+  case Nx.PSplitVersion
+  case Nx.PScopedImport
+  case Nx.PToXml
+  case Nx.PToJson
+  case Nx.PFromJson
+  case Nx.PGetAttrPos
+  case Nx.PGenericClosure
 
 // the arithmetic primops
 enum Nx.Ar:
@@ -144,6 +170,32 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PMatch => Nx.pMatch(Nx.force(a), Nx.force(b))
     case Nx.PSplit => Nx.pSplit(Nx.force(a), Nx.force(b))
     case Nx.PFromToml => Nx.pFromToml(Nx.force(a))
+    case Nx.PBaseNameOf => Nx.pBaseNameOf(Nx.force(a))
+    case Nx.PDirOf => Nx.pDirOf(Nx.force(a))
+    case Nx.PCeil => Nx.pRound(Nx.force(a), true)
+    case Nx.PFloor => Nx.pRound(Nx.force(a), false)
+    case Nx.PToPath => Nx.pToPath(Nx.force(a))
+    case Nx.PPathExists => Nx.pPathExists(Nx.force(a))
+    case Nx.PReadFile => Nx.pReadFile(Nx.force(a))
+    case Nx.PFindFile => Nx.pFindFile(Nx.force(a), Nx.force(b))
+    case Nx.PHashFile => Nx.pHashFile(Nx.force(a), Nx.force(b))
+    case Nx.PReadFileType => Nx.pReadFileType(Nx.force(a))
+    case Nx.PReadDir => Nx.pReadDir(Nx.force(a))
+    case Nx.PZipAttrsWith => Nx.pZipAttrsWith(a, Nx.force(b))
+    case Nx.PPartition => Nx.pPartition(a, Nx.force(b))
+    case Nx.PGroupBy => Nx.pGroupBy(a, Nx.force(b))
+    case Nx.PHashString => Nx.pHashString(Nx.force(a), Nx.force(b))
+    case Nx.PConvertHash => Nx.pConvertHash(Nx.force(a))
+    case Nx.PReplaceStrings => Nx.pReplace(Nx.force(a), Nx.force(b), Nx.force(c))
+    case Nx.PParseDrvName => Nx.pParseDrvName(Nx.force(a))
+    case Nx.PCompareVersions => Nx.pCompareVersions(Nx.force(a), Nx.force(b))
+    case Nx.PSplitVersion => Nx.pSplitVersion(Nx.force(a))
+    case Nx.PScopedImport => Nx.pScopedImport(Nx.force(a), Nx.force(b))
+    case Nx.PToXml => Nx.pToXml(Nx.force(a))
+    case Nx.PToJson => Nx.pToJson(Nx.force(a))
+    case Nx.PFromJson => Nx.pFromJson(Nx.force(a))
+    case Nx.PGetAttrPos => Nx.pAttrPos(Nx.force(a), Nx.force(b))
+    case Nx.PGenericClosure => Nx.pGenericClosure(Nx.force(a))
     case Nx.PGetEnv =>
       val s = Nx.force(a)
       s match
@@ -706,6 +758,7 @@ def Nx.pFunctionArgs(f: Nx.Val): Nx.Val = f match
       val syms = Nx.arrNew(nf)
       val vals = Nx.arrNew(nf)
       Nx.fargsGo(fms, syms, vals, 0, nf)
+      Nx.posPut(syms, Nx.posGet(fms))
       Nx.VAttrs(nf, syms, vals)
     case _ => Nx.VAttrs(0, Nx.arrNew(0), Nx.arrNew(0))
   case Nx.VPrim(_, _) => Nx.VAttrs(0, Nx.arrNew(0), Nx.arrNew(0))
@@ -745,7 +798,8 @@ def Nx.dirFrom(p: Str, i: I64): Str =
 
 // evalFile: a file is parsed, compiled and evaluated once per run (a directory means its default.nix)
 def Nx.importFile(p0: Str): Nx.Val =
-  val p = if Nx.isDir(p0) then Nx.cat(p0, "/default.nix") else p0
+  val p1 = Nx.followLast(p0)
+  val p = if Nx.isDir(p1) then Nx.cat(p1, "/default.nix") else p1
   val key = Nx.intern(p)
   val g = Nx.globals()
   // the base env first: it sets up the import table
@@ -754,7 +808,7 @@ def Nx.importFile(p0: Str): Nx.Val =
   Coll.node(m, key) match
     case Coll.Bin(_, _, c, _, _) => Nx.force(c)
     case Coll.Tip =>
-      val src = Nx.readFile(p)
+      val src = Nx.readSrc(p)
       if Str.len(src) < 0 then Nx.VErr(Nx.KOther, Nx.cat("cannot read ", p))
       else Nx.parse(src, Nx.dirName(p), Nx.getEnv("HOME")) match
         case Nx.Parsed(e) => Nx.compile(e, p, src) match

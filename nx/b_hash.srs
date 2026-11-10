@@ -1,0 +1,139 @@
+// snx builtins hashString, hashFile, convertHash (primops.cc:2312, 4593, 4619; libutil/hash.cc).
+// shortcut: blake3 works without the blake3-hashes experimental feature; gate it when a case needs the refusal.
+
+extern def Nx.blake3(s: Str): Str
+
+def Nx.hashAny(algo: I64, s: Str): Str = if algo == 4 then Nx.blake3(s) else Nx.hashBytes(algo, s)
+
+// parseHashAlgo: the id of a name (Nx.hashBytes: 0 md5, 1 sha1, 2 sha256, 3 sha512; 4 blake3), or -1
+def Nx.algoOf(s: Str): I64 =
+  if Str.eq(s, "md5") then 0
+  else if Str.eq(s, "sha1") then 1
+  else if Str.eq(s, "sha256") then 2
+  else if Str.eq(s, "sha512") then 3
+  else if Str.eq(s, "blake3") then 4
+  else 0 - 1
+
+def Nx.algoName(a: I64): Str =
+  if a == 0 then "md5" else if a == 1 then "sha1" else if a == 2 then "sha256" else if a == 3 then "sha512" else "blake3"
+
+def Nx.algoSize(a: I64): I64 =
+  if a == 0 then 16 else if a == 1 then 20 else if a == 2 then 32 else if a == 3 then 64 else 32
+
+def Nx.badHash(msg: Str): Nx.Val = Nx.VErr(Nx.KOther, msg)
+
+def Nx.unknownAlgo(s: Str): Nx.Val = Nx.badHash(Nx.cat(Nx.cat("unknown hash algorithm '", s), "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"))
+
+def Nx.pHashString(av: Nx.Val, sv: Nx.Val): Nx.Val = av match
+  case Nx.VStr(a, _) =>
+    val algo = Nx.algoOf(a)
+    if algo < 0 then Nx.unknownAlgo(a)
+    else sv match
+      case Nx.VStr(s, _) => Nx.VStr(Nx.b16(Nx.hashAny(algo, s)), Coll.Nil)
+      case _ => Nx.typeErr("a string", sv)
+  case _ => Nx.typeErr("a string", av)
+
+def Nx.pHashFile(av: Nx.Val, pv: Nx.Val): Nx.Val = av match
+  case Nx.VStr(a, _) =>
+    val algo = Nx.algoOf(a)
+    if algo < 0 then Nx.unknownAlgo(a)
+    else
+      val p = Nx.pathStr(pv)
+      p match
+        case Nx.VStr(t, _) =>
+          val s = Nx.fileBytes(t)
+          if Str.len(s) < 0 then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("opening file '", t), "': No such file or directory"))
+          else Nx.VStr(Nx.b16(Nx.hashAny(algo, s)), Coll.Nil)
+        case _ => p
+  case _ => Nx.typeErr("a string", av)
+
+// ---- convertHash ----------------------------------------------------------------------------------------------
+
+// a parsed hash: its algorithm and raw digest, or the reason it is bad
+enum Nx.HashR:
+  case Nx.HashOk(algo: I64, raw: Str)
+  case Nx.HashBad(msg: Str)
+
+// the index of the first c in s from i, or -1
+def Nx.byteAt(s: Str, c: I64, i: I64): I64 =
+  if i >= Str.len(s) then 0 - 1
+  else if Str.at(s, i) == c then i
+  else Nx.byteAt(s, c, i + 1)
+
+def Nx.nix32Len(sz: I64): I64 = (sz * 8 + 4) / 5
+
+def Nx.b64Len(sz: I64): I64 = ((sz + 2) / 3) * 4
+
+// the digest of rest in the encoding its length says (sri: base64), checked against the algorithm's size
+def Nx.hashBody(rest: Str, algo: I64, sri: Bool): Nx.HashR =
+  val sz = Nx.algoSize(algo)
+  val raw = Nx.decodeBody(rest, sz, sri)
+  if Str.len(raw) == sz then Nx.HashOk(algo, raw)
+  else Nx.HashBad(Nx.cat(Nx.cat("invalid hash '", rest), "'"))
+
+def Nx.decodeBody(rest: Str, sz: I64, sri: Bool): Str =
+  val n = Str.len(rest)
+  if sri then Nx.unb64(rest)
+  else if n == 2 * sz then Nx.unb16(rest)
+  else if n == Nx.nix32Len(sz) then Nx.unb32(rest)
+  else if n == Nx.b64Len(sz) then Nx.unb64(rest)
+  else Nx.unknownSize()
+
+// a string of length -1 (what the decoders answer for bad input)
+def Nx.unknownSize(): Str = Nx.unb16("z")
+
+// Hash::parseAny (hash.cc:188-255): [ALGO:|ALGO-]BODY with the algorithm from the prefix or from opt (-1 = none)
+def Nx.parseAnyHash(h: Str, opt: I64): Nx.HashR =
+  val c = Nx.byteAt(h, ':', 0)
+  val d = if c < 0 then Nx.byteAt(h, '-', 0) else 0 - 1
+  val k = if c >= 0 then c else d
+  if k < 0 then
+    if opt < 0 then Nx.HashBad("hash does not include a type, nor is the type otherwise known from context")
+    else Nx.hashBody(h, opt, false)
+  else
+    val parsed = Nx.algoOf(Str.slice(h, 0, k))
+    if parsed < 0 then Nx.HashBad("unknown hash algorithm")
+    else if opt >= 0 && opt != parsed then Nx.HashBad("hash has the wrong type")
+    else Nx.hashBody(Str.slice(h, k + 1, Str.len(h)), parsed, c < 0)
+
+def Nx.fmtHash(algo: I64, raw: Str, fmt: Str): Nx.Val =
+  if Str.eq(fmt, "base16") then Nx.VStr(Nx.b16(raw), Coll.Nil)
+  else if Str.eq(fmt, "nix32") || Str.eq(fmt, "base32") then Nx.VStr(Nx.b32(raw), Coll.Nil)
+  else if Str.eq(fmt, "base64") then Nx.VStr(Nx.b64(raw), Coll.Nil)
+  else if Str.eq(fmt, "sri") then Nx.VStr(Nx.cat(Nx.cat(Nx.algoName(algo), "-"), Nx.b64(raw)), Coll.Nil)
+  else Nx.badHash(Nx.cat(Nx.cat("unknown hash format '", fmt), "'"))
+
+// the string attribute name of set (n, syms, vals), forced; Nx.VNull when it is absent
+def Nx.strAttr(n: I64, syms: Ptr, vals: Ptr, name: Str): Nx.Val =
+  val i = Nx.findSym(syms, n, Nx.intern(name))
+  if i == n then Nx.VNull
+  else
+    val v = Nx.force(Nx.aget[Ptr](vals, i))
+    v match
+      case Nx.VStr(_, _) => v
+      case _ => Nx.typeErr("a string", v)
+
+def Nx.pConvertHash(v: Nx.Val): Nx.Val = v match
+  case Nx.VAttrs(n, syms, vals) =>
+    val h = Nx.strAttr(n, syms, vals, "hash")
+    val a = Nx.strAttr(n, syms, vals, "hashAlgo")
+    val f = Nx.strAttr(n, syms, vals, "toHashFormat")
+    Nx.convertWith(h, a, f)
+  case _ => Nx.typeErr("a set", v)
+
+def Nx.convertWith(h: Nx.Val, a: Nx.Val, f: Nx.Val): Nx.Val = h match
+  case Nx.VStr(hs, _) => f match
+    case Nx.VStr(fmt, _) => a match
+      case Nx.VStr(an, _) =>
+        val algo = Nx.algoOf(an)
+        if algo < 0 then Nx.unknownAlgo(an) else Nx.convertGo(hs, algo, fmt)
+      case Nx.VNull => Nx.convertGo(hs, 0 - 1, fmt)
+      case _ => a
+    case Nx.VNull => Nx.VErr(Nx.KMissing, "attribute 'toHashFormat' missing")
+    case _ => f
+  case Nx.VNull => Nx.VErr(Nx.KMissing, "attribute 'hash' missing")
+  case _ => h
+
+def Nx.convertGo(hs: Str, algo: I64, fmt: Str): Nx.Val = Nx.parseAnyHash(hs, algo) match
+  case Nx.HashOk(al, raw) => Nx.fmtHash(al, raw, fmt)
+  case Nx.HashBad(msg) => Nx.badHash(msg)

@@ -244,8 +244,8 @@ def Nx.psFormalsBody(cx: Nx.PCx, ts: Coll.List[Nx.Tok], p: I64, fs: Nx.FSet, arg
 def Nx.psFormals(xs: Coll.List[Nx.FmP], acc: Coll.List[Nx.Formal]): Coll.List[Nx.Formal] = xs match
   case Coll.Nil => Coll.rev(acc)
   case Coll.Cons(h, t) =>
-    val Nx.FmP(n, _, _, d) = h
-    Nx.psFormals(t, Coll.Cons(Nx.Fm(n, d), acc))
+    val Nx.FmP(n, fp, _, d) = h
+    Nx.psFormals(t, Coll.Cons(Nx.Fm(n, d, fp), acc))
 
 // the index of the first formal named n, or -1
 def Nx.psFirstIdx(xs: Coll.List[Nx.FmP], n: Str, i: I64): I64 = xs match
@@ -905,15 +905,15 @@ def Nx.psBindings(s: Nx.BSet, xs: Coll.List[Str], acc: Coll.List[Nx.Binding]): C
   case Coll.Nil => acc
   case Coll.Cons(n, t) => Nx.psGet(s, n) match
     case Coll.Some(h) =>
-      val Nx.BEnt(_, _, v) = h
-      Nx.psBindings(s, t, Coll.Cons(Nx.psBinding(n, v), acc))
+      val Nx.BEnt(_, bp, v) = h
+      Nx.psBindings(s, t, Coll.Cons(Nx.psBinding(n, bp, v), acc))
     case Coll.None => Nx.psBindings(s, t, acc)
 
-def Nx.psBinding(n: Str, v: Nx.BVal): Nx.Binding = v match
-  case Nx.BvPlain(e) => Nx.Bind(n, e)
-  case Nx.BvSet(s) => Nx.Bind(n, Nx.psSetExpr(s))
-  case Nx.BvInherit => Nx.BInherit(n)
-  case Nx.BvFrom(e) => Nx.BInheritFrom(n, e)
+def Nx.psBinding(n: Str, bp: I64, v: Nx.BVal): Nx.Binding = v match
+  case Nx.BvPlain(e) => Nx.Bind(n, e, bp)
+  case Nx.BvSet(s) => Nx.Bind(n, Nx.psSetExpr(s), bp)
+  case Nx.BvInherit => Nx.BInherit(n, bp)
+  case Nx.BvFrom(e) => Nx.BInheritFrom(n, e, bp)
 
 def Nx.psBVal(v: Nx.PE): Nx.BVal = v match
   case Nx.PExpr(e) => Nx.BvPlain(e)

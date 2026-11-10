@@ -1,0 +1,220 @@
+// snx builtins of wave 1 on paths and files: toPath pathExists readFile readDir readFileType findFile scopedImport and
+// the search path (__nixPath from -I and $NIX_PATH). Law: primops.cc 1896-2430, eval.cc findFile / resolveLookupPathPath.
+
+extern def Nx.fsKind(path: Str, follow: Bool): I64
+extern def Nx.dirNames(path: Str): Str
+extern def Nx.fileBytes(path: Str): Str
+extern def Nx.cwd(): Str
+extern def Nx.hasNul(s: Str): Bool
+extern def Nx.followLast(path: Str): Str
+
+// the -I entries so far, joined by NUL, in a cell kept at Nx.gIncl() of Nx.globals() (0 = none)
+
+def Nx.inclAdd(e: Str): Unit =
+  val g = Nx.globals()
+  val c = Nx.aget[Ptr](g, Nx.gIncl())
+  if Nx.ptrEq(c, Nx.noFrame()) then Nx.aset[Ptr](g, Nx.gIncl(), Nx.strCell(e))
+  else Nx.put(c, Nx.VStr(Nx.cat(Nx.cat(Nx.strOf(Nx.get(c)), Nx.byte(0)), e), Coll.Nil))
+
+def Nx.strOf(v: Nx.Val): Str = v match
+  case Nx.VStr(s, _) => s
+  case _ => ""
+
+def Nx.inclStr(): Str =
+  val c = Nx.aget[Ptr](Nx.globals(), Nx.gIncl())
+  if Nx.ptrEq(c, Nx.noFrame()) then "" else Nx.strOf(Nx.get(c))
+
+// the non-empty pieces of s between sep bytes
+def Nx.splitOn(s: Str, sep: I64, i: I64, from: I64, acc: Coll.List[Str]): Coll.List[Str] =
+  if i == Str.len(s) then Coll.rev(if i > from then Coll.Cons(Str.slice(s, from, i), acc) else acc)
+  else if Str.at(s, i) == sep then Nx.splitOn(s, sep, i + 1, i + 1, if i > from then Coll.Cons(Str.slice(s, from, i), acc) else acc)
+  else Nx.splitOn(s, sep, i + 1, from, acc)
+
+// the index of the first '=' of s, or -1
+def Nx.eqAt(s: Str, i: I64): I64 =
+  if i >= Str.len(s) then 0 - 1
+  else if Str.at(s, i) == '=' then i
+  else Nx.eqAt(s, i + 1)
+
+def Nx.searchEntries(): Coll.List[Str] =
+  Coll.revOnto(Coll.rev(Nx.splitOn(Nx.inclStr(), 0, 0, 0, Coll.Nil)), Nx.splitOn(Nx.getEnv("NIX_PATH"), ':', 0, 0, Coll.Nil))
+
+// LookupPath::Elem::parse: PREFIX=PATH or PATH
+def Nx.entryVal(e: Str): Nx.Val =
+  val i = Nx.eqAt(e, 0)
+  val pre = if i < 0 then "" else Str.slice(e, 0, i)
+  val path = if i < 0 then e else Str.slice(e, i + 1, Str.len(e))
+  Nx.attrsOf(Coll.Cons(Nx.pair("path", Nx.VStr(path, Coll.Nil)), Coll.Cons(Nx.pair("prefix", Nx.VStr(pre, Coll.Nil)), Coll.Nil)))
+
+def Nx.entryCells(es: Coll.List[Str], out: Ptr, i: I64): Unit = es match
+  case Coll.Nil => ()
+  case Coll.Cons(e, t) =>
+    Nx.aset[Ptr](out, i, Nx.cell(Nx.entryVal(e)))
+    Nx.entryCells(t, out, i + 1)
+
+// builtins.nixPath (primops.cc:5391)
+def Nx.nixPathVal(): Nx.Val =
+  val es = Nx.searchEntries()
+  val n = Coll.length(es)
+  val out = Nx.arrNew(n)
+  Nx.entryCells(es, out, 0)
+  Nx.VList(n, out)
+
+// ---- paths ----------------------------------------------------------------------------------------------------
+
+// coerceToPath: a path, a set with __toString, or a string that is an absolute path; as the canonical path in a Nx.VStr
+def Nx.pathStr(v: Nx.Val): Nx.Val = v match
+  case Nx.VErr(_, _) => v
+  case Nx.VPath(s) => Nx.VStr(s, Coll.Nil)
+  case Nx.VAttrs(n, syms, vals) =>
+    val i = Nx.findSym(syms, n, Nx.intern("__toString"))
+    if i < n then Nx.pathStr(Nx.apply(Nx.force(Nx.aget[Ptr](vals, i)), Nx.cell(v)))
+    else Nx.absStr(Nx.coerce(v, false, false))
+  case _ => Nx.absStr(Nx.coerce(v, false, false))
+
+def Nx.absStr(s: Nx.Val): Nx.Val = s match
+  case Nx.VStr(t, ctx) =>
+    if Str.len(t) == 0 || Str.at(t, 0) != '/' then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("string '", t), "' doesn't represent an absolute path"))
+    else Nx.VStr(Nx.canonPath(t), ctx)
+  case _ => s
+
+// prim_toPath
+def Nx.pToPath(v: Nx.Val): Nx.Val = Nx.pathStr(v)
+
+def Nx.endsWith(s: Str, w: Str): Bool =
+  val n = Str.len(s)
+  val m = Str.len(w)
+  n >= m && Str.eq(Str.slice(s, n - m, n), w)
+
+// prim_pathExists: a trailing "/" or "/." asks for a directory
+def Nx.pPathExists(v: Nx.Val): Nx.Val =
+  val mustBeDir: Bool = v match
+    case Nx.VStr(s, _) => Nx.endsWith(s, "/") || Nx.endsWith(s, "/.")
+    case _ => false
+  val p = Nx.pathStr(v)
+  p match
+    case Nx.VStr(t, _) =>
+      val k = Nx.fsKind(t, mustBeDir)
+      Nx.VBool(k != 0 && (!mustBeDir || k == 2))
+    case _ => p
+
+def Nx.pReadFile(v: Nx.Val): Nx.Val =
+  val p = Nx.pathStr(v)
+  p match
+    case Nx.VStr(t, _) =>
+      val s = Nx.fileBytes(t)
+      if Str.len(s) < 0 then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("opening file '", t), "': No such file or directory"))
+      else if Nx.hasNul(s) then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("the contents of the file '", t), "' cannot be represented as a Nix string"))
+      else Nx.VStr(s, Coll.Nil)
+    case _ => p
+
+def Nx.kindName(k: I64): Str =
+  if k == 1 then "regular" else if k == 2 then "directory" else if k == 3 then "symlink" else "unknown"
+
+def Nx.pReadFileType(v: Nx.Val): Nx.Val =
+  val p = Nx.pathStr(v)
+  p match
+    case Nx.VStr(t, _) =>
+      val k = Nx.fsKind(t, false)
+      if k == 0 then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("getting status of '", t), "': No such file or directory"))
+      else Nx.VStr(Nx.kindName(k), Coll.Nil)
+    case _ => p
+
+def Nx.pReadDir(v: Nx.Val): Nx.Val =
+  val p = Nx.pathStr(v)
+  p match
+    case Nx.VStr(t, _) =>
+      val names = Nx.dirNames(t)
+      if Str.len(names) < 0 then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("reading directory '", t), "': No such file or directory"))
+      else Nx.attrsOf(Nx.dirPairs(t, names, 0, 0, Coll.Nil))
+    case _ => p
+
+// the NUL-terminated names of a directory as pairs name = type
+def Nx.dirPairs(dir: Str, names: Str, i: I64, from: I64, acc: Coll.List[Nx.Pair]): Coll.List[Nx.Pair] =
+  if i >= Str.len(names) then acc
+  else if Str.at(names, i) == 0 then
+    val name = Str.slice(names, from, i)
+    val full = Nx.cat(Nx.cat(dir, "/"), name)
+    Nx.dirPairs(dir, names, i + 1, i + 1, Coll.Cons(Nx.pair(name, Nx.VStr(Nx.kindName(Nx.fsKind(full, false)), Coll.Nil)), acc))
+  else Nx.dirPairs(dir, names, i + 1, from, acc)
+
+// ---- findFile -------------------------------------------------------------------------------------------------
+
+// LookupPath::Prefix::suffixIfPotentialMatch: the rest of path after the prefix, or -1 when it does not match
+def Nx.suffixAt(pre: Str, path: Str): I64 =
+  val n = Str.len(pre)
+  val need = n > 0 && n < Str.len(path)
+  if need && Str.at(path, n) != '/' then 0 - 1
+  else if n > Str.len(path) || !Str.eq(Str.slice(path, 0, n), pre) then 0 - 1
+  else if need then n + 1
+  else n
+
+def Nx.absOf(p: Str): Str = if Str.len(p) > 0 && Str.at(p, 0) == '/' then Nx.canonPath(p) else Nx.canonPath(Nx.cat(Nx.cat(Nx.cwd(), "/"), p))
+
+def Nx.pFindFile(lv: Nx.Val, pv: Nx.Val): Nx.Val = lv match
+  case Nx.VList(n, xs) => pv match
+    case Nx.VStr(path, _) => Nx.findGo(xs, 0, n, path)
+    case _ => Nx.typeErr("a string", pv)
+  case _ => Nx.typeErr("a list", lv)
+
+def Nx.findGo(xs: Ptr, i: I64, n: I64, path: Str): Nx.Val =
+  if i == n then
+    if Str.len(path) >= 4 && Str.eq(Str.slice(path, 0, 4), "nix/") then Nx.VPath(Nx.cat(Nx.corePrefix(), Str.slice(path, 4, Str.len(path))))
+    else Nx.VErr(Nx.KThrow, Nx.cat(Nx.cat("file '", path), "' was not found in the Nix search path (add it using $NIX_PATH or -I)"))
+  else
+    val e = Nx.force(Nx.aget[Ptr](xs, i))
+    e match
+      case Nx.VAttrs(m, syms, vals) =>
+        val pi = Nx.findSym(syms, m, Nx.intern("prefix"))
+        val di = Nx.findSym(syms, m, Nx.intern("path"))
+        if di == m then Nx.VErr(Nx.KMissing, "attribute 'path' missing")
+        else
+          val pre = if pi < m then Nx.strOf(Nx.force(Nx.aget[Ptr](vals, pi))) else ""
+          val dv = Nx.coerce(Nx.force(Nx.aget[Ptr](vals, di)), false, false)
+          dv match
+            case Nx.VStr(dir, _) => Nx.findStep(xs, i, n, path, pre, dir)
+            case _ => dv
+      case _ => Nx.typeErr("a set", e)
+
+def Nx.findStep(xs: Ptr, i: I64, n: I64, path: Str, pre: Str, dir: Str): Nx.Val =
+  val sfx = Nx.suffixAt(pre, path)
+  if sfx < 0 then Nx.findGo(xs, i + 1, n, path)
+  else
+    val root = Nx.absOf(dir)
+    if Nx.fsKind(root, true) == 0 then Nx.findGo(xs, i + 1, n, path)
+    else
+      val res = Nx.canonPath(Nx.cat(Nx.cat(root, "/"), Str.slice(path, sfx, Str.len(path))))
+      if Nx.fsKind(res, false) != 0 then Nx.VPath(res) else Nx.findGo(xs, i + 1, n, path)
+
+// ---- scopedImport ---------------------------------------------------------------------------------------------
+
+// slot i + 1 for the i-th name of the scope
+def Nx.slotsFill(slots: Ptr, i: I64, n: I64): Ptr =
+  if i < n then
+    Nx.aseti(slots, i, i + 1)
+    Nx.slotsFill(slots, i + 1, n)
+  else slots
+
+// prim_scopedImport: the file runs with the names of the set in scope over the base env; no import cache
+def Nx.pScopedImport(sv: Nx.Val, pv: Nx.Val): Nx.Val = sv match
+  case Nx.VAttrs(n, syms, vals) =>
+    val p = Nx.pathStr(pv)
+    p match
+      case Nx.VStr(t, _) => Nx.scopedFile(n, syms, vals, Nx.dirDefault(Nx.followLast(t)))
+      case _ => p
+  case _ => Nx.typeErr("a set", sv)
+
+def Nx.scopedFile(n: I64, syms: Ptr, vals: Ptr, p: Str): Nx.Val =
+  val src = Nx.readFile(p)
+  if Str.len(src) < 0 then Nx.VErr(Nx.KOther, Nx.cat("cannot read ", p))
+  else Nx.parse(src, Nx.dirName(p), Nx.getEnv("HOME")) match
+    case Nx.Parsed(e) =>
+      Nx.compileIn(e, p, src, Coll.Cons(Nx.ScLex(n, syms, Nx.slotsFill(Nx.arrNew(n), 0, n)), Coll.Nil)) match
+        case Nx.Undefined(_, name) => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("undefined variable '", name), "'"))
+        case Nx.Compiled(code) =>
+          val fr = Nx.frame(Nx.noFrame(), n)
+          Nx.copyCells(vals, 0, Nx.slots(fr), 0, n)
+          Nx.force(Nx.cell(Nx.VPending(fr, code)))
+    case _ => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))
+
+def Nx.dirDefault(p: Str): Str = if Nx.isDir(p) then Nx.cat(p, "/default.nix") else p

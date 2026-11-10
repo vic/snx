@@ -29,15 +29,15 @@ enum Nx.Attr:
 
 // a static binding of an attribute set (SPEC.md: bind, inherit, inherit-from)
 enum Nx.Binding:
-  case Nx.Bind(name: Str, e: Nx.Expr)
-  case Nx.BInherit(name: Str)
-  case Nx.BInheritFrom(name: Str, from: Nx.Expr)
+  case Nx.Bind(name: Str, e: Nx.Expr, p: I64)                 // p: byte offset of the attribute name
+  case Nx.BInherit(name: Str, p: I64)
+  case Nx.BInheritFrom(name: Str, from: Nx.Expr, p: I64)
 
 enum Nx.DynBind:
   case Nx.DBind(k: Nx.Expr, e: Nx.Expr)
 
 enum Nx.Formal:
-  case Nx.Fm(name: Str, dflt: Coll.Option[Nx.Expr])
+  case Nx.Fm(name: Str, dflt: Coll.Option[Nx.Expr], p: I64)
 
 enum Nx.Formals:
   case Nx.Fms(ellipsis: Bool, fs: Coll.List[Nx.Formal])

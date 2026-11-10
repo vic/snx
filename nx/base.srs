@@ -2,7 +2,7 @@
 // file sees before its own bindings, each with its cell. A name `__x` is `__x` in scope and `x` in builtins; any other
 // name is both (eval.cc:536-538). Built once per run: Nx.globals() keeps it (slots in Nx.gBase..).
 
-// the run-wide words of Nx.globals()
+// the run-wide words of Nx.globals() (16 in rt/snx_rt.c): every slot is defined here, nowhere else, so no two share a number
 def Nx.gReady(): I64 = 0
 def Nx.gBase(): I64 = 1
 def Nx.gKinds(): I64 = 2
@@ -15,6 +15,7 @@ def Nx.gRegex(): I64 = 8
 def Nx.gTrue(): I64 = 9
 def Nx.gFalse(): I64 = 10
 def Nx.gInts(): I64 = 11
+def Nx.gIncl(): I64 = 12
 
 // the integers 0 until Nx.smallInts() are made once, as the Booleans
 def Nx.smallInts(): I64 = 256
@@ -120,7 +121,7 @@ def Nx.bsConsts(b: Nx.BB): Unit =
   Nx.bsConst(b, "__nixVersion", Nx.VStr("2.34.8", Coll.Nil))
   Nx.bsConst(b, "__storeDir", Nx.VStr("/nix/store", Coll.Nil))
   Nx.bsConst(b, "__langVersion", Nx.VInt(6))
-  Nx.bsConst(b, "__nixPath", Nx.todoErr("nixPath"))
+  Nx.bsConst(b, "__nixPath", Nx.nixPathVal())
 
 // this wave's primops (arity = the length of .args, primops.cc)
 def Nx.bsPrims(b: Nx.BB): Unit =
@@ -179,16 +180,42 @@ def Nx.bsPrims(b: Nx.BB): Unit =
   Nx.bsPrim(b, "__match", 2, Nx.PMatch)
   Nx.bsPrim(b, "__split", 2, Nx.PSplit)
   Nx.bsPrim(b, "fromTOML", 1, Nx.PFromToml)
+  Nx.bsPrim(b, "baseNameOf", 1, Nx.PBaseNameOf)
+  Nx.bsPrim(b, "dirOf", 1, Nx.PDirOf)
+  Nx.bsPrim(b, "__ceil", 1, Nx.PCeil)
+  Nx.bsPrim(b, "__floor", 1, Nx.PFloor)
+  Nx.bsPrim(b, "__toPath", 1, Nx.PToPath)
+  Nx.bsPrim(b, "__pathExists", 1, Nx.PPathExists)
+  Nx.bsPrim(b, "__readFile", 1, Nx.PReadFile)
+  Nx.bsPrim(b, "__findFile", 2, Nx.PFindFile)
+  Nx.bsPrim(b, "__hashFile", 2, Nx.PHashFile)
+  Nx.bsPrim(b, "__readFileType", 1, Nx.PReadFileType)
+  Nx.bsPrim(b, "__readDir", 1, Nx.PReadDir)
+  Nx.bsPrim(b, "__zipAttrsWith", 2, Nx.PZipAttrsWith)
+  Nx.bsPrim(b, "__partition", 2, Nx.PPartition)
+  Nx.bsPrim(b, "__groupBy", 2, Nx.PGroupBy)
+  Nx.bsPrim(b, "__bitAnd", 2, Nx.PBitAnd)
+  Nx.bsPrim(b, "__bitOr", 2, Nx.PBitOr)
+  Nx.bsPrim(b, "__bitXor", 2, Nx.PBitXor)
+  Nx.bsPrim(b, "__hashString", 2, Nx.PHashString)
+  Nx.bsPrim(b, "__convertHash", 1, Nx.PConvertHash)
+  Nx.bsPrim(b, "__replaceStrings", 3, Nx.PReplaceStrings)
+  Nx.bsPrim(b, "__parseDrvName", 1, Nx.PParseDrvName)
+  Nx.bsPrim(b, "__compareVersions", 2, Nx.PCompareVersions)
+  Nx.bsPrim(b, "__splitVersion", 1, Nx.PSplitVersion)
+  Nx.bsPrim(b, "scopedImport", 2, Nx.PScopedImport)
+  Nx.bsPrim(b, "__toXML", 1, Nx.PToXml)
+  Nx.bsPrim(b, "__toJSON", 1, Nx.PToJson)
+  Nx.bsPrim(b, "__fromJSON", 1, Nx.PFromJson)
+  Nx.bsPrim(b, "__unsafeGetAttrPos", 2, Nx.PGetAttrPos)
+  Nx.bsPrim(b, "__genericClosure", 1, Nx.PGenericClosure)
 
 // later waves (regex, toml, json, xml, hashes, derivations, paths, fetchers, flakes, contexts)
 def Nx.bsTodos(b: Nx.BB): Unit =
   Nx.bsTodo(b, "derivation", 1)
   Nx.bsTodo(b, "derivationStrict", 1)
   Nx.bsTodo(b, "placeholder", 1)
-  Nx.bsTodo(b, "baseNameOf", 1)
-  Nx.bsTodo(b, "dirOf", 1)
   Nx.bsTodo(b, "break", 1)
-  Nx.bsTodo(b, "scopedImport", 2)
   Nx.bsTodo(b, "fetchTarball", 1)
   Nx.bsTodo(b, "fetchTree", 1)
   Nx.bsTodo(b, "fetchGit", 1)
@@ -203,36 +230,10 @@ def Nx.bsTodos(b: Nx.BB): Unit =
   Nx.bsTodo(b, "__addDrvOutputDependencies", 1)
   Nx.bsTodo(b, "__getContext", 1)
   Nx.bsTodo(b, "__appendContext", 2)
-  Nx.bsTodo(b, "__genericClosure", 1)
-  Nx.bsTodo(b, "__ceil", 1)
-  Nx.bsTodo(b, "__floor", 1)
   Nx.bsTodo(b, "__warn", 2)
   Nx.bsTodo(b, "__traceVerbose", 2)
-  Nx.bsTodo(b, "__toPath", 1)
   Nx.bsTodo(b, "__storePath", 1)
-  Nx.bsTodo(b, "__pathExists", 1)
-  Nx.bsTodo(b, "__readFile", 1)
-  Nx.bsTodo(b, "__findFile", 2)
-  Nx.bsTodo(b, "__hashFile", 2)
-  Nx.bsTodo(b, "__readFileType", 1)
-  Nx.bsTodo(b, "__readDir", 1)
   Nx.bsTodo(b, "__outputOf", 2)
-  Nx.bsTodo(b, "__toXML", 1)
-  Nx.bsTodo(b, "__toJSON", 1)
-  Nx.bsTodo(b, "__fromJSON", 1)
   Nx.bsTodo(b, "__toFile", 2)
   Nx.bsTodo(b, "__filterSource", 2)
   Nx.bsTodo(b, "__path", 1)
-  Nx.bsTodo(b, "__unsafeGetAttrPos", 2)
-  Nx.bsTodo(b, "__zipAttrsWith", 2)
-  Nx.bsTodo(b, "__partition", 2)
-  Nx.bsTodo(b, "__groupBy", 2)
-  Nx.bsPrim(b, "__bitAnd", 2, Nx.PBitAnd)
-  Nx.bsPrim(b, "__bitOr", 2, Nx.PBitOr)
-  Nx.bsPrim(b, "__bitXor", 2, Nx.PBitXor)
-  Nx.bsTodo(b, "__hashString", 2)
-  Nx.bsTodo(b, "__convertHash", 1)
-  Nx.bsTodo(b, "__replaceStrings", 3)
-  Nx.bsTodo(b, "__parseDrvName", 1)
-  Nx.bsTodo(b, "__compareVersions", 2)
-  Nx.bsTodo(b, "__splitVersion", 1)

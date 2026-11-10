@@ -10,5 +10,6 @@ case $op in
   drv) exec timeout 5 "$snx" drv "$file" ;;
   check) exec timeout 5 "$snx" check "$(realpath -s "$file")" ;;
   eval) exec timeout 5 "$snx" eval "$(realpath -s "$file")" "$@" ;;
+  eval-xml) exec timeout 5 "$snx" eval-xml "$(realpath -s "$file")" "$@" ;;
   *) exit 3 ;;
 esac

@@ -1,0 +1,1 @@
+[ "hello\n" true false true false { "w1-file.txt" = "regular"; "w1-scoped.nix" = "regular"; } "directory" "regular" "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03" 42 7 null true ]

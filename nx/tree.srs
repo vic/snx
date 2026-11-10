@@ -15,13 +15,13 @@ trait Nx.Named [A: Type]:
 
 given Nx.Named[Nx.Binding]:
   def nameOf(x: Nx.Binding): Str = x match
-    case Nx.Bind(n, _) => n
-    case Nx.BInherit(n) => n
-    case Nx.BInheritFrom(n, _) => n
+    case Nx.Bind(n, _, _) => n
+    case Nx.BInherit(n, _) => n
+    case Nx.BInheritFrom(n, _, _) => n
 
 given Nx.Named[Nx.Formal]:
   def nameOf(x: Nx.Formal): Str = x match
-    case Nx.Fm(n, _) => n
+    case Nx.Fm(n, _, _) => n
 
 // ---- strings -------------------------------------------------------------------------------------------------
 
@@ -217,14 +217,14 @@ def Nx.printBinds(xs: Coll.List[Nx.Binding]): Unit = xs match
   case Coll.Cons(h, t) =>
     Console.print(" (bind ")
     h match
-      case Nx.Bind(n, e) =>
+      case Nx.Bind(n, e, _) =>
         Nx.quote(n)
         Console.print(" ")
         Nx.printTree(e)
-      case Nx.BInherit(n) =>
+      case Nx.BInherit(n, _) =>
         Nx.quote(n)
         Console.print(" (inherit)")
-      case Nx.BInheritFrom(n, e) =>
+      case Nx.BInheritFrom(n, e, _) =>
         Nx.quote(n)
         Console.print(" ")
         Nx.p1("inherit-from", e)
@@ -236,7 +236,7 @@ def Nx.printFormals(xs: Coll.List[Nx.Formal]): Unit = xs match
   case Coll.Cons(h, t) =>
     Console.print(" (formal ")
     h match
-      case Nx.Fm(n, d) =>
+      case Nx.Fm(n, d, _) =>
         Nx.quote(n)
         d match
           case Coll.None => Console.print("")

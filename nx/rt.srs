@@ -51,3 +51,6 @@ extern def Nx.timeNow(): I64
 extern def Nx.canonPath(s: Str): Str
 extern def Nx.wordsFrom(a: Ptr, i: I64): Ptr
 extern def Nx.attrName(s: Str): Str
+// the position record of a symbol array (rt/snx_fs.c), Nx.noFrame() when none
+extern def Nx.posGet(key: Ptr): Ptr
+extern def Nx.posPut(key: Ptr, rec: Ptr): Unit

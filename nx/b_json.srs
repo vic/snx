@@ -1,0 +1,430 @@
+// snx builtins fromJSON, toJSON, toXML and the XML of `snx eval-xml` (json-to-value.cc, value-to-json.cc, value-to-xml.cc,
+// xml-writer.cc). fromJSON keeps its own stack of open arrays and objects, so nesting depth costs no C stack.
+
+extern def Nx.utf8(cp: I64): Str
+extern def Nx.jsonStr(s: Str): Str
+extern def Nx.jsonFloat(bits: I64): Str
+extern def Nx.xmlEsc(s: Str): Str
+
+// ---- fromJSON -------------------------------------------------------------------------------------------------
+
+enum Nx.JR:
+  case Nx.JOk(v: Nx.Val)
+  case Nx.JBad(msg: Str)
+
+enum Nx.JS:
+  case Nx.JStr(s: Str, next: I64)
+  case Nx.JStrBad
+
+// an open array (its cells, newest first) or object (its pairs, newest first, and the key awaiting its value)
+enum Nx.JFrame:
+  case Nx.JArr(items: Coll.List[Ptr])
+  case Nx.JObj(items: Coll.List[Nx.Pair], key: Str)
+
+def Nx.jBad(why: Str): Nx.JR = Nx.JBad(Nx.cat("while decoding a JSON string: ", why))
+
+def Nx.jWs(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if c == ' ' || c == '\t' || c == '\n' || c == '\r' then Nx.jWs(s, i + 1) else i
+
+def Nx.hexVal(c: I64): I64 =
+  if c >= '0' && c <= '9' then c - '0'
+  else if c >= 'a' && c <= 'f' then c - 'a' + 10
+  else if c >= 'A' && c <= 'F' then c - 'A' + 10
+  else 0 - 1
+
+// the 4 hex digits at i, or -1
+def Nx.hex4(s: Str, i: I64): I64 =
+  val a = Nx.hexVal(Str.at(s, i))
+  val b = Nx.hexVal(Str.at(s, i + 1))
+  val c = Nx.hexVal(Str.at(s, i + 2))
+  val d = Nx.hexVal(Str.at(s, i + 3))
+  if a < 0 || b < 0 || c < 0 || d < 0 then 0 - 1 else ((a * 16 + b) * 16 + c) * 16 + d
+
+// the string whose first byte after the opening quote is at i
+def Nx.jStr(s: Str, i: I64, sb: Ptr): Nx.JS =
+  val c = Str.at(s, i)
+  if c < 0 then Nx.JStrBad
+  else if c == '"' then Nx.JStr(Nx.sbGet(sb), i + 1)
+  else if c < 32 then Nx.JStrBad
+  else if c == '\\' then Nx.jEsc(s, i, sb)
+  else
+    val e = Nx.jRunEnd(s, i)
+    Nx.sbAdd(sb, Str.slice(s, i, e))
+    Nx.jStr(s, e, sb)
+
+def Nx.jEsc(s: Str, i: I64, sb: Ptr): Nx.JS =
+  val e = Str.at(s, i + 1)
+  if e == '"' || e == '\\' || e == '/' then
+    Nx.sbAdd(sb, Nx.byte(e))
+    Nx.jStr(s, i + 2, sb)
+  else if e == 'b' then
+    Nx.sbAdd(sb, Nx.byte(8))
+    Nx.jStr(s, i + 2, sb)
+  else if e == 'f' then
+    Nx.sbAdd(sb, Nx.byte(12))
+    Nx.jStr(s, i + 2, sb)
+  else if e == 'n' then
+    Nx.sbAdd(sb, Nx.byte(10))
+    Nx.jStr(s, i + 2, sb)
+  else if e == 'r' then
+    Nx.sbAdd(sb, Nx.byte(13))
+    Nx.jStr(s, i + 2, sb)
+  else if e == 't' then
+    Nx.sbAdd(sb, Nx.byte(9))
+    Nx.jStr(s, i + 2, sb)
+  else if e == 'u' then Nx.jUni(s, i, sb)
+  else Nx.JStrBad
+
+// \uXXXX at i, with a following \uXXXX for a surrogate pair
+def Nx.jUni(s: Str, i: I64, sb: Ptr): Nx.JS =
+  val u = Nx.hex4(s, i + 2)
+  if u <= 0 then Nx.JStrBad
+  else if u >= 55296 && u <= 56319 then
+    if Str.at(s, i + 6) == '\\' && Str.at(s, i + 7) == 'u' then
+      val lo = Nx.hex4(s, i + 8)
+      if lo >= 56320 && lo <= 57343 then
+        Nx.sbAdd(sb, Nx.utf8(65536 + (u - 55296) * 1024 + (lo - 56320)))
+        Nx.jStr(s, i + 12, sb)
+      else Nx.JStrBad
+    else Nx.JStrBad
+  else if u >= 56320 && u <= 57343 then Nx.JStrBad
+  else
+    Nx.sbAdd(sb, Nx.utf8(u))
+    Nx.jStr(s, i + 6, sb)
+
+def Nx.jDigits(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if c >= '0' && c <= '9' then Nx.jDigits(s, i + 1) else i
+
+// the number at i: an integer, or a float when it has a fraction or an exponent
+def Nx.jNum(s: Str, i: I64, st: Coll.List[Nx.JFrame]): Nx.JR =
+  val a = if Str.at(s, i) == '-' then i + 1 else i
+  val d0 = Str.at(s, a)
+  if d0 < '0' || d0 > '9' then Nx.jBad("invalid number")
+  else
+    val b = if d0 == '0' then a + 1 else Nx.jDigits(s, a)
+    if d0 == '0' && Str.at(s, b) >= '0' && Str.at(s, b) <= '9' then Nx.jBad("invalid number")
+    else
+      val c = if Str.at(s, b) == '.' then Nx.jDigits(s, b + 1) else b
+      if c == b + 1 && Str.at(s, b) == '.' then Nx.jBad("invalid number")
+      else
+        val x = Str.at(s, c)
+        val e = if x == 'e' || x == 'E' then Nx.jExp(s, c + 1) else c
+        if e < 0 then Nx.jBad("invalid number")
+        else Nx.jNumVal(Str.slice(s, i, e), e == b, a > i, e, s, st)
+
+// the end of an exponent whose sign or digits start at i, or -1
+def Nx.jExp(s: Str, i: I64): I64 =
+  val a = if Str.at(s, i) == '+' || Str.at(s, i) == '-' then i + 1 else i
+  val e = Nx.jDigits(s, a)
+  if e == a then 0 - 1 else e
+
+def Nx.jNumVal(t: Str, isInt: Bool, neg: Bool, e: I64, s: Str, st: Coll.List[Nx.JFrame]): Nx.JR =
+  if isInt && !Nx.intOverflows(t) then Nx.jDone(s, e, st, Nx.VInt(Nx.intValue(t)))
+  else if isInt && !neg then Nx.jBad("unsigned json number outside of Nix integer range")
+  else Nx.jDone(s, e, st, Nx.VFloat(Nx.floatBits(t)))
+
+def Nx.jLit(s: Str, i: I64, w: Str, v: Nx.Val, st: Coll.List[Nx.JFrame]): Nx.JR =
+  if Nx.occursAt(s, i, w) then Nx.jDone(s, i + Str.len(w), st, v) else Nx.jBad("invalid literal")
+
+// a value starts at i
+def Nx.jValue(s: Str, i0: I64, st: Coll.List[Nx.JFrame]): Nx.JR =
+  val i = Nx.jWs(s, i0)
+  val c = Str.at(s, i)
+  if c == '{' then
+    val j = Nx.jWs(s, i + 1)
+    if Str.at(s, j) == '}' then Nx.jDone(s, j + 1, st, Nx.VAttrs(0, Nx.arrNew(0), Nx.arrNew(0)))
+    else Nx.jKey(s, j, Coll.Nil, st)
+  else if c == '[' then
+    val j = Nx.jWs(s, i + 1)
+    if Str.at(s, j) == ']' then Nx.jDone(s, j + 1, st, Nx.VList(0, Nx.arrNew(0)))
+    else Nx.jValue(s, j, Coll.Cons(Nx.JArr(Coll.Nil), st))
+  else if c == '"' then Nx.jStr(s, i + 1, Nx.sbNew()) match
+    case Nx.JStr(t, n) => Nx.jDone(s, n, st, Nx.VStr(t, Coll.Nil))
+    case Nx.JStrBad => Nx.jBad("invalid string")
+  else if c == 't' then Nx.jLit(s, i, "true", Nx.VBool(true), st)
+  else if c == 'f' then Nx.jLit(s, i, "false", Nx.VBool(false), st)
+  else if c == 'n' then Nx.jLit(s, i, "null", Nx.VNull, st)
+  else Nx.jNum(s, i, st)
+
+// an object key at i, then its value
+def Nx.jKey(s: Str, i: I64, items: Coll.List[Nx.Pair], st: Coll.List[Nx.JFrame]): Nx.JR =
+  if Str.at(s, i) != '"' then Nx.jBad("object key expected")
+  else Nx.jStr(s, i + 1, Nx.sbNew()) match
+    case Nx.JStr(k, n) =>
+      val j = Nx.jWs(s, n)
+      if Str.at(s, j) == ':' then Nx.jValue(s, j + 1, Coll.Cons(Nx.JObj(items, k), st)) else Nx.jBad("':' expected")
+    case Nx.JStrBad => Nx.jBad("invalid string")
+
+// the value v ended at i: it belongs to the innermost open container, or is the result
+def Nx.jDone(s: Str, i0: I64, st: Coll.List[Nx.JFrame], v: Nx.Val): Nx.JR =
+  val i = Nx.jWs(s, i0)
+  st match
+    case Coll.Nil => if i == Str.len(s) then Nx.JOk(v) else Nx.jBad("unexpected trailing input")
+    case Coll.Cons(fr, rest) => fr match
+      case Nx.JArr(items) =>
+        val its = Coll.Cons(Nx.cell(v), items)
+        if Str.at(s, i) == ',' then Nx.jValue(s, i + 1, Coll.Cons(Nx.JArr(its), rest))
+        else if Str.at(s, i) == ']' then Nx.jDone(s, i + 1, rest, Nx.cellsOf(Coll.rev(its)))
+        else Nx.jBad("',' or ']' expected")
+      case Nx.JObj(items, key) =>
+        val its = Coll.Cons(Nx.Pair(Nx.intern(key), Nx.cell(v)), items)
+        if Str.at(s, i) == ',' then Nx.jKey(s, Nx.jWs(s, i + 1), its, rest)
+        else if Str.at(s, i) == '}' then Nx.jDone(s, i + 1, rest, Nx.attrsOf(its))
+        else Nx.jBad("',' or '}' expected")
+
+def Nx.pFromJson(v: Nx.Val): Nx.Val = v match
+  case Nx.VStr(s, _) => Nx.jValue(s, 0, Coll.Nil) match
+    case Nx.JOk(r) => r
+    case Nx.JBad(m) => Nx.VErr(Nx.KOther, m)
+  case _ => Nx.typeErr("a string", v)
+
+// ---- toJSON ---------------------------------------------------------------------------------------------------
+
+def Nx.depthErr(): Nx.Val = Nx.VErr(Nx.KOther, "stack overflow; max-call-depth exceeded")
+
+// the JSON of v appended to sb; Nx.VNull, or the first error. ctx = a word holding the string contexts met so far
+def Nx.toJson(v: Nx.Val, sb: Ptr, ctx: Ptr): Nx.Val =
+  val g = Nx.globals()
+  val d = Nx.ageti(g, Nx.gDepth())
+  if d >= Nx.ageti(g, Nx.gMaxDepth()) then Nx.depthErr()
+  else
+    Nx.aseti(g, Nx.gDepth(), d + 1)
+    val r = Nx.toJson1(v, sb, ctx)
+    Nx.aseti(g, Nx.gDepth(), d)
+    r
+
+def Nx.jsonStrOut(s: Str, sb: Ptr): Nx.Val =
+  val q = Nx.jsonStr(s)
+  if Str.len(q) < 0 then Nx.VErr(Nx.KOther, "JSON serialization error: invalid UTF-8")
+  else
+    Nx.sbAdd(sb, q)
+    Nx.VNull
+
+def Nx.toJson1(v: Nx.Val, sb: Ptr, ctx: Ptr): Nx.Val = v match
+  case Nx.VErr(_, _) => v
+  case Nx.VInt(n) =>
+    Nx.sbAdd(sb, Nx.intStr(n))
+    Nx.VNull
+  case Nx.VFloat(b) =>
+    Nx.sbAdd(sb, Nx.jsonFloat(b))
+    Nx.VNull
+  case Nx.VBool(b) =>
+    Nx.sbAdd(sb, if b then "true" else "false")
+    Nx.VNull
+  case Nx.VNull =>
+    Nx.sbAdd(sb, "null")
+    Nx.VNull
+  case Nx.VStr(s, c) =>
+    Nx.aset[Coll.List[Str]](ctx, 0, Coll.revOnto(c, Nx.aget[Coll.List[Str]](ctx, 0)))
+    Nx.jsonStrOut(s, sb)
+  case Nx.VPath(_) => Nx.todoErr("copying a path to the store")
+  case Nx.VList(n, xs) =>
+    Nx.sbAdd(sb, "[")
+    val r = Nx.jsonItems(xs, 0, n, sb, ctx)
+    if Nx.isErr(r) then r
+    else
+      Nx.sbAdd(sb, "]")
+      Nx.VNull
+  case Nx.VAttrs(n, syms, vals) => Nx.jsonAttrs(v, n, syms, vals, sb, ctx)
+  case _ => Nx.VErr(Nx.KType, Nx.cat("cannot convert ", Nx.cat(Nx.showType(v), " to JSON")))
+
+def Nx.jsonItems(xs: Ptr, i: I64, n: I64, sb: Ptr, ctx: Ptr): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    if i > 0 then Nx.sbAdd(sb, ",") else ()
+    val r = Nx.toJson(Nx.force(Nx.aget[Ptr](xs, i)), sb, ctx)
+    if Nx.isErr(r) then r else Nx.jsonItems(xs, i + 1, n, sb, ctx)
+
+// tryAttrsToString (a __toString) first, then outPath, else an object with its names in byte order
+def Nx.jsonAttrs(v: Nx.Val, n: I64, syms: Ptr, vals: Ptr, sb: Ptr, ctx: Ptr): Nx.Val =
+  val ts = Nx.findSym(syms, n, Nx.intern("__toString"))
+  if ts < n then
+    val s = Nx.coerce(v, false, false)
+    s match
+      case Nx.VStr(_, _) => Nx.toJson1(s, sb, ctx)
+      case _ => s
+  else
+    val op = Nx.findSym(syms, n, Nx.intern("outPath"))
+    if op < n then Nx.toJson(Nx.force(Nx.aget[Ptr](vals, op)), sb, ctx)
+    else
+      Nx.sbAdd(sb, "{")
+      val r = Nx.jsonFields(syms, vals, Nx.byName(syms, n), 0, n, sb, ctx)
+      if Nx.isErr(r) then r
+      else
+        Nx.sbAdd(sb, "}")
+        Nx.VNull
+
+def Nx.jsonFields(syms: Ptr, vals: Ptr, ord: Ptr, i: I64, n: I64, sb: Ptr, ctx: Ptr): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val j = Nx.ageti(ord, i)
+    if i > 0 then Nx.sbAdd(sb, ",") else ()
+    val k = Nx.jsonStrOut(Nx.symName(Nx.ageti(syms, j)), sb)
+    if Nx.isErr(k) then k
+    else
+      Nx.sbAdd(sb, ":")
+      val r = Nx.toJson(Nx.force(Nx.aget[Ptr](vals, j)), sb, ctx)
+      if Nx.isErr(r) then r else Nx.jsonFields(syms, vals, ord, i + 1, n, sb, ctx)
+
+def Nx.pToJson(v: Nx.Val): Nx.Val =
+  val sb = Nx.sbNew()
+  val ctx = Nx.arrNew(1)
+  Nx.aset[Coll.List[Str]](ctx, 0, Coll.Nil)
+  val r = Nx.toJson(v, sb, ctx)
+  if Nx.isErr(r) then r else Nx.VStr(Nx.sbGet(sb), Nx.aget[Coll.List[Str]](ctx, 0))
+
+// ---- toXML ----------------------------------------------------------------------------------------------------
+
+def Nx.xInd(sb: Ptr, d: I64): Unit =
+  if d > 0 then
+    Nx.sbAdd(sb, "  ")
+    Nx.xInd(sb, d - 1)
+  else ()
+
+// ` name="value"` with the value escaped
+def Nx.xAttr(name: Str, value: Str): Str = Nx.cat(Nx.cat(Nx.cat(Nx.cat(" ", name), "=\""), Nx.xmlEsc(value)), "\"")
+
+def Nx.xEmpty(sb: Ptr, d: I64, name: Str, attrs: Str): Nx.Val =
+  Nx.xInd(sb, d)
+  Nx.sbAdd(sb, Nx.cat(Nx.cat(Nx.cat("<", name), attrs), " />\n"))
+  Nx.VNull
+
+def Nx.xOpen(sb: Ptr, d: I64, name: Str, attrs: Str): Unit =
+  Nx.xInd(sb, d)
+  Nx.sbAdd(sb, Nx.cat(Nx.cat(Nx.cat("<", name), attrs), ">\n"))
+
+def Nx.xClose(sb: Ptr, d: I64, name: Str): Nx.Val =
+  Nx.xInd(sb, d)
+  Nx.sbAdd(sb, Nx.cat(Nx.cat("</", name), ">\n"))
+  Nx.VNull
+
+// printValueAsXML (strict, no location) of v at depth d; seen = a word holding the drvPaths shown
+def Nx.xml(v: Nx.Val, sb: Ptr, d: I64, seen: Ptr): Nx.Val = v match
+  case Nx.VErr(_, _) => v
+  case Nx.VInt(n) => Nx.xEmpty(sb, d, "int", Nx.xAttr("value", Nx.intStr(n)))
+  case Nx.VBool(b) => Nx.xEmpty(sb, d, "bool", Nx.xAttr("value", if b then "true" else "false"))
+  case Nx.VStr(s, _) => Nx.xEmpty(sb, d, "string", Nx.xAttr("value", s))
+  case Nx.VPath(s) => Nx.xEmpty(sb, d, "path", Nx.xAttr("value", s))
+  case Nx.VNull => Nx.xEmpty(sb, d, "null", "")
+  case Nx.VFloat(b) => Nx.xEmpty(sb, d, "float", Nx.xAttr("value", Nx.floatShow(b)))
+  case Nx.VList(n, xs) =>
+    Nx.xOpen(sb, d, "list", "")
+    val r = Nx.xmlItems(xs, 0, n, sb, d + 1, seen)
+    if Nx.isErr(r) then r else Nx.xClose(sb, d, "list")
+  case Nx.VAttrs(n, syms, vals) => Nx.xmlSet(v, n, syms, vals, sb, d, seen)
+  case Nx.VLam(_, code) => Nx.xmlFun(code, sb, d)
+  case _ => Nx.xEmpty(sb, d, "unevaluated", "")
+
+def Nx.xmlItems(xs: Ptr, i: I64, n: I64, sb: Ptr, d: I64, seen: Ptr): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val r = Nx.xml(Nx.force(Nx.aget[Ptr](xs, i)), sb, d, seen)
+    if Nx.isErr(r) then r else Nx.xmlItems(xs, i + 1, n, sb, d, seen)
+
+// the string attribute name of a set, forced, "" when absent or no string
+def Nx.xmlStrAttr(n: I64, syms: Ptr, vals: Ptr, name: Str): Str =
+  val i = Nx.findSym(syms, n, Nx.intern(name))
+  if i == n then "" else Nx.strOf(Nx.force(Nx.aget[Ptr](vals, i)))
+
+def Nx.xmlSet(v: Nx.Val, n: I64, syms: Ptr, vals: Ptr, sb: Ptr, d: I64, seen: Ptr): Nx.Val =
+  val isd = Nx.isDrv(v)
+  isd match
+    case Nx.VBool(drv) =>
+      if drv then Nx.xmlDrv(n, syms, vals, sb, d, seen)
+      else
+        Nx.xOpen(sb, d, "attrs", "")
+        val r = Nx.xmlAttrs(n, syms, vals, Nx.byName(syms, n), 0, sb, d + 1, seen)
+        if Nx.isErr(r) then r else Nx.xClose(sb, d, "attrs")
+    case _ => isd
+
+// a derivation shows its attributes once per drvPath, then `<repeated />`
+def Nx.xmlDrv(n: I64, syms: Ptr, vals: Ptr, sb: Ptr, d: I64, seen: Ptr): Nx.Val =
+  val dp = Nx.xmlStrAttr(n, syms, vals, "drvPath")
+  val op = Nx.xmlStrAttr(n, syms, vals, "outPath")
+  val a1 = if Str.len(dp) > 0 then Nx.xAttr("drvPath", dp) else ""
+  val a2 = if Nx.findSym(syms, n, Nx.intern("outPath")) < n then Nx.xAttr("outPath", op) else ""
+  Nx.xOpen(sb, d, "derivation", Nx.cat(a1, a2))
+  val fresh = Nx.drvFresh(seen, dp)
+  val r = if fresh then Nx.xmlAttrs(n, syms, vals, Nx.byName(syms, n), 0, sb, d + 1, seen) else Nx.xEmpty(sb, d + 1, "repeated", "")
+  if Nx.isErr(r) then r else Nx.xClose(sb, d, "derivation")
+
+// dp not shown yet (an empty drvPath never counts): it is marked shown
+def Nx.drvFresh(seen: Ptr, dp: Str): Bool =
+  val m = Nx.aget[Coll.IMap[Bool]](seen, 0)
+  val k = Nx.intern(dp)
+  if Str.len(dp) == 0 then false
+  else Coll.lookup(m, k) match
+    case Coll.Some(_) => false
+    case Coll.None =>
+      Nx.aset[Coll.IMap[Bool]](seen, 0, Coll.insert(m, k, true))
+      true
+
+// the attributes in byte order
+def Nx.xmlAttrs(n: I64, syms: Ptr, vals: Ptr, ord: Ptr, i: I64, sb: Ptr, d: I64, seen: Ptr): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val j = Nx.ageti(ord, i)
+    val name = Nx.symName(Nx.ageti(syms, j))
+    Nx.xOpen(sb, d, "attr", Nx.xAttr("name", name))
+    val r = Nx.xml(Nx.force(Nx.aget[Ptr](vals, j)), sb, d + 1, seen)
+    if Nx.isErr(r) then r
+    else
+      Nx.xClose(sb, d, "attr")
+      Nx.xmlAttrs(n, syms, vals, ord, i + 1, sb, d, seen)
+
+def Nx.xmlFun(code: Nx.Code, sb: Ptr, d: I64): Nx.Val = code match
+  case Nx.CLamArg(_, name) =>
+    Nx.xOpen(sb, d, "function", "")
+    Nx.xEmpty(sb, d + 1, "varpat", Nx.xAttr("name", name))
+    Nx.xClose(sb, d, "function")
+  case Nx.CLam(arg, nf, fms, ell, _, _, name) =>
+    Nx.xOpen(sb, d, "function", "")
+    val a1 = if ell then Nx.xAttr("ellipsis", "1") else ""
+    val a2 = if arg then Nx.xAttr("name", name) else ""
+    Nx.xOpen(sb, d + 1, "attrspat", Nx.cat(a1, a2))
+    Nx.xmlFormals(fms, nf, Nx.byFormal(fms, nf), 0, sb, d + 2)
+    Nx.xClose(sb, d + 1, "attrspat")
+    Nx.xClose(sb, d, "function")
+  case _ => Nx.xEmpty(sb, d, "unevaluated", "")
+
+// the formals' indexes in the byte order of their names
+def Nx.byFormal(fms: Ptr, nf: I64): Ptr =
+  val syms = Nx.arrNew(nf)
+  Nx.formalSyms(fms, syms, 0, nf)
+  Nx.byName(syms, nf)
+
+def Nx.formalSyms(fms: Ptr, syms: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.aget[Nx.CFormal](fms, i) match
+      case Nx.CFm(sym, _) => Nx.aseti(syms, i, sym)
+    Nx.formalSyms(fms, syms, i + 1, n)
+  else ()
+
+def Nx.xmlFormals(fms: Ptr, nf: I64, ord: Ptr, i: I64, sb: Ptr, d: I64): Nx.Val =
+  if i == nf then Nx.VNull
+  else
+    Nx.aget[Nx.CFormal](fms, Nx.ageti(ord, i)) match
+      case Nx.CFm(sym, _) => Nx.xEmpty(sb, d, "attr", Nx.xAttr("name", Nx.symName(sym)))
+    Nx.xmlFormals(fms, nf, ord, i + 1, sb, d)
+
+// the whole document, `<?xml ...?>` to `</expr>`
+def Nx.xmlDoc(v: Nx.Val): Nx.Val =
+  val sb = Nx.sbNew()
+  Nx.sbAdd(sb, "<?xml version='1.0' encoding='utf-8'?>\n")
+  Nx.xOpen(sb, 0, "expr", "")
+  val seen = Nx.arrNew(1)
+  Nx.aset[Coll.IMap[Bool]](seen, 0, Coll.Tip)
+  val r = Nx.xml(v, sb, 1, seen)
+  if Nx.isErr(r) then r
+  else
+    Nx.xClose(sb, 0, "expr")
+    Nx.VStr(Nx.sbGet(sb), Coll.Nil)
+
+def Nx.pToXml(v: Nx.Val): Nx.Val = Nx.xmlDoc(v)
+
+// the end of the run of plain string bytes (no quote, backslash or control byte) from i
+def Nx.jRunEnd(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if c < 32 || c == '"' || c == '\\' then i else Nx.jRunEnd(s, i + 1)

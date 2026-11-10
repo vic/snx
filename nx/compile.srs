@@ -17,10 +17,13 @@ enum Nx.Sc:
 enum Nx.Cx:
   case Nx.Cx(file: Str, src: Str, undef: Ptr, base: Nx.Val)
 
-def Nx.compile(e: Nx.Expr, file: Str, src: Str): Nx.CompileResult =
+def Nx.compile(e: Nx.Expr, file: Str, src: Str): Nx.CompileResult = Nx.compileIn(e, file, src, Coll.Nil)
+
+// sc = the scope levels the file starts in (scopedImport: the names of its set)
+def Nx.compileIn(e: Nx.Expr, file: Str, src: Str, sc: Coll.List[Nx.Sc]): Nx.CompileResult =
   val u = Nx.arrNew(3)
   Nx.aseti(u, 0, 0)
-  val c = Nx.cp(e, Coll.Nil, Nx.Cx(file, src, u, Nx.baseEnv()))
+  val c = Nx.cp(e, sc, Nx.Cx(file, src, u, Nx.baseEnv()))
   if Nx.ageti(u, 0) == 1 then Nx.Undefined(Nx.ageti(u, 1), Nx.symName(Nx.ageti(u, 2))) else Nx.Compiled(c)
 
 // a literal: its value, and one cell of it for every lazy use (a forced cell is never written again)
@@ -144,9 +147,9 @@ def Nx.cpWithVar(p: I64, sym: I64, name: Str, withs: Coll.List[I64], u: Ptr): Nx
 // ---- bindings -------------------------------------------------------------------------------------------------
 
 def Nx.bindName(b: Nx.Binding): Str = b match
-  case Nx.Bind(n, _) => n
-  case Nx.BInherit(n) => n
-  case Nx.BInheritFrom(n, _) => n
+  case Nx.Bind(n, _, _) => n
+  case Nx.BInherit(n, _) => n
+  case Nx.BInheritFrom(n, _, _) => n
 
 // the n bindings as arrays sorted by symbol id: syms (I64) and the Nx.Binding of each
 enum Nx.Sorted:
@@ -184,9 +187,9 @@ def Nx.fillSlots(slots: Ptr, i: I64, n: I64): Unit =
 // shortcut: an inherit (e) source is evaluated once per name, not shared (Nix: one inheritFromEnv); share it when a test
 // or a profile shows the cost.
 def Nx.cpBind(b: Nx.Binding, inner: Coll.List[Nx.Sc], outer: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = b match
-  case Nx.Bind(_, x) => Nx.cp(x, inner, cx)
-  case Nx.BInherit(n) => Nx.cpVar(0, Nx.intern(n), n, outer, 0, Coll.Nil, cx)
-  case Nx.BInheritFrom(n, from) => Nx.CSelect(Nx.cp(from, inner, cx), Coll.Cons(Nx.KSym(Nx.intern(n)), Coll.Nil), Coll.None)
+  case Nx.Bind(_, x, _) => Nx.cp(x, inner, cx)
+  case Nx.BInherit(n, _) => Nx.cpVar(0, Nx.intern(n), n, outer, 0, Coll.Nil, cx)
+  case Nx.BInheritFrom(n, from, _) => Nx.CSelect(Nx.cp(from, inner, cx), Coll.Cons(Nx.KSym(Nx.intern(n)), Coll.Nil), Coll.None)
 
 def Nx.cpBinds(arr: Ptr, out: Ptr, i: I64, n: I64, inner: Coll.List[Nx.Sc], outer: Coll.List[Nx.Sc], cx: Nx.Cx): Ptr =
   if i < n then
@@ -202,14 +205,14 @@ def Nx.cpDyns(ds: Coll.List[Nx.DynBind], sc: Coll.List[Nx.Sc], cx: Nx.Cx, acc: C
 // { ... }: values in the current frame
 def Nx.cpAttrs(binds: Coll.List[Nx.Binding], dyns: Coll.List[Nx.DynBind], sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code =
   Nx.sortBinds(binds) match
-    case Nx.Sorted(n, syms, arr) => Nx.CAttrs(n, syms, Nx.cpBinds(arr, Nx.arrNew(n), 0, n, sc, sc, cx), Nx.cpDyns(dyns, sc, cx, Coll.Nil))
+    case Nx.Sorted(n, syms, arr) => Nx.cpAttrsAt(syms, Nx.posOfBinds(cx, arr, n), Nx.CAttrs(n, syms, Nx.cpBinds(arr, Nx.arrNew(n), 0, n, sc, sc, cx), Nx.cpDyns(dyns, sc, cx, Coll.Nil)))
 
 // rec { ... }: a new frame of the names, slot i + 1 = attribute i (the set shares the frame's cells)
 def Nx.cpRec(binds: Coll.List[Nx.Binding], dyns: Coll.List[Nx.DynBind], sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code =
   Nx.sortBinds(binds) match
     case Nx.Sorted(n, syms, arr) =>
       val inner = Coll.Cons(Nx.scOfSorted(n, syms), sc)
-      Nx.CRecAttrs(n, syms, Nx.cpBinds(arr, Nx.arrNew(n), 0, n, inner, Coll.Cons(Nx.ScAnon, sc), cx), Nx.cpDyns(dyns, inner, cx, Coll.Nil))
+      Nx.cpAttrsAt(syms, Nx.posOfBinds(cx, arr, n), Nx.CRecAttrs(n, syms, Nx.cpBinds(arr, Nx.arrNew(n), 0, n, inner, Coll.Cons(Nx.ScAnon, sc), cx), Nx.cpDyns(dyns, inner, cx, Coll.Nil)))
 
 // let: as rec, the body in the new frame (nixexpr.cc:505-525); a let has no dynamic attributes (the parser refuses them)
 def Nx.cpLet(attrs: Nx.Expr, body: Nx.Expr, sc: Coll.List[Nx.Sc], cx: Nx.Cx): Nx.Code = attrs match
@@ -236,7 +239,7 @@ def Nx.oneSym(v: I64): Ptr =
   a
 
 def Nx.fmName(f: Nx.Formal): Str = f match
-  case Nx.Fm(n, _) => n
+  case Nx.Fm(n, _, _) => n
 
 def Nx.fillFormals(fs: Coll.List[Nx.Formal], syms: Ptr, arr: Ptr, i: I64): Unit = fs match
   case Coll.Nil => ()
@@ -267,7 +270,12 @@ def Nx.cpPattern(arg: Coll.Option[Str], ell: Bool, fs: Coll.List[Nx.Formal], bod
   Nx.sortPairs(ns, nslot, n)
   val inner = Coll.Cons(Nx.ScLex(n, ns, nslot), sc)
   val cfs = Nx.cpFormals(syms, arr, Nx.arrNew(nf), 0, nf, inner, cx)
-  Nx.CLam(named, nf, cfs, ell, nf + 1, Nx.cp(body, inner, cx), "")
+  Nx.cpAttrsAt(cfs, Nx.posOfFormals(cx, arr, nf), Nx.CLam(named, nf, cfs, ell, nf + 1, Nx.cp(body, inner, cx), Nx.optStr(arg)))
+
+// the @ name of a pattern, or ""
+def Nx.optStr(o: Coll.Option[Str]): Str = o match
+  case Coll.Some(x) => x
+  case Coll.None => ""
 
 def Nx.fmScope(syms: Ptr, ns: Ptr, nslot: Ptr, i: I64, nf: I64): Unit =
   if i < nf then
@@ -279,7 +287,51 @@ def Nx.fmScope(syms: Ptr, ns: Ptr, nslot: Ptr, i: I64, nf: I64): Unit =
 def Nx.cpFormals(syms: Ptr, arr: Ptr, out: Ptr, i: I64, nf: I64, inner: Coll.List[Nx.Sc], cx: Nx.Cx): Ptr =
   if i < nf then
     val d: Coll.Option[Nx.Code] = Nx.aget[Nx.Formal](arr, i) match
-      case Nx.Fm(_, dflt) => Nx.cpOpt(dflt, inner, cx)
+      case Nx.Fm(_, dflt, _) => Nx.cpOpt(dflt, inner, cx)
     Nx.aset[Nx.CFormal](out, i, Nx.CFm(Nx.ageti(syms, i), d))
     Nx.cpFormals(syms, arr, out, i + 1, nf, inner, cx)
   else out
+
+// ---- source positions of attribute names and formals (unsafeGetAttrPos) --------------------------------------------
+
+// the record of a set or a pattern: [file cell, source cell, byte offset of name 0, ..]; kept in the table of rt/snx_fs.c
+// under the address of the array of the symbols, which every evaluation of the set shares
+def Nx.posRec(cx: Nx.Cx, n: I64): Ptr = cx match
+  case Nx.Cx(file, src, _, _) =>
+    val r = Nx.arrNew(n + 2)
+    Nx.aset[Ptr](r, 0, Nx.strCell(file))
+    Nx.aset[Ptr](r, 1, Nx.strCell(src))
+    r
+
+def Nx.posOfBinds(cx: Nx.Cx, arr: Ptr, n: I64): Ptr =
+  val r = Nx.posRec(cx, n)
+  Nx.fillBindPos(arr, r, 0, n)
+  r
+
+def Nx.fillBindPos(arr: Ptr, r: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.aseti(r, i + 2, Nx.bindPos(Nx.aget[Nx.Binding](arr, i)))
+    Nx.fillBindPos(arr, r, i + 1, n)
+  else ()
+
+def Nx.bindPos(b: Nx.Binding): I64 = b match
+  case Nx.Bind(_, _, p) => p
+  case Nx.BInherit(_, p) => p
+  case Nx.BInheritFrom(_, _, p) => p
+
+def Nx.posOfFormals(cx: Nx.Cx, arr: Ptr, n: I64): Ptr =
+  val r = Nx.posRec(cx, n)
+  Nx.fillFormalPos(arr, r, 0, n)
+  r
+
+def Nx.fillFormalPos(arr: Ptr, r: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.aget[Nx.Formal](arr, i) match
+      case Nx.Fm(_, _, p) => Nx.aseti(r, i + 2, p)
+    Nx.fillFormalPos(arr, r, i + 1, n)
+  else ()
+
+// the code c, after its position record is registered under key
+def Nx.cpAttrsAt(key: Ptr, rec: Ptr, c: Nx.Code): Nx.Code =
+  Nx.posPut(key, rec)
+  c

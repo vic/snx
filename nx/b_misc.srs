@@ -1,0 +1,423 @@
+// snx builtins of wave 1 that need no file system: bitAnd bitOr bitXor floor ceil groupBy partition zipAttrsWith
+// replaceStrings parseDrvName compareVersions splitVersion baseNameOf dirOf (primops.cc, libstore/names.cc).
+
+extern def Nx.roundOk(bits: I64, up: Bool): Bool
+extern def Nx.roundInt(bits: I64, up: Bool): I64
+
+
+// prim_floor / prim_ceil: an integer argument stays as it is
+def Nx.pRound(v: Nx.Val, up: Bool): Nx.Val = v match
+  case Nx.VInt(_) => v
+  case Nx.VFloat(b) =>
+    if Nx.roundOk(b, up) then Nx.VInt(Nx.roundInt(b, up))
+    else Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("NixFloat argument ", Nx.floatShow(b)), " is not in the range of NixInt"))
+  case _ => Nx.typeErr("a float", v)
+
+// ---- strings --------------------------------------------------------------------------------------------------
+
+// legacyBaseNameOf (primops.cc:2000)
+def Nx.baseName(p: Str): Str =
+  val n = Str.len(p)
+  if n == 0 then ""
+  else
+    val last = if Str.at(p, n - 1) == '/' && n - 1 > 0 then n - 2 else n - 1
+    Str.slice(p, Nx.slashAfter(p, last), last + 1)
+
+// the index after the last '/' at or before i, or 0
+def Nx.slashAfter(p: Str, i: I64): I64 =
+  if i < 0 then 0
+  else if Str.at(p, i) == '/' then i + 1
+  else Nx.slashAfter(p, i - 1)
+
+def Nx.pBaseNameOf(v: Nx.Val): Nx.Val =
+  val s = Nx.coerce(v, false, false)
+  s match
+    case Nx.VStr(t, ctx) => Nx.VStr(Nx.baseName(t), ctx)
+    case _ => s
+
+// the index of the last '/' of p, or -1
+def Nx.lastSlash(p: Str, i: I64): I64 =
+  if i < 0 then 0 - 1
+  else if Str.at(p, i) == '/' then i
+  else Nx.lastSlash(p, i - 1)
+
+def Nx.pDirOf(v: Nx.Val): Nx.Val = v match
+  case Nx.VPath(p) => if Str.eq(p, "/") then v else Nx.VPath(Nx.dirName(p))
+  case _ =>
+    val s = Nx.coerce(v, false, false)
+    s match
+      case Nx.VStr(t, ctx) =>
+        val i = Nx.lastSlash(t, Str.len(t) - 1)
+        if i < 0 then Nx.VStr(".", ctx)
+        else if i == 0 then Nx.VStr("/", ctx)
+        else Nx.VStr(Str.slice(t, 0, i), ctx)
+      case _ => s
+
+// the cells of a forced list that are strings: the first that is not gives its error
+def Nx.allStrings(xs: Ptr, i: I64, n: I64): Nx.Val =
+  if i == n then Nx.VNull
+  else
+    val v = Nx.force(Nx.aget[Ptr](xs, i))
+    v match
+      case Nx.VStr(_, _) => Nx.allStrings(xs, i + 1, n)
+      case _ => Nx.typeErr("a string", v)
+
+// from[j] occurs in s at p
+def Nx.occursAt(s: Str, p: I64, f: Str): Bool =
+  val m = Str.len(f)
+  p + m <= Str.len(s) && Str.eq(Str.slice(s, p, p + m), f)
+
+// the first j in from (cells xs of n strings) that occurs in s at p, or n
+def Nx.firstFrom(xs: Ptr, j: I64, n: I64, s: Str, p: I64): I64 =
+  if j == n then n
+  else Nx.force(Nx.aget[Ptr](xs, j)) match
+    case Nx.VStr(f, _) => if Nx.occursAt(s, p, f) then j else Nx.firstFrom(xs, j + 1, n, s, p)
+    case _ => n
+
+def Nx.pReplace(fv: Nx.Val, tv: Nx.Val, sv: Nx.Val): Nx.Val = fv match
+  case Nx.VList(n, fs) => tv match
+    case Nx.VList(m, ts) =>
+      if n != m then Nx.VErr(Nx.KOther, "'from' and 'to' arguments passed to builtins.replaceStrings have different lengths")
+      else
+        val e = Nx.allStrings(fs, 0, n)
+        if Nx.isErr(e) then e
+        else sv match
+          case Nx.VStr(s, ctx) => Nx.replaceGo(fs, ts, n, s, 0, Nx.sbNew(), ctx)
+          case _ => Nx.typeErr("a string", sv)
+    case _ => Nx.typeErr("a list", tv)
+  case _ => Nx.typeErr("a list", fv)
+
+// prim_replaceStrings (primops.cc:4969): p runs one past the end so that an empty `from` matches there
+def Nx.replaceGo(fs: Ptr, ts: Ptr, n: I64, s: Str, p: I64, sb: Ptr, ctx: Coll.List[Str]): Nx.Val =
+  if p > Str.len(s) then Nx.VStr(Nx.sbGet(sb), ctx)
+  else
+    val j = Nx.firstFrom(fs, 0, n, s, p)
+    if j == n then
+      if p < Str.len(s) then Nx.sbAdd(sb, Str.slice(s, p, p + 1)) else ()
+      Nx.replaceGo(fs, ts, n, s, p + 1, sb, ctx)
+    else
+      val t = Nx.force(Nx.aget[Ptr](ts, j))
+      t match
+        case Nx.VStr(r, c2) =>
+          Nx.sbAdd(sb, r)
+          val flen = Nx.strLenOf(Nx.force(Nx.aget[Ptr](fs, j)))
+          if flen == 0 then
+            if p < Str.len(s) then Nx.sbAdd(sb, Str.slice(s, p, p + 1)) else ()
+            Nx.replaceGo(fs, ts, n, s, p + 1, sb, Coll.revOnto(c2, ctx))
+          else Nx.replaceGo(fs, ts, n, s, p + flen, sb, Coll.revOnto(c2, ctx))
+        case _ => Nx.typeErr("a string", t)
+
+def Nx.strLenOf(v: Nx.Val): I64 = v match
+  case Nx.VStr(s, _) => Str.len(s)
+  case _ => 0
+
+// ---- versions (libstore/names.cc) -----------------------------------------------------------------------------
+
+def Nx.isDigit(c: I64): Bool = c >= '0' && c <= '9'
+
+def Nx.isAlpha(c: I64): Bool = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+
+def Nx.skipSep(s: Str, i: I64): I64 =
+  if i < Str.len(s) && (Str.at(s, i) == '.' || Str.at(s, i) == '-') then Nx.skipSep(s, i + 1) else i
+
+// the end of the component that starts at i (a run of digits, or of non-digits that are no separator)
+def Nx.compEnd(s: Str, i: I64): I64 =
+  if i >= Str.len(s) then i
+  else if Nx.isDigit(Str.at(s, i)) then Nx.digitsEnd(s, i)
+  else Nx.wordEnd(s, i)
+
+def Nx.digitsEnd(s: Str, i: I64): I64 =
+  if i < Str.len(s) && Nx.isDigit(Str.at(s, i)) then Nx.digitsEnd(s, i + 1) else i
+
+def Nx.wordEnd(s: Str, i: I64): I64 =
+  if i < Str.len(s) && !Nx.isDigit(Str.at(s, i)) && Str.at(s, i) != '.' && Str.at(s, i) != '-' then Nx.wordEnd(s, i + 1) else i
+
+// string2Int<int> of a component: its value, or -1 when it is no number or does not fit an int
+def Nx.compNum(c: Str): I64 =
+  if Str.len(c) == 0 || !Nx.isDigit(Str.at(c, 0)) then 0 - 1 else Nx.compNumGo(c, 0, 0)
+
+def Nx.compNumGo(c: Str, i: I64, acc: I64): I64 =
+  if i == Str.len(c) then acc
+  else
+    val v = acc * 10 + (Str.at(c, i) - '0')
+    if v > 2147483647 then 0 - 1 else Nx.compNumGo(c, i + 1, v)
+
+def Nx.compLess(c1: Str, c2: Str): Bool =
+  val n1 = Nx.compNum(c1)
+  val n2 = Nx.compNum(c2)
+  if n1 >= 0 && n2 >= 0 then n1 < n2
+  else if Str.len(c1) == 0 && n2 >= 0 then true
+  else if Str.eq(c1, "pre") && !Str.eq(c2, "pre") then true
+  else if Str.eq(c2, "pre") then false
+  else if n2 >= 0 then true
+  else if n1 >= 0 then false
+  else Nx.strLess(c1, c2)
+
+def Nx.cmpVersions(a: Str, p1: I64, b: Str, p2: I64): I64 =
+  if p1 >= Str.len(a) && p2 >= Str.len(b) then 0
+  else
+    val s1 = Nx.skipSep(a, p1)
+    val e1 = Nx.compEnd(a, s1)
+    val s2 = Nx.skipSep(b, p2)
+    val e2 = Nx.compEnd(b, s2)
+    val c1 = Str.slice(a, s1, e1)
+    val c2 = Str.slice(b, s2, e2)
+    if Nx.compLess(c1, c2) then 0 - 1
+    else if Nx.compLess(c2, c1) then 1
+    else Nx.cmpVersions(a, e1, b, e2)
+
+def Nx.pCompareVersions(x: Nx.Val, y: Nx.Val): Nx.Val = x match
+  case Nx.VStr(a, _) => y match
+    case Nx.VStr(b, _) => Nx.VInt(Nx.cmpVersions(a, 0, b, 0))
+    case _ => Nx.typeErr("a string", y)
+  case _ => Nx.typeErr("a string", x)
+
+def Nx.splitVer(s: Str, p: I64, acc: Coll.List[Str]): Coll.List[Str] =
+  val st = Nx.skipSep(s, p)
+  val e = Nx.compEnd(s, st)
+  if e == st then Coll.rev(acc) else Nx.splitVer(s, e, Coll.Cons(Str.slice(s, st, e), acc))
+
+def Nx.strCells(xs: Coll.List[Str], out: Ptr, i: I64): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.aset[Ptr](out, i, Nx.strCell(h))
+    Nx.strCells(t, out, i + 1)
+
+def Nx.pSplitVersion(v: Nx.Val): Nx.Val = v match
+  case Nx.VStr(s, _) =>
+    val cs = Nx.splitVer(s, 0, Coll.Nil)
+    val n = Coll.length(cs)
+    val out = Nx.arrNew(n)
+    Nx.strCells(cs, out, 0)
+    Nx.VList(n, out)
+  case _ => Nx.typeErr("a string", v)
+
+// the first '-' not followed by a letter, with something after it, or -1
+def Nx.dashAt(s: Str, i: I64): I64 =
+  if i >= Str.len(s) then 0 - 1
+  else if Str.at(s, i) == '-' && i + 1 < Str.len(s) && !Nx.isAlpha(Str.at(s, i + 1)) then i
+  else Nx.dashAt(s, i + 1)
+
+def Nx.pParseDrvName(v: Nx.Val): Nx.Val = v match
+  case Nx.VStr(s, _) =>
+    val i = Nx.dashAt(s, 0)
+    val name = if i < 0 then s else Str.slice(s, 0, i)
+    val ver = if i < 0 then "" else Str.slice(s, i + 1, Str.len(s))
+    Nx.attrsOf(Coll.Cons(Nx.pair("name", Nx.VStr(name, Coll.Nil)), Coll.Cons(Nx.pair("version", Nx.VStr(ver, Coll.Nil)), Coll.Nil)))
+  case _ => Nx.typeErr("a string", v)
+
+// ---- lists and sets -------------------------------------------------------------------------------------------
+
+def Nx.cellsOf(xs: Coll.List[Ptr]): Nx.Val =
+  val n = Coll.length(xs)
+  val out = Nx.arrNew(n)
+  Nx.ptrCells(xs, out, 0)
+  Nx.VList(n, out)
+
+def Nx.ptrCells(xs: Coll.List[Ptr], out: Ptr, i: I64): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.aset[Ptr](out, i, h)
+    Nx.ptrCells(t, out, i + 1)
+
+// prim_partition: right and wrong, each in list order
+def Nx.pPartition(a: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    val e = Nx.fnErr(Nx.force(a))
+    if Nx.isErr(e) then e else Nx.partGo(Nx.force(a), xs, 0, n, Coll.Nil, Coll.Nil)
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.partGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, right: Coll.List[Ptr], wrong: Coll.List[Ptr]): Nx.Val =
+  if i == n then
+    Nx.attrsOf(Coll.Cons(Nx.pair("right", Nx.cellsOf(Coll.rev(right))), Coll.Cons(Nx.pair("wrong", Nx.cellsOf(Coll.rev(wrong))), Coll.Nil)))
+  else
+    val x = Nx.aget[Ptr](xs, i)
+    val r = Nx.callBool(f, x)
+    r match
+      case Nx.VBool(t) =>
+        if t then Nx.partGo(f, xs, i + 1, n, Coll.Cons(x, right), wrong) else Nx.partGo(f, xs, i + 1, n, right, Coll.Cons(x, wrong))
+      case _ => r
+
+// symbol -> its cells, newest first, and the symbols in first-seen order
+enum Nx.Groups:
+  case Nx.Groups(m: Coll.IMap[Coll.List[Ptr]], order: Coll.List[I64])
+
+def Nx.grpAdd(g: Nx.Groups, sym: I64, c: Ptr): Nx.Groups = g match
+  case Nx.Groups(m, order) => Coll.lookup(m, sym) match
+    case Coll.Some(cs) => Nx.Groups(Coll.insert(m, sym, Coll.Cons(c, cs)), order)
+    case Coll.None => Nx.Groups(Coll.insert(m, sym, Coll.Cons(c, Coll.Nil)), Coll.Cons(sym, order))
+
+def Nx.grpCells(g: Nx.Groups, sym: I64): Coll.List[Ptr] = g match
+  case Nx.Groups(m, _) => Coll.lookup(m, sym) match
+    case Coll.Some(cs) => Coll.rev(cs)
+    case Coll.None => Coll.Nil
+
+// the set of the groups: each value is a list (groupBy) or the thunk f name list (zipAttrsWith)
+def Nx.grpSet(g: Nx.Groups, order: Coll.List[I64], f: Coll.Option[Ptr], acc: Coll.List[Nx.Pair]): Nx.Val = order match
+  case Coll.Nil => Nx.attrsOf(acc)
+  case Coll.Cons(sym, t) =>
+    val lst = Nx.cell(Nx.cellsOf(Nx.grpCells(g, sym)))
+    val c = f match
+      case Coll.None => lst
+      case Coll.Some(fc) =>
+        val fr = Nx.frame(Nx.noFrame(), 3)
+        Nx.aset[Ptr](fr, 1, fc)
+        Nx.aset[Ptr](fr, 2, Nx.strCell(Nx.symName(sym)))
+        Nx.aset[Ptr](fr, 3, lst)
+        Nx.cell(Nx.VPending(fr, Nx.appCode(2)))
+    Nx.grpSet(g, t, f, Coll.Cons(Nx.Pair(sym, c), acc))
+
+def Nx.grpOrder(g: Nx.Groups): Coll.List[I64] = g match
+  case Nx.Groups(_, o) => o
+
+def Nx.pGroupBy(a: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    val e = Nx.fnErr(Nx.force(a))
+    if Nx.isErr(e) then e else Nx.groupGo(Nx.force(a), xs, 0, n, Nx.Groups(Coll.Tip, Coll.Nil))
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.groupGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, g: Nx.Groups): Nx.Val =
+  if i == n then Nx.grpSet(g, Nx.grpOrder(g), Coll.None, Coll.Nil)
+  else
+    val x = Nx.aget[Ptr](xs, i)
+    val r = Nx.apply(f, x)
+    r match
+      case Nx.VStr(name, _) => Nx.groupGo(f, xs, i + 1, n, Nx.grpAdd(g, Nx.intern(name), x))
+      case _ => Nx.typeErr("a string", r)
+
+def Nx.pZipAttrsWith(a: Ptr, l: Nx.Val): Nx.Val = l match
+  case Nx.VList(n, xs) =>
+    val e = Nx.fnErr(Nx.force(a))
+    if Nx.isErr(e) then e else Nx.zipGo(a, xs, 0, n, Nx.Groups(Coll.Tip, Coll.Nil))
+  case _ => Nx.typeErr("a list", l)
+
+def Nx.zipGo(f: Ptr, xs: Ptr, i: I64, n: I64, g: Nx.Groups): Nx.Val =
+  if i == n then Nx.grpSet(g, Nx.grpOrder(g), Coll.Some(f), Coll.Nil)
+  else
+    val e = Nx.force(Nx.aget[Ptr](xs, i))
+    e match
+      case Nx.VAttrs(m, syms, vals) => Nx.zipGo(f, xs, i + 1, n, Nx.zipAdd(g, syms, vals, 0, m))
+      case _ => Nx.typeErr("a set", e)
+
+def Nx.zipAdd(g: Nx.Groups, syms: Ptr, vals: Ptr, i: I64, m: I64): Nx.Groups =
+  if i == m then g else Nx.zipAdd(Nx.grpAdd(g, Nx.ageti(syms, i), Nx.aget[Ptr](vals, i)), syms, vals, i + 1, m)
+
+// ---- genericClosure (primops.cc prim_genericClosure) ----------------------------------------------------------
+
+// the keys met: ints and strings by id in sets, any other (floats, paths, lists) in a list compared with lessThan.
+// Slots of st: 0 int keys, 1 string keys, 2 the others.
+def Nx.gcNew(): Ptr =
+  val st = Nx.arrNew(3)
+  Nx.aset[Coll.IMap[Bool]](st, 0, Coll.Tip)
+  Nx.aset[Coll.IMap[Bool]](st, 1, Coll.Tip)
+  Nx.aset[Coll.List[Nx.Val]](st, 2, Coll.Nil)
+  st
+
+// key k is new: it is recorded and true is answered; an error when k cannot be compared with a key met
+def Nx.gcAdd(st: Ptr, k: Nx.Val): Nx.Val = k match
+  case Nx.VInt(n) => if Nx.gcHas(st, 1) then Nx.gcCmpErr(k) else Nx.gcSet(st, 0, n)
+  case Nx.VStr(s, _) => if Nx.gcHas(st, 0) || Nx.gcHas(st, 2) then Nx.gcCmpErr(k) else Nx.gcSet(st, 1, Nx.intern(s))
+  case Nx.VErr(_, _) => k
+  case _ => if Nx.gcHas(st, 1) then Nx.gcCmpErr(k) else Nx.gcOther(st, k, Nx.aget[Coll.List[Nx.Val]](st, 2))
+
+def Nx.gcSet(st: Ptr, slot: I64, id: I64): Nx.Val =
+  val m = Nx.aget[Coll.IMap[Bool]](st, slot)
+  Coll.lookup(m, id) match
+    case Coll.Some(_) => Nx.VBool(false)
+    case Coll.None =>
+      Nx.aset[Coll.IMap[Bool]](st, slot, Coll.insert(m, id, true))
+      Nx.VBool(true)
+
+def Nx.gcOther(st: Ptr, k: Nx.Val, seen: Coll.List[Nx.Val]): Nx.Val = seen match
+  case Coll.Nil =>
+    Nx.aset[Coll.List[Nx.Val]](st, 2, Coll.Cons(k, Nx.aget[Coll.List[Nx.Val]](st, 2)))
+    Nx.VBool(true)
+  case Coll.Cons(o, t) =>
+    val a = Nx.lessThan(k, o)
+    val b = Nx.lessThan(o, k)
+    a match
+      case Nx.VBool(x) => b match
+        case Nx.VBool(y) => if !x && !y then Nx.VBool(false) else Nx.gcOther(st, k, t)
+        case _ => b
+      case _ => a
+
+def Nx.pGenericClosure(v: Nx.Val): Nx.Val = v match
+  case Nx.VAttrs(n, syms, vals) =>
+    val si = Nx.findSym(syms, n, Nx.intern("startSet"))
+    if si == n then Nx.VErr(Nx.KMissing, "attribute 'startSet' missing")
+    else
+      val ss = Nx.force(Nx.aget[Ptr](vals, si))
+      ss match
+        case Nx.VList(m, xs) =>
+          if m == 0 then ss
+          else
+            val oi = Nx.findSym(syms, n, Nx.intern("operator"))
+            if oi == n then Nx.VErr(Nx.KMissing, "attribute 'operator' missing")
+            else
+              val op = Nx.force(Nx.aget[Ptr](vals, oi))
+              val e = Nx.fnErr(op)
+              if Nx.isErr(e) then e else Nx.gcLoop(op, Nx.listCells(xs, 0, m, Coll.Nil), Coll.Nil, Coll.Nil, Nx.gcNew())
+        case _ => Nx.typeErr("a list", ss)
+  case _ => Nx.typeErr("a set", v)
+
+// the cells xs[i..n) as a list
+def Nx.listCells(xs: Ptr, i: I64, n: I64, acc: Coll.List[Ptr]): Coll.List[Ptr] =
+  if i < 0 || i >= n then Coll.rev(acc) else Nx.listCells(xs, i + 1, n, Coll.Cons(Nx.aget[Ptr](xs, i), acc))
+
+// the work set is front ++ rev(back); res = the elements kept, newest first
+def Nx.gcLoop(op: Nx.Val, front: Coll.List[Ptr], back: Coll.List[Ptr], res: Coll.List[Ptr], st: Ptr): Nx.Val = front match
+  case Coll.Nil => back match
+    case Coll.Nil => Nx.cellsOf(Coll.rev(res))
+    case Coll.Cons(_, _) => Nx.gcLoop(op, Coll.rev(back), Coll.Nil, res, st)
+  case Coll.Cons(c, rest) =>
+    val e = Nx.force(c)
+    e match
+      case Nx.VAttrs(n, syms, vals) =>
+        val ki = Nx.findSym(syms, n, Nx.intern("key"))
+        if ki == n then Nx.VErr(Nx.KMissing, "attribute 'key' missing")
+        else
+          val fresh = Nx.gcAdd(st, Nx.force(Nx.aget[Ptr](vals, ki)))
+          fresh match
+            case Nx.VBool(f) =>
+              if !f then Nx.gcLoop(op, rest, back, res, st)
+              else
+                val nl = Nx.apply(op, c)
+                nl match
+                  case Nx.VList(m, xs) => Nx.gcPush(op, rest, back, Coll.Cons(c, res), st, xs, 0, m)
+                  case _ => Nx.typeErr("a list", nl)
+            case _ => fresh
+      case _ => Nx.typeErr("a set", e)
+
+// the operator's elements (each forced) go to the back of the work set
+def Nx.gcPush(op: Nx.Val, front: Coll.List[Ptr], back: Coll.List[Ptr], res: Coll.List[Ptr], st: Ptr, xs: Ptr, i: I64, m: I64): Nx.Val =
+  if i == m then Nx.gcLoop(op, front, back, res, st)
+  else
+    val x = Nx.aget[Ptr](xs, i)
+    val v = Nx.force(x)
+    if Nx.isErr(v) then v else Nx.gcPush(op, front, Coll.Cons(x, back), res, st, xs, i + 1, m)
+
+// slot 0 or 1 holds a key, or (slot 2) the list of the others is not empty
+def Nx.gcHas(st: Ptr, slot: I64): Bool =
+  if slot == 2 then
+    Nx.aget[Coll.List[Nx.Val]](st, 2) match
+      case Coll.Nil => false
+      case Coll.Cons(_, _) => true
+  else Coll.size(Nx.aget[Coll.IMap[Bool]](st, slot)) > 0
+
+def Nx.gcCmpErr(k: Nx.Val): Nx.Val = Nx.VErr(Nx.KOther, Nx.cat("cannot compare ", Nx.cat(Nx.showType(k), " with another key type")))
+
+// ---- unsafeGetAttrPos -----------------------------------------------------------------------------------------
+
+// prim_unsafeGetAttrPos: { file; line; column; } of the name in the source, null when the set has no such record
+def Nx.pAttrPos(nv: Nx.Val, sv: Nx.Val): Nx.Val = nv match
+  case Nx.VStr(name, _) => sv match
+    case Nx.VAttrs(n, syms, _) =>
+      val i = Nx.findSym(syms, n, Nx.intern(name))
+      if i == n then Nx.VNull else Nx.posVal(Nx.posGet(syms), i)
+    case _ => Nx.typeErr("a set", sv)
+  case _ => Nx.typeErr("a string", nv)
+
+def Nx.posVal(rec: Ptr, i: I64): Nx.Val =
+  if Nx.ptrEq(rec, Nx.noFrame()) then Nx.VNull
+  else Nx.lineCol(Nx.strOf(Nx.get(Nx.aget[Ptr](rec, 1))), Nx.ageti(rec, i + 2)) match
+    case Nx.LineCol(l, c) => Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.get(Nx.aget[Ptr](rec, 0))), Coll.Cons(Nx.pair("line", Nx.VInt(l)), Coll.Cons(Nx.pair("column", Nx.VInt(c)), Coll.Nil))))

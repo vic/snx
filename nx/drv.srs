@@ -72,13 +72,13 @@ def Nx.hashAlgo(s: Str): Coll.Option[Nx.HashAlgo] =
   else if Str.eq(s, "sha512") then Coll.Some(Nx.HaSha512)
   else Coll.None
 
-def Nx.algoName(a: Nx.HashAlgo): Str = a match
+def Nx.drAlgoName(a: Nx.HashAlgo): Str = a match
   case Nx.HaMd5 => "md5"
   case Nx.HaSha1 => "sha1"
   case Nx.HaSha256 => "sha256"
   case Nx.HaSha512 => "sha512"
 
-def Nx.algoSize(a: Nx.HashAlgo): I64 = a match
+def Nx.drAlgoSize(a: Nx.HashAlgo): I64 = a match
   case Nx.HaMd5 => 16
   case Nx.HaSha1 => 20
   case Nx.HaSha256 => 32
@@ -110,7 +110,7 @@ def Nx.decoded(d: Str, n: I64): Coll.Option[Str] = if Str.len(d) == n then Coll.
 
 // Hash::parseNonSRIUnprefixed: base16, nix32 or base64, told apart by length
 def Nx.parseDigest(a: Nx.HashAlgo, s: Str): Coll.Option[Str] =
-  val n = Nx.algoSize(a)
+  val n = Nx.drAlgoSize(a)
   val l = Str.len(s)
   if l == 2 * n then Nx.decoded(Nx.unb16(s), n)
   else if l == (n * 8 - 1) / 5 + 1 then Nx.decoded(Nx.unb32(s), n)
@@ -142,7 +142,7 @@ def Nx.fixedPath(drvName: Str, output: Str, m: Nx.CaMethod, a: Nx.HashAlgo, dige
     case _ => Nx.fixedOut(m, a, hex, pn)
 
 def Nx.fixedOut(m: Nx.CaMethod, a: Nx.HashAlgo, hex: Str, pn: Str): Str =
-  val payload = Nx.cat(Nx.cat(Nx.cat("fixed:out:", Nx.methodPrefix(m)), Nx.cat(Nx.algoName(a), ":")), Nx.cat(hex, ":"))
+  val payload = Nx.cat(Nx.cat(Nx.cat("fixed:out:", Nx.methodPrefix(m)), Nx.cat(Nx.drAlgoName(a), ":")), Nx.cat(hex, ":"))
   Nx.storePath("output:out", Nx.sha256Hex(payload), pn)
 
 // a fixed output that makeFixedOutputPathFromCA can name: text takes SHA-256 only (Nix asserts it), git SHA-1 or
@@ -188,10 +188,10 @@ def Nx.allStorePaths(xs: Coll.List[Str]): Bool = xs match
   case Coll.Cons(p, t) => if Nx.isStorePath(p) then Nx.allStorePaths(t) else false
 
 // the derivation name of a file: its base name without ".drv" and without a leading store path hash and "-"
-def Nx.lastSlash(s: Str, i: I64): I64 = if i < 0 || Str.at(s, i) == '/' then i else Nx.lastSlash(s, i - 1)
+def Nx.drLastSlash(s: Str, i: I64): I64 = if i < 0 || Str.at(s, i) == '/' then i else Nx.drLastSlash(s, i - 1)
 
 def Nx.drvFileName(path: Str): Str =
-  val base = Nx.drvAfter(path, Nx.lastSlash(path, Str.len(path) - 1) + 1)
+  val base = Nx.drvAfter(path, Nx.drLastSlash(path, Str.len(path) - 1) + 1)
   val l = Str.len(base)
   val n = if l >= 4 && Str.eq(Str.slice(base, l - 4, l), ".drv") then Str.slice(base, 0, l - 4) else base
   if Str.len(n) >= 33 && Str.at(n, 32) == '-' && Nx.nix32Run(n, 0, 32) then Nx.drvAfter(n, 33) else n
@@ -483,10 +483,10 @@ def Nx.dwOut(sb: Ptr, drvName: Str, o: Nx.DrvOutput, mask: Bool): Unit = o match
       case Nx.OutInput(p) => Nx.dwOut3(sb, if mask then "" else p, "", "", "")
       case Nx.OutFixed(m, a, dg) =>
         val p = if mask then "" else Nx.fixedPath(drvName, name, m, a, dg)
-        Nx.dwOut3(sb, p, Nx.methodPrefix(m), Nx.algoName(a), Nx.b16(dg))
-      case Nx.OutFloating(m, a) => Nx.dwOut3(sb, "", Nx.methodPrefix(m), Nx.algoName(a), "")
+        Nx.dwOut3(sb, p, Nx.methodPrefix(m), Nx.drAlgoName(a), Nx.b16(dg))
+      case Nx.OutFloating(m, a) => Nx.dwOut3(sb, "", Nx.methodPrefix(m), Nx.drAlgoName(a), "")
       case Nx.OutDeferred => Nx.dwOut3(sb, "", "", "", "")
-      case Nx.OutImpure(m, a) => Nx.dwOut3(sb, "", Nx.methodPrefix(m), Nx.algoName(a), "impure")
+      case Nx.OutImpure(m, a) => Nx.dwOut3(sb, "", Nx.methodPrefix(m), Nx.drAlgoName(a), "impure")
     Nx.sbAdd(sb, ")")
 
 def Nx.dwOuts(sb: Ptr, drvName: Str, xs: Coll.List[Nx.DrvOutput], mask: Bool, first: Bool): Unit = xs match
@@ -627,23 +627,23 @@ def Nx.drvPath(d: Nx.Drv): Str = Nx.drvTextPath(d, Nx.drvHash(d))
 
 // ---- structured attrs: __json as nlohmann::json::parse reads it and dump() writes it ------------------------------
 
-enum Nx.Json:
-  case Nx.JLit(text: Str)
-  case Nx.JStr(s: Str)
-  case Nx.JArr(xs: Coll.List[Nx.Json])
-  case Nx.JObj(kvs: Coll.List[Nx.JKv])
+enum Nx.DrJson:
+  case Nx.DrJLit(text: Str)
+  case Nx.DrJStr(s: Str)
+  case Nx.DrJArr(xs: Coll.List[Nx.DrJson])
+  case Nx.DrJObj(kvs: Coll.List[Nx.DrJKv])
 
 // a member of an object; an object's members are ascending by key, each key once
-enum Nx.JKv:
-  case Nx.JKv(k: Str, v: Nx.Json)
+enum Nx.DrJKv:
+  case Nx.DrJKv(k: Str, v: Nx.DrJson)
 
-def Nx.jWs(s: Str, i: I64): I64 =
+def Nx.drJWs(s: Str, i: I64): I64 =
   val c = Str.at(s, i)
-  if c == 32 || c == 9 || c == 10 || c == 13 then Nx.jWs(s, i + 1) else i
+  if c == 32 || c == 9 || c == 10 || c == 13 then Nx.drJWs(s, i + 1) else i
 
 def Nx.jDigit(c: I64): Bool = c >= '0' && c <= '9'
 
-def Nx.jDigits(s: Str, i: I64): I64 = if Nx.jDigit(Str.at(s, i)) then Nx.jDigits(s, i + 1) else i
+def Nx.drJDigits(s: Str, i: I64): I64 = if Nx.jDigit(Str.at(s, i)) then Nx.drJDigits(s, i + 1) else i
 
 def Nx.jCont(c: I64): Bool = c >= 128 && c <= 191
 
@@ -661,7 +661,7 @@ def Nx.utf8Len(s: Str, j: I64): I64 =
   else 0
 
 // the code point cp in UTF-8
-def Nx.utf8(cp: I64): Str =
+def Nx.drUtf8(cp: I64): Str =
   if cp < 128 then Nx.byte(cp)
   else if cp < 2048 then Nx.cat(Nx.byte(192 + cp / 64), Nx.byte(128 + cp % 64))
   else if cp < 65536 then Nx.cat(Nx.byte(224 + cp / 4096), Nx.cat(Nx.byte(128 + cp / 64 % 64), Nx.byte(128 + cp % 64)))
@@ -675,21 +675,21 @@ def Nx.jHex4(s: Str, i: I64, n: I64, acc: I64): Nx.Dp[I64] =
     if h < 0 then Nx.DpNo else Nx.jHex4(s, i + 1, n - 1, acc * 16 + h)
 
 // \uXXXX at i (after the "u"); a high surrogate needs a low one after it
-def Nx.jUni(s: Str, i: I64): Nx.Dp[Str] = Nx.jHex4(s, i, 4, 0) match
+def Nx.drJUni(s: Str, i: I64): Nx.Dp[Str] = Nx.jHex4(s, i, 4, 0) match
   case Nx.DpNo => Nx.DpNo
   case Nx.DpAt(hi, j) =>
     if Nx.jIn(hi, 56320, 57343) then Nx.DpNo
-    else if !Nx.jIn(hi, 55296, 56319) then Nx.DpAt(Nx.utf8(hi), j)
+    else if !Nx.jIn(hi, 55296, 56319) then Nx.DpAt(Nx.drUtf8(hi), j)
     else if !Nx.drvIs(s, j, "\\u") then Nx.DpNo
     else
       val r = Nx.jHex4(s, j + 2, 4, 0)
       r match
         case Nx.DpNo => Nx.DpNo
         case Nx.DpAt(lo, k) =>
-          if Nx.jIn(lo, 56320, 57343) then Nx.DpAt(Nx.utf8(65536 + (hi - 55296) * 1024 + lo - 56320), k) else Nx.DpNo
+          if Nx.jIn(lo, 56320, 57343) then Nx.DpAt(Nx.drUtf8(65536 + (hi - 55296) * 1024 + lo - 56320), k) else Nx.DpNo
 
 // the escape at i (after the backslash)
-def Nx.jEsc(s: Str, i: I64): Nx.Dp[Str] =
+def Nx.drJEsc(s: Str, i: I64): Nx.Dp[Str] =
   val e = Str.at(s, i)
   if e == '"' || e == '\\' || e == '/' then Nx.DpAt(Nx.byte(e), i + 1)
   else if e == 'b' then Nx.DpAt(Nx.byte(8), i + 1)
@@ -697,7 +697,7 @@ def Nx.jEsc(s: Str, i: I64): Nx.Dp[Str] =
   else if e == 'n' then Nx.DpAt(Nx.byte(10), i + 1)
   else if e == 'r' then Nx.DpAt(Nx.byte(13), i + 1)
   else if e == 't' then Nx.DpAt(Nx.byte(9), i + 1)
-  else if e == 'u' then Nx.jUni(s, i + 1)
+  else if e == 'u' then Nx.drJUni(s, i + 1)
   else Nx.DpNo
 
 // a string from j, the run since b not yet copied into sb: no control byte, valid UTF-8
@@ -708,7 +708,7 @@ def Nx.jStrRun(s: Str, b: I64, j: I64, sb: Ptr): Nx.Dp[Str] =
     Nx.DpAt(Nx.sbGet(sb), j + 1)
   else if c == '\\' then
     Nx.sbAdd(sb, Str.slice(s, b, j))
-    val r = Nx.jEsc(s, j + 1)
+    val r = Nx.drJEsc(s, j + 1)
     r match
       case Nx.DpNo => Nx.DpNo
       case Nx.DpAt(e, k) =>
@@ -721,73 +721,73 @@ def Nx.jStrRun(s: Str, b: I64, j: I64, sb: Ptr): Nx.Dp[Str] =
     if n == 0 then Nx.DpNo else Nx.jStrRun(s, b, j + n, sb)
 
 // an integer from i, as dump() writes it: -0 is 0; beyond int64 below and uint64 above it is a double
-def Nx.jNum(s: Str, i: I64): Nx.Dp[Nx.Json] =
+def Nx.drJNum(s: Str, i: I64): Nx.Dp[Nx.DrJson] =
   val a = if Str.at(s, i) == '-' then i + 1 else i
   val c = Str.at(s, a)
   if !Nx.jDigit(c) then Nx.DpNo
   else
-    val e = if c == '0' then a + 1 else Nx.jDigits(s, a + 1)
+    val e = if c == '0' then a + 1 else Nx.drJDigits(s, a + 1)
     val f = Str.at(s, e)
     val t = Str.slice(s, i, e)
     val big = if a > i then Nx.intOverflows(t) else e - a > 20 || (e - a == 20 && Nx.strLess("18446744073709551615", t))
     if f == '.' || f == 'e' || f == 'E' || big then Nx.DpNo
-    else if Str.eq(t, "-0") then Nx.DpAt(Nx.JLit("0"), e)
-    else Nx.DpAt(Nx.JLit(t), e)
+    else if Str.eq(t, "-0") then Nx.DpAt(Nx.DrJLit("0"), e)
+    else Nx.DpAt(Nx.DrJLit(t), e)
 
-def Nx.jValue(s: Str, i: I64): Nx.Dp[Nx.Json] =
-  val j = Nx.jWs(s, i)
+def Nx.drJValue(s: Str, i: I64): Nx.Dp[Nx.DrJson] =
+  val j = Nx.drJWs(s, i)
   val c = Str.at(s, j)
-  if c == '{' then Nx.jObj(s, Nx.jWs(s, j + 1))
-  else if c == '[' then Nx.jArr(s, Nx.jWs(s, j + 1))
+  if c == '{' then Nx.jObj(s, Nx.drJWs(s, j + 1))
+  else if c == '[' then Nx.jArr(s, Nx.drJWs(s, j + 1))
   else if c == '"' then
     val r = Nx.jStrRun(s, j + 1, j + 1, Nx.sbNew())
     r match
       case Nx.DpNo => Nx.DpNo
-      case Nx.DpAt(v, k) => Nx.DpAt(Nx.JStr(v), k)
-  else if Nx.drvIs(s, j, "true") then Nx.DpAt(Nx.JLit("true"), j + 4)
-  else if Nx.drvIs(s, j, "false") then Nx.DpAt(Nx.JLit("false"), j + 5)
-  else if Nx.drvIs(s, j, "null") then Nx.DpAt(Nx.JLit("null"), j + 4)
-  else Nx.jNum(s, j)
+      case Nx.DpAt(v, k) => Nx.DpAt(Nx.DrJStr(v), k)
+  else if Nx.drvIs(s, j, "true") then Nx.DpAt(Nx.DrJLit("true"), j + 4)
+  else if Nx.drvIs(s, j, "false") then Nx.DpAt(Nx.DrJLit("false"), j + 5)
+  else if Nx.drvIs(s, j, "null") then Nx.DpAt(Nx.DrJLit("null"), j + 4)
+  else Nx.drJNum(s, j)
 
-def Nx.jArr(s: Str, i: I64): Nx.Dp[Nx.Json] =
-  if Str.at(s, i) == ']' then Nx.DpAt(Nx.JArr(Coll.Nil), i + 1) else Nx.jItems(s, i, Coll.Nil)
+def Nx.jArr(s: Str, i: I64): Nx.Dp[Nx.DrJson] =
+  if Str.at(s, i) == ']' then Nx.DpAt(Nx.DrJArr(Coll.Nil), i + 1) else Nx.jItems(s, i, Coll.Nil)
 
-def Nx.jItems(s: Str, i: I64, acc: Coll.List[Nx.Json]): Nx.Dp[Nx.Json] = Nx.jValue(s, i) match
+def Nx.jItems(s: Str, i: I64, acc: Coll.List[Nx.DrJson]): Nx.Dp[Nx.DrJson] = Nx.drJValue(s, i) match
   case Nx.DpNo => Nx.DpNo
   case Nx.DpAt(v, j) =>
-    val k = Nx.jWs(s, j)
+    val k = Nx.drJWs(s, j)
     val c = Str.at(s, k)
     if c == ',' then Nx.jItems(s, k + 1, Coll.Cons(v, acc))
-    else if c == ']' then Nx.DpAt(Nx.JArr(Coll.rev(Coll.Cons(v, acc))), k + 1)
+    else if c == ']' then Nx.DpAt(Nx.DrJArr(Coll.rev(Coll.Cons(v, acc))), k + 1)
     else Nx.DpNo
 
 // k := v in the ascending members xs (object_t is a std::map; the parser assigns each key, so the last one stays)
-def Nx.jPut(xs: Coll.List[Nx.JKv], k: Str, v: Nx.Json): Coll.List[Nx.JKv] = xs match
-  case Coll.Nil => Coll.Cons(Nx.JKv(k, v), Coll.Nil)
+def Nx.jPut(xs: Coll.List[Nx.DrJKv], k: Str, v: Nx.DrJson): Coll.List[Nx.DrJKv] = xs match
+  case Coll.Nil => Coll.Cons(Nx.DrJKv(k, v), Coll.Nil)
   case Coll.Cons(h, t) => h match
-    case Nx.JKv(hk, _) =>
-      if Nx.strLess(k, hk) then Coll.Cons(Nx.JKv(k, v), xs)
-      else if Str.eq(k, hk) then Coll.Cons(Nx.JKv(k, v), t)
+    case Nx.DrJKv(hk, _) =>
+      if Nx.strLess(k, hk) then Coll.Cons(Nx.DrJKv(k, v), xs)
+      else if Str.eq(k, hk) then Coll.Cons(Nx.DrJKv(k, v), t)
       else Coll.Cons(h, Nx.jPut(t, k, v))
 
-def Nx.jObj(s: Str, i: I64): Nx.Dp[Nx.Json] =
-  if Str.at(s, i) == '}' then Nx.DpAt(Nx.JObj(Coll.Nil), i + 1) else Nx.jMembers(s, i, Coll.Nil)
+def Nx.jObj(s: Str, i: I64): Nx.Dp[Nx.DrJson] =
+  if Str.at(s, i) == '}' then Nx.DpAt(Nx.DrJObj(Coll.Nil), i + 1) else Nx.jMembers(s, i, Coll.Nil)
 
 // "key" : value at i (after blanks), then "," or "}"
-def Nx.jMembers(s: Str, i: I64, acc: Coll.List[Nx.JKv]): Nx.Dp[Nx.Json] =
+def Nx.jMembers(s: Str, i: I64, acc: Coll.List[Nx.DrJKv]): Nx.Dp[Nx.DrJson] =
   val r = if Str.at(s, i) == '"' then Nx.jStrRun(s, i + 1, i + 1, Nx.sbNew()) else Nx.DpNo
   r match
     case Nx.DpNo => Nx.DpNo
     case Nx.DpAt(k, j) =>
-      val l = Nx.jWs(s, j)
-      val v = if Str.at(s, l) == ':' then Nx.jValue(s, l + 1) else Nx.DpNo
+      val l = Nx.drJWs(s, j)
+      val v = if Str.at(s, l) == ':' then Nx.drJValue(s, l + 1) else Nx.DpNo
       v match
         case Nx.DpNo => Nx.DpNo
         case Nx.DpAt(x, m) =>
-          val n = Nx.jWs(s, m)
+          val n = Nx.drJWs(s, m)
           val c = Str.at(s, n)
-          if c == ',' then Nx.jMembers(s, Nx.jWs(s, n + 1), Nx.jPut(acc, k, x))
-          else if c == '}' then Nx.DpAt(Nx.JObj(Nx.jPut(acc, k, x)), n + 1)
+          if c == ',' then Nx.jMembers(s, Nx.drJWs(s, n + 1), Nx.jPut(acc, k, x))
+          else if c == '}' then Nx.DpAt(Nx.DrJObj(Nx.jPut(acc, k, x)), n + 1)
           else Nx.DpNo
 
 // dump(): " \ and bytes below 0x20 escaped (\b \t \n \f \r or \u00xx), every other byte as it is
@@ -816,31 +816,31 @@ def Nx.jDumpStr(sb: Ptr, s: Str): Unit =
   Nx.jDumpRun(sb, s, 0, 0)
   Nx.sbAdd(sb, "\"")
 
-def Nx.jDump(sb: Ptr, v: Nx.Json): Unit = v match
-  case Nx.JLit(t) => Nx.sbAdd(sb, t)
-  case Nx.JStr(s) => Nx.jDumpStr(sb, s)
-  case Nx.JArr(xs) =>
+def Nx.jDump(sb: Ptr, v: Nx.DrJson): Unit = v match
+  case Nx.DrJLit(t) => Nx.sbAdd(sb, t)
+  case Nx.DrJStr(s) => Nx.jDumpStr(sb, s)
+  case Nx.DrJArr(xs) =>
     Nx.sbAdd(sb, "[")
     Nx.jDumpItems(sb, xs, true)
     Nx.sbAdd(sb, "]")
-  case Nx.JObj(kvs) =>
+  case Nx.DrJObj(kvs) =>
     Nx.sbAdd(sb, "{")
     Nx.jDumpMembers(sb, kvs, true)
     Nx.sbAdd(sb, "}")
 
-def Nx.jDumpItems(sb: Ptr, xs: Coll.List[Nx.Json], first: Bool): Unit = xs match
+def Nx.jDumpItems(sb: Ptr, xs: Coll.List[Nx.DrJson], first: Bool): Unit = xs match
   case Coll.Nil => ()
   case Coll.Cons(h, t) =>
     Nx.dwSep(sb, first)
     Nx.jDump(sb, h)
     Nx.jDumpItems(sb, t, false)
 
-def Nx.jDumpMembers(sb: Ptr, xs: Coll.List[Nx.JKv], first: Bool): Unit = xs match
+def Nx.jDumpMembers(sb: Ptr, xs: Coll.List[Nx.DrJKv], first: Bool): Unit = xs match
   case Coll.Nil => ()
   case Coll.Cons(h, t) =>
     Nx.dwSep(sb, first)
     h match
-      case Nx.JKv(k, v) =>
+      case Nx.DrJKv(k, v) =>
         Nx.jDumpStr(sb, k)
         Nx.sbAdd(sb, ":")
         Nx.jDump(sb, v)
@@ -848,13 +848,13 @@ def Nx.jDumpMembers(sb: Ptr, xs: Coll.List[Nx.JKv], first: Bool): Unit = xs matc
 
 // StructuredAttrs::parse then unparse: s holds one JSON object (after a UTF-8 BOM, blanks around it)
 def Nx.jNormal(s: Str): Coll.Option[Str] =
-  val start = if Nx.drvIs(s, 0, Nx.utf8(65279)) then 3 else 0
-  Nx.jValue(s, start) match
+  val start = if Nx.drvIs(s, 0, Nx.drUtf8(65279)) then 3 else 0
+  Nx.drJValue(s, start) match
     case Nx.DpNo => Coll.None
     case Nx.DpAt(v, i) =>
-      if Nx.jWs(s, i) != Str.len(s) then Coll.None
+      if Nx.drJWs(s, i) != Str.len(s) then Coll.None
       else v match
-        case Nx.JObj(_) =>
+        case Nx.DrJObj(_) =>
           val sb = Nx.sbNew()
           Nx.jDump(sb, v)
           Coll.Some(Nx.sbGet(sb))

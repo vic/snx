@@ -10,9 +10,9 @@ def Nx.tf(b: I64): Nx.Expr = Nx.EFloat(0, b)
 def Nx.tc(f: Nx.Expr, args: Coll.List[Nx.Expr]): Nx.Expr = Nx.ECall(0, f, args)
 def Nx.tsub(args: Coll.List[Nx.Expr]): Nx.Expr = Nx.tc(Nx.tv("__sub"), args)
 def Nx.tneg(a: Nx.Expr): Nx.Expr = Nx.tsub(Nx.l2(Nx.ti(0), a))
-def Nx.tb(n: Str, e: Nx.Expr): Nx.Binding = Nx.Bind(n, e)
+def Nx.tb(n: Str, e: Nx.Expr): Nx.Binding = Nx.Bind(n, e, 0)
 def Nx.tat(b: Bool, bs: Coll.List[Nx.Binding], ds: Coll.List[Nx.DynBind]): Nx.Expr = Nx.EAttrs(0, b, bs, ds)
-def Nx.tfm(n: Str): Nx.Formal = Nx.Fm(n, Coll.None)
+def Nx.tfm(n: Str): Nx.Formal = Nx.Fm(n, Coll.None, 0)
 
 def Nx.line(e: Nx.Expr): Unit =
   Nx.printTree(e)
@@ -41,7 +41,7 @@ def Nx.cases2(): Unit =
   // rule 1, binds sorted as bytes ("B" < "a" < "ab" < "b"), dyn-binds after in source order; 2043df26...nix.exp
   Nx.line(Nx.tat(false, Nx.l3(Nx.tb("b", Nx.ti(1)), Nx.tb("ab", Nx.ti(2)), Nx.tb("a", Nx.ti(3))), Coll.Nil))
   Nx.line(Nx.tat(false, Nx.l2(Nx.tb("a", Nx.ti(1)), Nx.tb("B", Nx.ti(2))), Coll.Nil))
-  Nx.line(Nx.tat(false, Coll.Cons(Nx.BInheritFrom("q", Nx.tv("z")), Coll.Cons(Nx.BInherit("r"), Coll.Cons(Nx.tb("a", Nx.ti(1)), Coll.Nil))),
+  Nx.line(Nx.tat(false, Coll.Cons(Nx.BInheritFrom("q", Nx.tv("z"), 0), Coll.Cons(Nx.BInherit("r", 0), Coll.Cons(Nx.tb("a", Nx.ti(1)), Coll.Nil))),
     Nx.l1(Nx.DBind(Nx.EConcat(0, true, Nx.l2(Nx.ts("x"), Nx.tv("y"))), Nx.ti(3)))))
   // dyn-binds keep source order: c649b81d...nix.exp
   Nx.line(Nx.tat(false, Coll.Nil, Nx.l2(Nx.DBind(Nx.tv("b"), Nx.ti(1)), Nx.DBind(Nx.tv("a"), Nx.ti(2)))))
@@ -49,7 +49,7 @@ def Nx.cases2(): Unit =
   Nx.line(Nx.ELet(0, Nx.tat(false, Nx.l1(Nx.tb("a", Nx.ti(1))), Coll.Nil), Nx.tv("b")))
   // lambda: 5d615003...nix.exp `(lambda "a" _ B)`; formals form: oracle/parse-oracle.cc (no .exp shows one)
   Nx.line(Nx.ELambda(0, Coll.Some("x"), Coll.None, Nx.tv("b")))
-  Nx.line(Nx.ELambda(0, Coll.Some("x"), Coll.Some(Nx.Fms(true, Nx.l3(Nx.tfm("b"), Nx.Fm("a", Coll.Some(Nx.ti(1))), Nx.tfm("B")))), Nx.tv("b")))
+  Nx.line(Nx.ELambda(0, Coll.Some("x"), Coll.Some(Nx.Fms(true, Nx.l3(Nx.tfm("b"), Nx.Fm("a", Coll.Some(Nx.ti(1)), 0), Nx.tfm("B")))), Nx.tv("b")))
   Nx.line(Nx.ELambda(0, Coll.None, Coll.Some(Nx.Fms(false, Nx.l1(Nx.tfm("a")))), Nx.tv("b")))
   Nx.line(Nx.ELambda(0, Coll.None, Coll.Some(Nx.Fms(true, Coll.Nil)), Nx.tv("b")))
   Nx.line(Nx.EWith(0, Nx.tv("a"), Nx.tv("b")))
