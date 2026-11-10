@@ -1,0 +1,88 @@
+// snx AST contract (vic/main.md [S2c]). Tokens come from nx/lex.srs, Nx.Expr from nx/parse.srs, the S-expression text from
+// nx/tree.srs. Every node carries p: the byte offset in the source where it starts; Nx.lineCol turns it into LINE:COL.
+
+// a token; p = byte offset of its first byte
+enum Nx.Tok:
+  case Nx.TId(s: Str, p: I64)              // identifier or keyword (the parser tells them apart)
+  case Nx.TInt(v: I64, p: I64)
+  case Nx.TFloat(bits: I64, p: I64)        // IEEE 754 double bits (nx_float_parse in rt/snx_rt.c)
+  case Nx.TUri(s: Str, p: I64)
+  case Nx.TStrOpen(ind: Bool, p: I64)      // " (ind = false) or '' (ind = true)
+  case Nx.TStrPart(s: Str, p: I64)         // one piece: escapes processed for ", one token per escape for '' (SPEC.md parse: `${''a''$b''}`)
+  case Nx.TStrClose(p: I64)
+  case Nx.TDollarCurly(p: I64)             // ${ ; the matching } is Nx.TOp("}")
+  case Nx.TPathOpen(p: I64)                // a path begins: ./a /a ~/a
+  case Nx.TPathPart(s: Str, p: I64)        // literal piece of a path, as written
+  case Nx.TPathClose(p: I64)
+  case Nx.TSPath(s: Str, p: I64)           // <a/b>, s = a/b
+  case Nx.TOp(s: Str, p: I64)              // punctuation and operators: { } ( ) [ ] ; : . , @ ? = ++ // == != <= >= < > && || -> ! + - * / |> <|
+  case Nx.TEof(p: I64)
+
+enum Nx.LexResult:
+  case Nx.Toks(ts: Coll.List[Nx.Tok])
+  case Nx.LexBad(p: I64)                   // the byte where Nix's lexer refuses
+
+// an attribute path element
+enum Nx.Attr:
+  case Nx.ASym(s: Str)
+  case Nx.ADyn(e: Nx.Expr)
+
+// a static binding of an attribute set (SPEC.md: bind, inherit, inherit-from)
+enum Nx.Binding:
+  case Nx.Bind(name: Str, e: Nx.Expr)
+  case Nx.BInherit(name: Str)
+  case Nx.BInheritFrom(name: Str, from: Nx.Expr)
+
+enum Nx.DynBind:
+  case Nx.DBind(k: Nx.Expr, e: Nx.Expr)
+
+enum Nx.Formal:
+  case Nx.Fm(name: Str, dflt: Coll.Option[Nx.Expr])
+
+enum Nx.Formals:
+  case Nx.Fms(ellipsis: Bool, fs: Coll.List[Nx.Formal])
+
+// the tree after parser.y's desugaring (SPEC.md "parse"): - * / < > <= >= and -a are calls of __sub __mul __div __lessThan,
+// <a> is (call (var "__findFile") (var "__nixPath") (str "a")), a + b and "a${b}" are both Nx.EConcat (forceStr tells them apart)
+enum Nx.Expr:
+  case Nx.EInt(p: I64, v: I64)
+  case Nx.EFloat(p: I64, bits: I64)
+  case Nx.EStr(p: I64, s: Str)
+  case Nx.EConcat(p: I64, forceStr: Bool, parts: Coll.List[Nx.Expr])   // forceStr: (interp ...), else (+ ...)
+  case Nx.EPath(p: I64, s: Str)                                        // absolute: /case/a, /home/case/a
+  case Nx.EVar(p: I64, name: Str)
+  case Nx.ECurPos(p: I64)
+  case Nx.ESelect(p: I64, e: Nx.Expr, path: Coll.List[Nx.Attr], dflt: Coll.Option[Nx.Expr])
+  case Nx.EHas(p: I64, e: Nx.Expr, path: Coll.List[Nx.Attr])
+  case Nx.EAttrs(p: I64, rec: Bool, binds: Coll.List[Nx.Binding], dyns: Coll.List[Nx.DynBind])
+  case Nx.EList(p: I64, xs: Coll.List[Nx.Expr])
+  case Nx.ELambda(p: I64, arg: Coll.Option[Str], formals: Coll.Option[Nx.Formals], body: Nx.Expr)
+  case Nx.ECall(p: I64, f: Nx.Expr, args: Coll.List[Nx.Expr])
+  case Nx.ELet(p: I64, attrs: Nx.Expr, body: Nx.Expr)                 // attrs = Nx.EAttrs
+  case Nx.EWith(p: I64, a: Nx.Expr, b: Nx.Expr)
+  case Nx.EIf(p: I64, c: Nx.Expr, t: Nx.Expr, e: Nx.Expr)
+  case Nx.EAssert(p: I64, c: Nx.Expr, b: Nx.Expr)
+  case Nx.ENot(p: I64, a: Nx.Expr)
+  case Nx.EEq(p: I64, a: Nx.Expr, b: Nx.Expr)
+  case Nx.ENe(p: I64, a: Nx.Expr, b: Nx.Expr)
+  case Nx.EAnd(p: I64, a: Nx.Expr, b: Nx.Expr)
+  case Nx.EOr(p: I64, a: Nx.Expr, b: Nx.Expr)
+  case Nx.EImpl(p: I64, a: Nx.Expr, b: Nx.Expr)
+  case Nx.EUpdate(p: I64, a: Nx.Expr, b: Nx.Expr)
+  case Nx.EListConcat(p: I64, a: Nx.Expr, b: Nx.Expr)
+
+// LINE:COL of byte offset p (SPEC.md parse: a line ends at \n, \r\n or a lone \r; the column counts bytes from 1)
+enum Nx.LC:
+  case Nx.LineCol(line: I64, col: I64)
+
+def Nx.lineCol(src: Str, p: I64): Nx.LC = Nx.lcFrom(src, p, 0, 1, 1)
+
+def Nx.lcFrom(src: Str, p: I64, i: I64, line: I64, col: I64): Nx.LC =
+  if i >= p then Nx.LineCol(line, col)
+  else
+    val c = Str.at(src, i)
+    if c == '\n' then Nx.lcFrom(src, p, i + 1, line + 1, 1)
+    else if c == '\r' then
+      if Str.at(src, i + 1) == '\n' && i + 1 < p then Nx.lcFrom(src, p, i + 2, line + 1, 1)
+      else Nx.lcFrom(src, p, i + 1, line + 1, 1)
+    else Nx.lcFrom(src, p, i + 1, line, col + 1)
