@@ -1,0 +1,632 @@
+// builtins.fromTOML: TOML 1.0.0 as toml11 4.x reads it (Nix 2.34, src/libexpr/primops/fromTOML.cc). Tv* names: Nx.TInt and
+// Nx.TFloat are lexer tokens (nx/ast.srs).
+
+enum Nx.TVal:
+  case Nx.TvInt(n: I64)
+  case Nx.TvFloat(bits: I64)
+  case Nx.TvStr(s: Str)
+  case Nx.TvBool(b: Bool)
+  case Nx.TvArr(xs: Coll.List[Nx.TVal])
+  case Nx.TvTable(kvs: Coll.List[Nx.TKV])
+  case Nx.TvStamp(text: Str)            // a date or time, text as Nix prints it (needs parse-toml-timestamps)
+
+enum Nx.TKV:
+  case Nx.TvKey(k: Str, v: Nx.TVal)
+
+enum Nx.TomlResult:
+  case Nx.TomlOk(v: Nx.TVal)
+  case Nx.TomlBad(why: Str)
+
+// a parse step: the value and the position after it, or why it failed
+enum Nx.Tr [A: Type]:
+  case Nx.TrOk(v: A, i: I64)
+  case Nx.TrErr(why: Str)
+
+// ---- characters ------------------------------------------------------------------------------------------------
+
+def Nx.tmDig(c: I64): Bool = c >= 48 && c <= 57
+
+def Nx.tmHex(c: I64): I64 =
+  if c >= 48 && c <= 57 then c - 48
+  else if c >= 97 && c <= 102 then c - 87
+  else if c >= 65 && c <= 70 then c - 55
+  else -1
+
+def Nx.tmMod(a: I64, b: I64): I64 = a - a / b * b
+
+def Nx.tmBareChar(c: I64): Bool = Nx.tmDig(c) || (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 45
+
+def Nx.tmBare(s: Str, i: I64): I64 = if Nx.tmBareChar(Str.at(s, i)) then Nx.tmBare(s, i + 1) else i
+
+def Nx.tmWs(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if c == 32 || c == 9 then Nx.tmWs(s, i + 1) else i
+
+// n digits from i
+def Nx.tmDigs(s: Str, i: I64, n: I64): Bool =
+  if n == 0 then true
+  else if Nx.tmDig(Str.at(s, i)) then Nx.tmDigs(s, i + 1, n - 1)
+  else false
+
+def Nx.tmDigRun(s: Str, i: I64): I64 = if Nx.tmDig(Str.at(s, i)) then Nx.tmDigRun(s, i + 1) else i
+
+// the two digits at i
+def Nx.tmN2(s: Str, i: I64): I64 = (Str.at(s, i) - 48) * 10 + Str.at(s, i + 1) - 48
+
+// the literal w at i, from index k of w
+def Nx.tmAt(s: Str, i: I64, w: Str, k: I64): Bool =
+  if k >= Str.len(w) then true
+  else if Str.at(s, i + k) == Str.at(w, k) then Nx.tmAt(s, i, w, k + 1)
+  else false
+
+// ---- comments and line ends ------------------------------------------------------------------------------------
+
+// i at `#`: the position of the newline (or the end) that closes the comment
+def Nx.tmComment(s: Str, i: I64): Nx.Tr[I64] =
+  val c = Str.at(s, i)
+  if c < 0 || c == 10 then Nx.TrOk(0, i)
+  else if c == 13 then
+    if Str.at(s, i + 1) == 10 then Nx.TrOk(0, i) else Nx.TrErr("bare carriage return")
+  else if (c < 32 && c != 9) || c == 127 then Nx.TrErr("control character in comment")
+  else Nx.tmComment(s, i + 1)
+
+// blanks, newlines and comments
+def Nx.tmSkip(s: Str, i: I64): Nx.Tr[I64] =
+  val c = Str.at(s, i)
+  if c == 32 || c == 9 || c == 10 then Nx.tmSkip(s, i + 1)
+  else if c == 13 && Str.at(s, i + 1) == 10 then Nx.tmSkip(s, i + 2)
+  else if c == 35 then
+    Nx.tmComment(s, i) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(_, j) => Nx.tmSkip(s, j)
+  else Nx.TrOk(0, i)
+
+def Nx.tmNl(s: Str, i: I64): Nx.Tr[I64] =
+  val c = Str.at(s, i)
+  if c < 0 then Nx.TrOk(0, i)
+  else if c == 10 then Nx.TrOk(0, i + 1)
+  else if c == 13 && Str.at(s, i + 1) == 10 then Nx.TrOk(0, i + 2)
+  else Nx.TrErr("expected a newline")
+
+// the rest of a line: blanks, a comment, then a newline or the end
+def Nx.tmEol(s: Str, i: I64): Nx.Tr[I64] =
+  val j = Nx.tmWs(s, i)
+  if Str.at(s, j) == 35 then
+    Nx.tmComment(s, j) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(_, k) => Nx.tmNl(s, k)
+  else Nx.tmNl(s, j)
+
+// ---- strings ---------------------------------------------------------------------------------------------------
+
+def Nx.tmUtf8(cp: I64): Str =
+  if cp < 128 then Nx.byte(cp)
+  else if cp < 2048 then Nx.cat(Nx.byte(192 + cp / 64), Nx.byte(128 + Nx.tmMod(cp, 64)))
+  else if cp < 65536 then Nx.cat(Nx.byte(224 + cp / 4096), Nx.cat(Nx.byte(128 + Nx.tmMod(cp / 64, 64)), Nx.byte(128 + Nx.tmMod(cp, 64))))
+  else Nx.cat(Nx.cat(Nx.byte(240 + cp / 262144), Nx.byte(128 + Nx.tmMod(cp / 4096, 64))), Nx.cat(Nx.byte(128 + Nx.tmMod(cp / 64, 64)), Nx.byte(128 + Nx.tmMod(cp, 64))))
+
+// n hex digits from i: their value
+def Nx.tmHexN(s: Str, i: I64, n: I64, acc: I64): Nx.Tr[I64] =
+  if n == 0 then Nx.TrOk(acc, i)
+  else
+    val h = Nx.tmHex(Str.at(s, i))
+    if h < 0 then Nx.TrErr("invalid unicode escape") else Nx.tmHexN(s, i + 1, n - 1, acc * 16 + h)
+
+// \u and \U: a Unicode scalar value that is not NUL (Nix strings hold no NUL)
+def Nx.tmUni(s: Str, i: I64, n: I64): Nx.Tr[Str] =
+  Nx.tmHexN(s, i, n, 0) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(cp, j) =>
+      if cp == 0 then Nx.TrErr("string contains a null byte")
+      else if cp > 1114111 || (cp >= 55296 && cp <= 57343) then Nx.TrErr("invalid unicode scalar value")
+      else Nx.TrOk(Nx.tmUtf8(cp), j)
+
+// the byte of \b \t \n \f \r \" \\ for the letter c, or -1
+def Nx.tmSimple(c: I64): I64 =
+  if c == 98 then 8
+  else if c == 116 then 9
+  else if c == 110 then 10
+  else if c == 102 then 12
+  else if c == 114 then 13
+  else if c == 34 then 34
+  else if c == 92 then 92
+  else -1
+
+// i is after the backslash: the escaped text and the position after it (TOML 1.0: no \e, no \x)
+def Nx.tmEsc(s: Str, i: I64): Nx.Tr[Str] =
+  val c = Str.at(s, i)
+  val b = Nx.tmSimple(c)
+  if b >= 0 then Nx.TrOk(Nx.byte(b), i + 1)
+  else if c == 117 then Nx.tmUni(s, i + 1, 4)
+  else if c == 85 then Nx.tmUni(s, i + 1, 8)
+  else Nx.TrErr("invalid escape")
+
+// the end of the plain characters from i: they stop at the quote q, a backslash (bs), a control character, the end
+def Nx.tmRun(s: Str, i: I64, q: I64, bs: Bool, nl: Bool): I64 =
+  val c = Str.at(s, i)
+  val stop = c < 0 || c == q || (bs && c == 92) || c == 127 || (c < 32 && c != 9 && !(nl && (c == 10 || c == 13)))
+  if stop then i else Nx.tmRun(s, i + 1, q, bs, nl)
+
+// a one-line string after its opening quote q (34: with escapes, 39: literal)
+def Nx.tmStr(s: Str, i: I64, q: I64, acc: Str): Nx.Tr[Str] =
+  val j = Nx.tmRun(s, i, q, q == 34, false)
+  val acc2 = Nx.cat(acc, Str.slice(s, i, j))
+  val c = Str.at(s, j)
+  if c == q then Nx.TrOk(acc2, j + 1)
+  else if c == 92 then
+    Nx.tmEsc(s, j + 1) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(e, k) => Nx.tmStr(s, k, q, Nx.cat(acc2, e))
+  else Nx.TrErr("unterminated or invalid string")
+
+def Nx.tmQuotes(s: Str, i: I64, q: I64): I64 = if Str.at(s, i) == q then Nx.tmQuotes(s, i + 1, q) else i
+
+def Nx.tmRep(q: I64, n: I64, acc: Str): Str = if n <= 0 then acc else Nx.tmRep(q, n - 1, Nx.cat(acc, Nx.byte(q)))
+
+// blanks and newlines
+def Nx.tmSkipAll(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if c == 32 || c == 9 || c == 10 then Nx.tmSkipAll(s, i + 1)
+  else if c == 13 && Str.at(s, i + 1) == 10 then Nx.tmSkipAll(s, i + 2)
+  else i
+
+// a multi-line string after its opening quotes: one or two quotes may touch the closing three
+def Nx.tmMl(s: Str, i: I64, q: I64, acc: Str): Nx.Tr[Str] =
+  val j = Nx.tmRun(s, i, q, q == 34, true)
+  val acc2 = Nx.cat(acc, Str.slice(s, i, j))
+  val c = Str.at(s, j)
+  if c == q then
+    val e = Nx.tmQuotes(s, j, q)
+    val n = e - j
+    if n < 3 then Nx.tmMl(s, e, q, Nx.tmRep(q, n, acc2))
+    else if n > 5 then Nx.TrErr("too many quotes")
+    else Nx.TrOk(Nx.tmRep(q, n - 3, acc2), e)
+  else if c == 92 then
+    val w = Nx.tmWs(s, j + 1)
+    val d = Str.at(s, w)
+    if d == 10 || (d == 13 && Str.at(s, w + 1) == 10) then Nx.tmMl(s, Nx.tmSkipAll(s, w), q, acc2)
+    else
+      Nx.tmEsc(s, j + 1) match
+        case Nx.TrErr(e2) => Nx.TrErr(e2)
+        case Nx.TrOk(e2, k) => Nx.tmMl(s, k, q, Nx.cat(acc2, e2))
+  else Nx.TrErr("unterminated or invalid string")
+
+// the string whose quote is at i; ml: `"""` and `'''` open a multi-line string (not for keys)
+def Nx.tmString(s: Str, i: I64, ml: Bool): Nx.Tr[Str] =
+  val q = Str.at(s, i)
+  if ml && Str.at(s, i + 1) == q && Str.at(s, i + 2) == q then
+    val b = i + 3
+    val b2 = if Str.at(s, b) == 10 then b + 1 else if Str.at(s, b) == 13 && Str.at(s, b + 1) == 10 then b + 2 else b
+    Nx.tmMl(s, b2, q, "")
+  else Nx.tmStr(s, i + 1, q, "")
+
+// ---- keys ------------------------------------------------------------------------------------------------------
+
+def Nx.tmKey(s: Str, i: I64): Nx.Tr[Str] =
+  val c = Str.at(s, i)
+  if c == 34 || c == 39 then Nx.tmString(s, i, false)
+  else
+    val e = Nx.tmBare(s, i)
+    if e == i then Nx.TrErr("expected a key") else Nx.TrOk(Str.slice(s, i, e), e)
+
+// a dotted key, blanks around the dots allowed: the segments and the position after the blanks that follow
+def Nx.tmKeys(s: Str, i: I64, acc: Coll.List[Str]): Nx.Tr[Coll.List[Str]] =
+  Nx.tmKey(s, i) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(k, j) =>
+      val m = Nx.tmWs(s, j)
+      if Str.at(s, m) == 46 then Nx.tmKeys(s, Nx.tmWs(s, m + 1), Coll.Cons(k, acc))
+      else Nx.TrOk(Coll.rev(Coll.Cons(k, acc)), m)
+
+// ---- the table under construction ------------------------------------------------------------------------------
+
+// how a table came to exist: by its [header], as the parent of a header, by a dotted key
+enum Nx.How:
+  case Nx.HExp
+  case Nx.HImp
+  case Nx.HDot
+
+// leaves are closed (values, inline tables, static arrays); arrays of tables hold their tables newest first
+enum Nx.B:
+  case Nx.BLeaf(v: Nx.TVal)
+  case Nx.BTab(how: Nx.How, kids: Coll.List[Nx.BKid])
+  case Nx.BArr(items: Coll.List[Nx.B])
+
+enum Nx.BKid:
+  case Nx.BK(k: Str, b: Nx.B)
+
+// what a path ends in: [t], [[t]], or the key/value pairs of the table the path names
+enum Nx.WOp:
+  case Nx.WTab
+  case Nx.WArr
+  case Nx.WKv(keys: Coll.List[Str], v: Nx.TVal)
+
+def Nx.tmFind(kids: Coll.List[Nx.BKid], k: Str): Coll.Option[Nx.B] = kids match
+  case Coll.Nil => Coll.None
+  case Coll.Cons(h, t) => h match
+    case Nx.BK(n, b) => if Str.eq(n, k) then Coll.Some(b) else Nx.tmFind(t, k)
+
+// kids with k bound to nb (added when absent)
+def Nx.tmSet(kids: Coll.List[Nx.BKid], k: Str, nb: Nx.B, acc: Coll.List[Nx.BKid]): Coll.List[Nx.BKid] = kids match
+  case Coll.Nil => Coll.Cons(Nx.BK(k, nb), acc)
+  case Coll.Cons(h, t) => h match
+    case Nx.BK(n, _) => if Str.eq(n, k) then Coll.revOnto(acc, Coll.Cons(Nx.BK(k, nb), t)) else Nx.tmSet(t, k, nb, Coll.Cons(h, acc))
+
+def Nx.tmWith(how: Nx.How, kids: Coll.List[Nx.BKid], k: Str, nb: Nx.B): Nx.Tr[Nx.B] =
+  Nx.TrOk(Nx.BTab(how, Nx.tmSet(kids, k, nb, Coll.Nil)), 0)
+
+// tab, with the dotted key keys bound to v: only a table made by dotted keys is extended on the way
+def Nx.tmDot(tab: Nx.B, keys: Coll.List[Str], v: Nx.TVal): Nx.Tr[Nx.B] = tab match
+  case Nx.BLeaf(_) => Nx.TrErr("not a table")
+  case Nx.BArr(_) => Nx.TrErr("not a table")
+  case Nx.BTab(how, kids) => keys match
+    case Coll.Nil => Nx.TrErr("empty key")
+    case Coll.Cons(k, rest) =>
+      val have = Nx.tmFind(kids, k)
+      rest match
+        case Coll.Nil => have match
+          case Coll.Some(_) => Nx.TrErr("key defined twice")
+          case Coll.None => Nx.tmWith(how, kids, k, Nx.BLeaf(v))
+        case Coll.Cons(_, _) => have match
+          case Coll.None => Nx.tmDotIn(how, kids, k, Nx.BTab(Nx.HDot, Coll.Nil), rest, v)
+          case Coll.Some(c) => c match
+            case Nx.BLeaf(_) => Nx.TrErr("key is not a table")
+            case Nx.BArr(_) => Nx.TrErr("key is not a table")
+            case Nx.BTab(h2, _) => h2 match
+              case Nx.HDot => Nx.tmDotIn(how, kids, k, c, rest, v)
+              case Nx.HExp => Nx.TrErr("table defined by a header extended by a dotted key")
+              case Nx.HImp => Nx.TrErr("table defined by a header extended by a dotted key")
+
+def Nx.tmDotIn(how: Nx.How, kids: Coll.List[Nx.BKid], k: Str, child: Nx.B, rest: Coll.List[Str], v: Nx.TVal): Nx.Tr[Nx.B] =
+  Nx.tmDot(child, rest, v) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(nc, _) => Nx.tmWith(how, kids, k, nc)
+
+// the last segment k of a path, in the table (how, kids)
+def Nx.tmLast(how: Nx.How, kids: Coll.List[Nx.BKid], k: Str, op: Nx.WOp): Nx.Tr[Nx.B] =
+  val have = Nx.tmFind(kids, k)
+  op match
+    case Nx.WTab => have match
+      case Coll.None => Nx.tmWith(how, kids, k, Nx.BTab(Nx.HExp, Coll.Nil))
+      case Coll.Some(c) => c match
+        case Nx.BLeaf(_) => Nx.TrErr("table redefines a key")
+        case Nx.BArr(_) => Nx.TrErr("table redefines an array")
+        case Nx.BTab(h2, ks2) => h2 match
+          case Nx.HImp => Nx.tmWith(how, kids, k, Nx.BTab(Nx.HExp, ks2))
+          case Nx.HExp => Nx.TrErr("table defined twice")
+          case Nx.HDot => Nx.TrErr("table defined twice")
+    case Nx.WArr => have match
+      case Coll.None => Nx.tmWith(how, kids, k, Nx.BArr(Coll.Cons(Nx.BTab(Nx.HExp, Coll.Nil), Coll.Nil)))
+      case Coll.Some(c) => c match
+        case Nx.BArr(items) => Nx.tmWith(how, kids, k, Nx.BArr(Coll.Cons(Nx.BTab(Nx.HExp, Coll.Nil), items)))
+        case Nx.BLeaf(_) => Nx.TrErr("array of tables redefines a key")
+        case Nx.BTab(_, _) => Nx.TrErr("array of tables redefines a table")
+    case Nx.WKv(_, _) => have match
+      case Coll.None => Nx.TrErr("missing table")
+      case Coll.Some(c) => Nx.tmWalk(c, Coll.Nil, op) match
+        case Nx.TrErr(w) => Nx.TrErr(w)
+        case Nx.TrOk(nc, _) => Nx.tmWith(how, kids, k, nc)
+
+// apply op at the end of path under b; the tables on the way are made when absent, an array of tables is entered at its last table
+def Nx.tmWalk(b: Nx.B, path: Coll.List[Str], op: Nx.WOp): Nx.Tr[Nx.B] = b match
+  case Nx.BLeaf(_) => Nx.TrErr("not a table")
+  case Nx.BArr(items) => items match
+    case Coll.Nil => Nx.TrErr("empty array of tables")
+    case Coll.Cons(last, older) => Nx.tmWalk(last, path, op) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(nl, _) => Nx.TrOk(Nx.BArr(Coll.Cons(nl, older)), 0)
+  case Nx.BTab(how, kids) => path match
+    case Coll.Nil => op match
+      case Nx.WKv(keys, v) => Nx.tmDot(b, keys, v)
+      case Nx.WTab => Nx.TrErr("empty table name")
+      case Nx.WArr => Nx.TrErr("empty table name")
+    case Coll.Cons(k, rest) => rest match
+      case Coll.Nil => Nx.tmLast(how, kids, k, op)
+      case Coll.Cons(_, _) =>
+        val child = Nx.tmFind(kids, k) match
+          case Coll.Some(c) => c
+          case Coll.None => Nx.BTab(Nx.HImp, Coll.Nil)
+        Nx.tmWalk(child, rest, op) match
+          case Nx.TrErr(w) => Nx.TrErr(w)
+          case Nx.TrOk(nc, _) => Nx.tmWith(how, kids, k, nc)
+
+def Nx.tmFin(b: Nx.B): Nx.TVal = b match
+  case Nx.BLeaf(v) => v
+  case Nx.BTab(_, kids) => Nx.TvTable(Nx.tmFinKids(kids))
+  case Nx.BArr(items) => Nx.TvArr(Nx.tmFinItems(Coll.rev(items)))
+
+def Nx.tmFinKids(kids: Coll.List[Nx.BKid]): Coll.List[Nx.TKV] = kids match
+  case Coll.Nil => Coll.Nil
+  case Coll.Cons(h, t) => h match
+    case Nx.BK(k, b) => Coll.Cons(Nx.TvKey(k, Nx.tmFin(b)), Nx.tmFinKids(t))
+
+def Nx.tmFinItems(items: Coll.List[Nx.B]): Coll.List[Nx.TVal] = items match
+  case Coll.Nil => Coll.Nil
+  case Coll.Cons(h, t) => Coll.Cons(Nx.tmFin(h), Nx.tmFinItems(t))
+
+// ---- numbers, dates and times ----------------------------------------------------------------------------------
+
+// digits from i (a digit), single underscores between digits allowed: the end
+def Nx.tmGrp(s: Str, i: I64): I64 =
+  val c = Str.at(s, i + 1)
+  if Nx.tmDig(c) then Nx.tmGrp(s, i + 1)
+  else if c == 95 && Nx.tmDig(Str.at(s, i + 2)) then Nx.tmGrp(s, i + 2)
+  else i + 1
+
+// s[i..j) without underscores
+def Nx.tmClean(s: Str, i: I64, j: I64, acc: Str): Str =
+  if i >= j then acc
+  else if Str.at(s, i) == 95 then Nx.tmClean(s, i + 1, j, acc)
+  else Nx.tmClean(s, i + 1, j, Nx.cat(acc, Nx.byte(Str.at(s, i))))
+
+// digits of the base from i, single underscores between digits: the value and the end; no overflow of int64
+def Nx.tmRadix(s: Str, i: I64, base: I64, acc: Nx.TRadix): Nx.Tr[I64] =
+  val c = Str.at(s, i)
+  val d = Nx.tmHex(c)
+  acc match
+    case Nx.TRad(v, any) =>
+      if d >= 0 && d < base then
+        if v > (9223372036854775807 - d) / base then Nx.TrErr("too large integer")
+        else Nx.tmRadix(s, i + 1, base, Nx.TRad(v * base + d, true))
+      else if c == 95 && any && Nx.tmHex(Str.at(s, i + 1)) >= 0 && Nx.tmHex(Str.at(s, i + 1)) < base then Nx.tmRadix(s, i + 1, base, acc)
+      else if any then Nx.TrOk(v, i)
+      else Nx.TrErr("expected digits")
+
+enum Nx.TRadix:
+  case Nx.TRad(v: I64, any: Bool)
+
+def Nx.tmRadixVal(s: Str, i: I64, base: I64): Nx.Tr[Nx.TVal] =
+  Nx.tmRadix(s, i, base, Nx.TRad(0, false)) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(v, j) => Nx.TrOk(Nx.TvInt(v), j)
+
+// the end of the decimal part from i: `.digits` and `e[+-]digits`; -1 when i starts a malformed one
+def Nx.tmExp(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if c == 101 || c == 69 then
+    val d = Str.at(s, i + 1)
+    val k = if d == 43 || d == 45 then i + 2 else i + 1
+    if Nx.tmDig(Str.at(s, k)) then Nx.tmGrp(s, k) else -1
+  else i
+
+// a decimal integer or float; sign (0 or 1 byte) already counted in i..j
+def Nx.tmDecimal(s: Str, i: I64, j: I64): Nx.Tr[Nx.TVal] =
+  val c = Str.at(s, j)
+  if !Nx.tmDig(c) then Nx.TrErr("expected a number")
+  else
+    val ie = if c == 48 then j + 1 else Nx.tmGrp(s, j)
+    val fe = if Str.at(s, ie) == 46 then (if Nx.tmDig(Str.at(s, ie + 1)) then Nx.tmGrp(s, ie + 1) else -1) else ie
+    val ee = if fe < 0 then -1 else Nx.tmExp(s, fe)
+    if ee < 0 then Nx.TrErr("malformed float")
+    else if ee == ie then
+      val t = Nx.tmClean(s, i, ie, "")
+      if Nx.intOverflows(t) then Nx.TrErr("too large integer") else Nx.TrOk(Nx.TvInt(Nx.intValue(t)), ie)
+    else Nx.TrOk(Nx.TvFloat(Nx.floatBits(Nx.tmClean(s, i, ee, ""))), ee)
+
+// a number that does not start with a date or a time
+def Nx.tmNum(s: Str, i: I64): Nx.Tr[Nx.TVal] =
+  val c = Str.at(s, i)
+  val j = if c == 43 || c == 45 then i + 1 else i
+  val c2 = Str.at(s, j)
+  val x = Str.at(s, j + 1)
+  if c2 == 105 then
+    if Nx.tmAt(s, j, "inf", 0) then Nx.TrOk(Nx.TvFloat(Nx.floatBits(Str.slice(s, i, j + 3))), j + 3) else Nx.TrErr("expected inf")
+  else if c2 == 110 then
+    if Nx.tmAt(s, j, "nan", 0) then Nx.TrOk(Nx.TvFloat(Nx.floatBits(Str.slice(s, i, j + 3))), j + 3) else Nx.TrErr("expected nan")
+  else if c2 == 48 && j == i && x == 120 then Nx.tmRadixVal(s, j + 2, 16)
+  else if c2 == 48 && j == i && x == 111 then Nx.tmRadixVal(s, j + 2, 8)
+  else if c2 == 48 && j == i && x == 98 then Nx.tmRadixVal(s, j + 2, 2)
+  else Nx.tmDecimal(s, i, j)
+
+def Nx.tmDim(y: I64, m: I64): I64 =
+  val leap = Nx.tmMod(y, 4) == 0 && (Nx.tmMod(y, 100) != 0 || Nx.tmMod(y, 400) == 0)
+  if m == 2 then (if leap then 29 else 28)
+  else if m == 4 || m == 6 || m == 9 || m == 11 then 30
+  else 31
+
+def Nx.tmPad2(n: I64): Str = Nx.cat(Nx.byte(48 + n / 10), Nx.byte(48 + Nx.tmMod(n, 10)))
+
+// the first nine digits of the fraction, padded with zeros
+def Nx.tmPad9(f: Str): Str = if Str.len(f) >= 9 then Str.slice(f, 0, 9) else Nx.tmPad9(Nx.cat(f, "0"))
+
+// the fraction as toml11 4 prints it with Nix's precision: 3, 6 or 9 digits, none when all zero
+def Nx.tmFrac(f: Str): Str =
+  if !Str.eq(Str.slice(f, 6, 9), "000") then Nx.cat(".", f)
+  else if !Str.eq(Str.slice(f, 3, 6), "000") then Nx.cat(".", Str.slice(f, 0, 6))
+  else if !Str.eq(Str.slice(f, 0, 3), "000") then Nx.cat(".", Str.slice(f, 0, 3))
+  else ""
+
+// HH:MM:SS[.frac] at i: its text and the end
+def Nx.tmTime(s: Str, i: I64): Nx.Tr[Str] =
+  if !(Nx.tmDigs(s, i, 2) && Str.at(s, i + 2) == 58 && Nx.tmDigs(s, i + 3, 2) && Str.at(s, i + 5) == 58 && Nx.tmDigs(s, i + 6, 2)) then Nx.TrErr("malformed time")
+  else if Nx.tmN2(s, i) > 23 || Nx.tmN2(s, i + 3) > 59 || Nx.tmN2(s, i + 6) > 60 then Nx.TrErr("time out of range")
+  else
+    val base = Str.slice(s, i, i + 8)
+    if Str.at(s, i + 8) == 46 then
+      val e = Nx.tmDigRun(s, i + 9)
+      if e == i + 9 then Nx.TrErr("malformed time fraction")
+      else
+        val f = Nx.tmPad9(Str.slice(s, i + 9, e))
+        Nx.TrOk(Nx.cat(base, Nx.tmFrac(f)), e)
+    else Nx.TrOk(base, i + 8)
+
+// +HH:MM or -HH:MM at i: toml11 prints it as Z when zero
+def Nx.tmOffset(s: Str, i: I64): Nx.Tr[Str] =
+  if !(Nx.tmDigs(s, i + 1, 2) && Str.at(s, i + 3) == 58 && Nx.tmDigs(s, i + 4, 2)) then Nx.TrErr("malformed offset")
+  else
+    val h = Nx.tmN2(s, i + 1)
+    val m = Nx.tmN2(s, i + 4)
+    if h > 24 || m > 60 then Nx.TrErr("offset out of range")
+    else if h == 0 && m == 0 then Nx.TrOk("Z", i + 6)
+    else
+      val t = h * 60 + m
+      val sign = if Str.at(s, i) == 45 then "-" else "+"
+      Nx.TrOk(Nx.cat(sign, Nx.cat(Nx.tmPad2(t / 60), Nx.cat(":", Nx.tmPad2(Nx.tmMod(t, 60))))), i + 6)
+
+// a time after a date and its delimiter: the whole text, the offset if any
+def Nx.tmDateTime2(s: Str, i: I64, date: Str): Nx.Tr[Nx.TVal] =
+  Nx.tmTime(s, i) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(t, j) =>
+      val o = Str.at(s, j)
+      val dt = Nx.cat(date, Nx.cat("T", t))
+      if o == 90 || o == 122 then Nx.TrOk(Nx.TvStamp(Nx.cat(dt, "Z")), j + 1)
+      else if o == 43 || o == 45 then
+        Nx.tmOffset(s, j) match
+          case Nx.TrErr(w) => Nx.TrErr(w)
+          case Nx.TrOk(ot, k) => Nx.TrOk(Nx.TvStamp(Nx.cat(dt, ot)), k)
+      else Nx.TrOk(Nx.TvStamp(dt), j)
+
+// YYYY-MM-DD at i, then maybe a time
+def Nx.tmDateTime(s: Str, i: I64): Nx.Tr[Nx.TVal] =
+  if !(Nx.tmDigs(s, i + 5, 2) && Str.at(s, i + 7) == 45 && Nx.tmDigs(s, i + 8, 2)) then Nx.TrErr("malformed date")
+  else
+    val y = Nx.tmN2(s, i) * 100 + Nx.tmN2(s, i + 2)
+    val mo = Nx.tmN2(s, i + 5)
+    val d = Nx.tmN2(s, i + 8)
+    if mo < 1 || mo > 12 || d < 1 || d > Nx.tmDim(y, mo) then Nx.TrErr("date out of range")
+    else
+      val date = Str.slice(s, i, i + 10)
+      val c = Str.at(s, i + 10)
+      val sep = c == 84 || c == 116 || (c == 32 && Nx.tmDigs(s, i + 11, 2) && Str.at(s, i + 13) == 58)
+      if sep then Nx.tmDateTime2(s, i + 11, date) else Nx.TrOk(Nx.TvStamp(date), i + 10)
+
+def Nx.tmTimeOnly(s: Str, i: I64): Nx.Tr[Nx.TVal] =
+  Nx.tmTime(s, i) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(t, j) => Nx.TrOk(Nx.TvStamp(t), j)
+
+// ---- values ----------------------------------------------------------------------------------------------------
+
+def Nx.tmLit(s: Str, i: I64, w: Str, v: Nx.TVal): Nx.Tr[Nx.TVal] =
+  if Nx.tmAt(s, i, w, 0) then Nx.TrOk(v, i + Str.len(w)) else Nx.TrErr("expected a value")
+
+def Nx.tmValue(s: Str, i: I64): Nx.Tr[Nx.TVal] =
+  val c = Str.at(s, i)
+  if c == 34 || c == 39 then
+    Nx.tmString(s, i, true) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(v, j) => Nx.TrOk(Nx.TvStr(v), j)
+  else if c == 91 then Nx.tmArr(s, i + 1, Coll.Nil)
+  else if c == 123 then Nx.tmInl(s, i + 1, Nx.BTab(Nx.HExp, Coll.Nil), true)
+  else if c == 116 then Nx.tmLit(s, i, "true", Nx.TvBool(true))
+  else if c == 102 then Nx.tmLit(s, i, "false", Nx.TvBool(false))
+  else if Nx.tmDigs(s, i, 4) && Str.at(s, i + 4) == 45 then Nx.tmDateTime(s, i)
+  else if Nx.tmDigs(s, i, 2) && Str.at(s, i + 2) == 58 then Nx.tmTimeOnly(s, i)
+  else if Nx.tmDig(c) || c == 43 || c == 45 || c == 105 || c == 110 then Nx.tmNum(s, i)
+  else Nx.TrErr("expected a value")
+
+// an array after `[` or a comma: blanks, newlines and comments between the items
+def Nx.tmArr(s: Str, i: I64, acc: Coll.List[Nx.TVal]): Nx.Tr[Nx.TVal] =
+  Nx.tmSkip(s, i) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(_, j) =>
+      if Str.at(s, j) == 93 then Nx.TrOk(Nx.TvArr(Coll.rev(acc)), j + 1)
+      else
+        Nx.tmValue(s, j) match
+          case Nx.TrErr(w) => Nx.TrErr(w)
+          case Nx.TrOk(v, k) => Nx.tmArrNext(s, k, Coll.Cons(v, acc))
+
+def Nx.tmArrNext(s: Str, i: I64, acc: Coll.List[Nx.TVal]): Nx.Tr[Nx.TVal] =
+  Nx.tmSkip(s, i) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(_, m) =>
+      val c = Str.at(s, m)
+      if c == 44 then Nx.tmArr(s, m + 1, acc)
+      else if c == 93 then Nx.TrOk(Nx.TvArr(Coll.rev(acc)), m + 1)
+      else Nx.TrErr("expected , or ]")
+
+// an inline table after `{` or a comma (TOML 1.0: one line, no trailing comma)
+def Nx.tmInl(s: Str, i: I64, tab: Nx.B, first: Bool): Nx.Tr[Nx.TVal] =
+  val j = Nx.tmWs(s, i)
+  if Str.at(s, j) == 125 && first then Nx.TrOk(Nx.tmFin(tab), j + 1)
+  else
+    Nx.tmKeys(s, j, Coll.Nil) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(keys, m) =>
+        if Str.at(s, m) != 61 then Nx.TrErr("expected =")
+        else
+          Nx.tmValue(s, Nx.tmWs(s, m + 1)) match
+            case Nx.TrErr(w) => Nx.TrErr(w)
+            case Nx.TrOk(v, n) => Nx.tmInlNext(s, n, tab, keys, v)
+
+def Nx.tmInlNext(s: Str, n: I64, tab: Nx.B, keys: Coll.List[Str], v: Nx.TVal): Nx.Tr[Nx.TVal] =
+  Nx.tmDot(tab, keys, v) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(t2, _) =>
+      val p = Nx.tmWs(s, n)
+      val d = Str.at(s, p)
+      if d == 44 then Nx.tmInl(s, p + 1, t2, false)
+      else if d == 125 then Nx.TrOk(Nx.tmFin(t2), p + 1)
+      else Nx.TrErr("expected , or }")
+
+// ---- the document ----------------------------------------------------------------------------------------------
+
+// ctx: the path of the last [header], where key/value pairs go
+def Nx.tmDoc(s: Str, i: I64, root: Nx.B, ctx: Coll.List[Str]): Nx.Tr[Nx.B] =
+  Nx.tmSkip(s, i) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(_, j) =>
+      val c = Str.at(s, j)
+      if c < 0 then Nx.TrOk(root, j)
+      else if c == 91 then Nx.tmHeader(s, j, root)
+      else Nx.tmKv(s, j, root, ctx)
+
+def Nx.tmHeader(s: Str, j: I64, root: Nx.B): Nx.Tr[Nx.B] =
+  val arr = Str.at(s, j + 1) == 91
+  val st = if arr then j + 2 else j + 1
+  Nx.tmKeys(s, Nx.tmWs(s, st), Coll.Nil) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(keys, m) =>
+      if Str.at(s, m) != 93 || (arr && Str.at(s, m + 1) != 93) then Nx.TrErr("expected ]")
+      else
+        val after = if arr then m + 2 else m + 1
+        val op = if arr then Nx.WArr else Nx.WTab
+        Nx.tmHeaderEnd(s, after, root, keys, op)
+
+def Nx.tmHeaderEnd(s: Str, after: I64, root: Nx.B, keys: Coll.List[Str], op: Nx.WOp): Nx.Tr[Nx.B] =
+  Nx.tmEol(s, after) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(_, n) => Nx.tmWalk(root, keys, op) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(r2, _) => Nx.tmDoc(s, n, r2, keys)
+
+def Nx.tmKv(s: Str, j: I64, root: Nx.B, ctx: Coll.List[Str]): Nx.Tr[Nx.B] =
+  Nx.tmKeys(s, j, Coll.Nil) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(keys, m) =>
+      if Str.at(s, m) != 61 then Nx.TrErr("expected =")
+      else
+        Nx.tmValue(s, Nx.tmWs(s, m + 1)) match
+          case Nx.TrErr(w) => Nx.TrErr(w)
+          case Nx.TrOk(v, n) => Nx.tmKvEnd(s, n, root, ctx, keys, v)
+
+def Nx.tmKvEnd(s: Str, n: I64, root: Nx.B, ctx: Coll.List[Str], keys: Coll.List[Str], v: Nx.TVal): Nx.Tr[Nx.B] =
+  Nx.tmEol(s, n) match
+    case Nx.TrErr(w) => Nx.TrErr(w)
+    case Nx.TrOk(_, p) => Nx.tmWalk(root, ctx, Nx.WKv(keys, v)) match
+      case Nx.TrErr(w) => Nx.TrErr(w)
+      case Nx.TrOk(r2, _) => Nx.tmDoc(s, p, r2, ctx)
+
+def Nx.tmHasStamp(v: Nx.TVal): Bool = v match
+  case Nx.TvStamp(_) => true
+  case Nx.TvArr(xs) => Nx.tmAnyStamp(xs)
+  case Nx.TvTable(kvs) => Nx.tmAnyKvStamp(kvs)
+  case _ => false
+
+def Nx.tmAnyStamp(xs: Coll.List[Nx.TVal]): Bool = xs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => if Nx.tmHasStamp(h) then true else Nx.tmAnyStamp(t)
+
+def Nx.tmAnyKvStamp(kvs: Coll.List[Nx.TKV]): Bool = kvs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => h match
+    case Nx.TvKey(_, v) => if Nx.tmHasStamp(v) then true else Nx.tmAnyKvStamp(t)
+
+// the parse of a whole document; without timestamps a date or time is an error, as in Nix
+def Nx.tomlParse(src: Str, timestamps: Bool): Nx.TomlResult =
+  Nx.tmDoc(src, 0, Nx.BTab(Nx.HExp, Coll.Nil), Coll.Nil) match
+    case Nx.TrErr(w) => Nx.TomlBad(w)
+    case Nx.TrOk(b, _) =>
+      val v = Nx.tmFin(b)
+      if !timestamps && Nx.tmHasStamp(v) then Nx.TomlBad("Dates and times are not supported") else Nx.TomlOk(v)

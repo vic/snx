@@ -1,0 +1,139 @@
+// test main for nx/toml.srs: argv[1] = a file, one record per line: `<flag>` TAB `<nix-escaped toml text>`.
+// flag 0: no timestamps, 1: parse-toml-timestamps, 2: as 1 and print the value alone. One line out per record:
+// `{ d = "<text>"; v = <value>; }` as the nix-conformance .exp files (print.cc), or `ERROR`.
+
+// the text of a Nix string literal body: \n \r \t, any other escaped byte is itself
+def Nx.tmUnesc(s: Str, i: I64, acc: Str): Str =
+  if i >= Str.len(s) then acc
+  else if Str.at(s, i) == 92 then
+    val c = Str.at(s, i + 1)
+    val b = if c == 110 then 10 else if c == 114 then 13 else if c == 116 then 9 else c
+    Nx.tmUnesc(s, i + 2, Nx.cat(acc, Nx.byte(b)))
+  else Nx.tmUnesc(s, i + 1, Nx.cat(acc, Str.slice(s, i, i + 1)))
+
+def Nx.tmQuoteFrom(s: Str, i: I64): Unit =
+  if i < Str.len(s) then
+    val c = Str.at(s, i)
+    if c == 34 || c == 92 then
+      Console.printChar(92)
+      Console.printChar(c)
+    else if c == 10 then Console.print("\\n")
+    else if c == 13 then Console.print("\\r")
+    else if c == 9 then Console.print("\\t")
+    else if c == 36 && Str.at(s, i + 1) == 123 then Console.print("\\$")
+    else Console.printChar(c)
+    Nx.tmQuoteFrom(s, i + 1)
+  else Console.print("")
+
+def Nx.tmQuote(s: Str): Unit =
+  Console.printChar(34)
+  Nx.tmQuoteFrom(s, 0)
+  Console.printChar(34)
+
+def Nx.tmIsReserved(s: Str): Bool =
+  Str.eq(s, "if") || Str.eq(s, "then") || Str.eq(s, "else") || Str.eq(s, "assert") || Str.eq(s, "with") || Str.eq(s, "let") || Str.eq(s, "in") || Str.eq(s, "rec") || Str.eq(s, "inherit")
+
+def Nx.tmVarChars(s: Str, i: I64): Bool =
+  if i >= Str.len(s) then true
+  else
+    val c = Str.at(s, i)
+    if Nx.tmDig(c) || (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 45 || c == 39 then Nx.tmVarChars(s, i + 1) else false
+
+// print.cc isVarName: an attribute name printed bare
+def Nx.tmIsVar(s: Str): Bool =
+  if Str.len(s) == 0 || Nx.tmIsReserved(s) then false
+  else
+    val c = Str.at(s, 0)
+    if Nx.tmDig(c) || c == 45 || c == 39 then false else Nx.tmVarChars(s, 0)
+
+def Nx.tmName(s: Str): Unit = if Nx.tmIsVar(s) then Console.print(s) else Nx.tmQuote(s)
+
+def Nx.tmLtFrom(a: Str, b: Str, i: I64): Bool =
+  if i >= Str.len(a) then i < Str.len(b)
+  else if i >= Str.len(b) then false
+  else
+    val x = Str.at(a, i)
+    val y = Str.at(b, i)
+    if x < y then true else if x > y then false else Nx.tmLtFrom(a, b, i + 1)
+
+def Nx.tmKeyOf(kv: Nx.TKV): Str = kv match
+  case Nx.TvKey(k, _) => k
+
+// kv inserted into the list sorted by key bytes
+def Nx.tmIns(kv: Nx.TKV, sorted: Coll.List[Nx.TKV], acc: Coll.List[Nx.TKV]): Coll.List[Nx.TKV] = sorted match
+  case Coll.Nil => Coll.revOnto(acc, Coll.Cons(kv, Coll.Nil))
+  case Coll.Cons(h, t) =>
+    if Nx.tmLtFrom(Nx.tmKeyOf(kv), Nx.tmKeyOf(h), 0) then Coll.revOnto(acc, Coll.Cons(kv, sorted))
+    else Nx.tmIns(kv, t, Coll.Cons(h, acc))
+
+def Nx.tmSort(kvs: Coll.List[Nx.TKV], acc: Coll.List[Nx.TKV]): Coll.List[Nx.TKV] = kvs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => Nx.tmSort(t, Nx.tmIns(h, acc, Coll.Nil))
+
+def Nx.tmPrintKvs(kvs: Coll.List[Nx.TKV]): Unit = kvs match
+  case Coll.Nil => Console.print("")
+  case Coll.Cons(h, t) =>
+    h match
+      case Nx.TvKey(k, v) =>
+        Nx.tmName(k)
+        Console.print(" = ")
+        Nx.tmPrint(v)
+        Console.print("; ")
+    Nx.tmPrintKvs(t)
+
+def Nx.tmPrintItems(xs: Coll.List[Nx.TVal]): Unit = xs match
+  case Coll.Nil => Console.print("")
+  case Coll.Cons(h, t) =>
+    Nx.tmPrint(h)
+    Console.print(" ")
+    Nx.tmPrintItems(t)
+
+def Nx.tmPrint(v: Nx.TVal): Unit = v match
+  case Nx.TvInt(n) => Console.printI64(n)
+  case Nx.TvFloat(b) => Console.print(Nx.floatShow(b))
+  case Nx.TvStr(s) => Nx.tmQuote(s)
+  case Nx.TvBool(b) => if b then Console.print("true") else Console.print("false")
+  case Nx.TvArr(xs) =>
+    Console.print("[ ")
+    Nx.tmPrintItems(xs)
+    Console.print("]")
+  case Nx.TvTable(kvs) =>
+    Console.print("{ ")
+    Nx.tmPrintKvs(Nx.tmSort(kvs, Coll.Nil))
+    Console.print("}")
+  case Nx.TvStamp(t) =>
+    Console.print("{ _type = \"timestamp\"; value = ")
+    Nx.tmQuote(t)
+    Console.print("; }")
+
+def Nx.tmShow(text: Str, flag: I64): Unit =
+  Nx.tomlParse(text, flag >= 1) match
+    case Nx.TomlBad(_) => Console.print("ERROR\n")
+    case Nx.TomlOk(v) =>
+      if flag == 2 then
+        Nx.tmPrint(v)
+        Console.print("\n")
+      else
+        Console.print("{ d = ")
+        Nx.tmQuote(text)
+        Console.print("; v = ")
+        Nx.tmPrint(v)
+        Console.print("; }\n")
+
+def Nx.tmLineEnd(s: Str, i: I64): I64 = if i < Str.len(s) && Str.at(s, i) != 10 then Nx.tmLineEnd(s, i + 1) else i
+
+def Nx.tmLines(src: Str, i: I64): Unit =
+  if i < Str.len(src) then
+    val e = Nx.tmLineEnd(src, i)
+    Nx.tmShow(Nx.tmUnesc(Str.slice(src, i + 2, e), 0, ""), Str.at(src, i) - 48)
+    Nx.tmLines(src, e + 1)
+  else Console.print("")
+
+def main(): I64 =
+  handle r = Srs.Arena()
+  handle c = Srs.Console()
+  handle a = Srs.Args()
+  handle f = Srs.Files()
+  val src = Files.read(Args.at(1))
+  Nx.tmLines(src, 0)
+  0
