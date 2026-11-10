@@ -46,7 +46,8 @@ enum Nx.BinOp:
 enum Nx.Code:
   case Nx.CConst(v: Nx.Val)
   case Nx.CLocal(up: I64, i: I64)                         // frame up levels out, slot i (slot 0 = parent frame)
-  case Nx.CWithVar(sym: I64, up: I64, name: Str)          // up = levels to the innermost enclosing with frame
+  case Nx.CWithVar(sym: I64, ups: Coll.List[I64], name: Str)   // frame levels to each enclosing with frame, innermost first
+  case Nx.CCell(c: Ptr)                                   // a base env name (builtins, true, map, ...): its cell
   case Nx.CCurPos(file: Str, line: I64, col: I64)
   case Nx.CStr(s: Str)
   case Nx.CPath(s: Str)
