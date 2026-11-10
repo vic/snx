@@ -177,6 +177,19 @@ int64_t Nx__intern(srs_str s) {
   return g_nsyms++;
 }
 srs_str Nx__symName(int64_t id) { return (id >= 0 && id < g_nsyms) ? g_names[id] : (srs_str){(const uint8_t*)"", 0}; }
+// per symbol: the cell of its name as a string (nx/prim.srs Nx.nameCell), Nx__noFrame until made
+static void** g_namecell; static int64_t g_namecell_cap;
+void* Nx__nameCellOf(int64_t id) { return id < g_namecell_cap ? g_namecell[id] : 0; }
+int64_t Nx__nameCellSet(int64_t id, void* c) {
+  if (id >= g_namecell_cap) {
+    int64_t cap = g_namecell_cap ? g_namecell_cap : 4096; while (cap <= id) cap *= 2;
+    g_namecell = realloc(g_namecell, (size_t)cap * sizeof *g_namecell);
+    if (!g_namecell) { fputs("snx: out of memory\n", stderr); exit(70); }
+    memset(g_namecell + g_namecell_cap, 0, (size_t)(cap - g_namecell_cap) * sizeof *g_namecell); g_namecell_cap = cap;
+  }
+  g_namecell[id] = c;
+  return 0;
+}
 int64_t Nx__findSym(const int64_t* syms, int64_t n, int64_t sym) {
   int64_t lo = 0, hi = n;
   // halve down to eight names, then walk them: sorted, so the first not below sym is its place
@@ -273,8 +286,11 @@ __attribute__((constructor)) static void nx_big_stack(int argc, char** argv) {
 // ── cells: one word holding a value (nx/val.srs Nx.cell)
 void* Nx__cell(void* v) { void** c = nx_words(1); *c = v; return c; }
 void* Nx__get(void** c) { return *c; }
-void* Nx__lazy(void* env, void* code) { void** c = nx_words(3); c[0] = 0; c[1] = env; c[2] = code; return c; }
-bool Nx__isLazy(void** c) { return !*c; }
+// a thunk is two words: its code with the low bit set (values and code are word-aligned, so a value never has it),
+// then its env; forcing writes the value over the first word
+void* Nx__lazy(void* env, void* code) { void** c = nx_words(2); c[0] = (void*)((uintptr_t)code | 1); c[1] = env; return c; }
+bool Nx__isLazy(void** c) { return (uintptr_t)*c & 1; }
+void* Nx__lazyCode(void** c) { return (void*)((uintptr_t)*c & ~(uintptr_t)1); }
 int64_t Nx__put(void** c, void* v) { *c = v; return 0; }
 
 // a double as std::ostream prints it by default (precision 6, %g): print-ambiguous.cc:93-95

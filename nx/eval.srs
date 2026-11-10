@@ -39,9 +39,11 @@ def Nx.force(c: Ptr): Nx.Val =
       case _ => v
 
 def Nx.forceRun(c: Ptr): Nx.Val =
+  // the code is in the word the busy mark overwrites
+  val code = Nx.lazyCode(c)
   Nx.put(c, Nx.VBusy)
   if Nx.probe(2) == 1 then Nx.trPush(c) else ()
-  val r = Nx.eval(Nx.aget[Ptr](c, 1), Nx.aget[Nx.Code](c, 2))
+  val r = Nx.eval(Nx.aget[Ptr](c, 1), code)
   if Nx.probe(2) == 1 then Nx.trPop() else ()
   Nx.put(c, r)
   Nx.leakIf(r)

@@ -675,10 +675,21 @@ def Nx.pAttrNames(v: Nx.Val, names: Bool): Nx.Val = Nx.flat(v) match
 def Nx.namesGo(syms: Ptr, vals: Ptr, ord: Ptr, out: Ptr, i: I64, n: I64, names: Bool): Ptr =
   if i < n then
     val j = Nx.ageti(ord, i)
-    val c = if names then Nx.cell(Nx.VStr(Nx.symName(Nx.ageti(syms, j)), Coll.Nil)) else Nx.aget[Ptr](vals, j)
+    val c = if names then Nx.nameCell(Nx.ageti(syms, j)) else Nx.aget[Ptr](vals, j)
     Nx.aset[Ptr](out, i, c)
     Nx.namesGo(syms, vals, ord, out, i + 1, n, names)
   else out
+
+// the cell of a symbol's name as a string, one per symbol for the run: made once, then pinned (Nx.leak), as the word
+// arena must not free it under a later call
+def Nx.nameCell(sym: I64): Ptr =
+  val c = Nx.nameCellOf(sym)
+  if !Nx.ptrEq(c, Nx.noFrame()) then c
+  else
+    val m = Nx.cell(Nx.VStr(Nx.symName(sym), Coll.Nil))
+    Nx.nameCellSet(sym, m)
+    Nx.leak()
+    m
 
 // getAttr, or hasAttr when has
 def Nx.pGetAttr(nv: Nx.Val, sv: Nx.Val, has: Bool): Nx.Val = nv match
@@ -802,7 +813,7 @@ def Nx.mapAttrsGo(code: Nx.Code, f: Ptr, syms: Ptr, vals: Ptr, out: Ptr, i: I64,
   if i < n then
     val fr = Nx.frame(Nx.noFrame(), 3)
     Nx.aset[Ptr](fr, 1, f)
-    Nx.aset[Ptr](fr, 2, Nx.cell(Nx.VStr(Nx.symName(Nx.ageti(syms, i)), Coll.Nil)))
+    Nx.aset[Ptr](fr, 2, Nx.nameCell(Nx.ageti(syms, i)))
     Nx.aset[Ptr](fr, 3, Nx.aget[Ptr](vals, i))
     Nx.aset[Ptr](out, i, Nx.lazy(fr, code))
     Nx.mapAttrsGo(code, f, syms, vals, out, i + 1, n)

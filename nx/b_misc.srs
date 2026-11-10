@@ -238,69 +238,94 @@ def Nx.partGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, right: Coll.List[Ptr], wrong: 
         if t then Nx.partGo(f, xs, i + 1, n, Coll.Cons(x, right), wrong) else Nx.partGo(f, xs, i + 1, n, right, Coll.Cons(x, wrong))
       case _ => r
 
-// symbol -> its cells, newest first, and the symbols in first-seen order
-enum Nx.Groups:
-  case Nx.Groups(m: Coll.IMap[Coll.List[Ptr]], order: Coll.List[I64])
+// groupBy and zipAttrsWith: the n (symbol, cell) pairs in ks/vs, sorted by symbol keeping their order (Nx.sortPairs is
+// stable); each run of one symbol is a group, its cells a list in input order. f = zipAttrsWith's function: a group's
+// value is then the thunk f name list
+def Nx.grpSet(ks: Ptr, vs: Ptr, n: I64, f: Coll.Option[Ptr]): Nx.Val =
+  Nx.sortPairs(ks, vs, n)
+  val g = Nx.runCount(ks, 1, n, if n == 0 then 0 else 1)
+  val os = Nx.arrNew(g)
+  val ov = Nx.arrNew(g)
+  Nx.grpRuns(ks, vs, n, f, os, ov, 0, 0)
+  Nx.VAttrs(g, os, ov)
 
-def Nx.grpAdd(g: Nx.Groups, sym: I64, c: Ptr): Nx.Groups = g match
-  case Nx.Groups(m, order) => Coll.lookup(m, sym) match
-    case Coll.Some(cs) => Nx.Groups(Coll.insert(m, sym, Coll.Cons(c, cs)), order)
-    case Coll.None => Nx.Groups(Coll.insert(m, sym, Coll.Cons(c, Coll.Nil)), Coll.Cons(sym, order))
+// the runs of equal symbols in ks[i..n), acc counted so far
+def Nx.runCount(ks: Ptr, i: I64, n: I64, acc: I64): I64 =
+  if i >= n then acc else Nx.runCount(ks, i + 1, n, if Nx.ageti(ks, i) == Nx.ageti(ks, i - 1) then acc else acc + 1)
 
-def Nx.grpCells(g: Nx.Groups, sym: I64): Coll.List[Ptr] = g match
-  case Nx.Groups(m, _) => Coll.lookup(m, sym) match
-    case Coll.Some(cs) => Coll.rev(cs)
-    case Coll.None => Coll.Nil
+def Nx.runEnd(ks: Ptr, i: I64, n: I64, sym: I64): I64 = if i < n && Nx.ageti(ks, i) == sym then Nx.runEnd(ks, i + 1, n, sym) else i
 
-// the set of the groups: each value is a list (groupBy) or the thunk f name list (zipAttrsWith)
-def Nx.grpSet(g: Nx.Groups, order: Coll.List[I64], f: Coll.Option[Ptr], acc: Coll.List[Nx.Pair]): Nx.Val = order match
-  case Coll.Nil => Nx.attrsOf(acc)
-  case Coll.Cons(sym, t) =>
-    val lst = Nx.cell(Nx.cellsOf(Nx.grpCells(g, sym)))
+def Nx.grpRuns(ks: Ptr, vs: Ptr, n: I64, f: Coll.Option[Ptr], os: Ptr, ov: Ptr, i: I64, o: I64): Unit =
+  if i < n then
+    val sym = Nx.ageti(ks, i)
+    val e = Nx.runEnd(ks, i + 1, n, sym)
+    val cells = Nx.arrNew(e - i)
+    Nx.copyCells(vs, i, cells, 0, e - i)
+    val lst = Nx.cell(Nx.VList(e - i, cells))
     val c = f match
       case Coll.None => lst
       case Coll.Some(fc) =>
         val fr = Nx.frame(Nx.noFrame(), 3)
         Nx.aset[Ptr](fr, 1, fc)
-        Nx.aset[Ptr](fr, 2, Nx.strCell(Nx.symName(sym)))
+        Nx.aset[Ptr](fr, 2, Nx.nameCell(sym))
         Nx.aset[Ptr](fr, 3, lst)
         Nx.lazy(fr, Nx.appCode(2))
-    Nx.grpSet(g, t, f, Coll.Cons(Nx.Pair(sym, c), acc))
-
-def Nx.grpOrder(g: Nx.Groups): Coll.List[I64] = g match
-  case Nx.Groups(_, o) => o
+    Nx.aseti(os, o, sym)
+    Nx.aset[Ptr](ov, o, c)
+    Nx.grpRuns(ks, vs, n, f, os, ov, e, o + 1)
+  else ()
 
 def Nx.pGroupBy(a: Ptr, l: Nx.Val): Nx.Val = l match
   case Nx.VList(n, xs) =>
     val e = Nx.fnErr(Nx.force(a))
-    if Nx.isErr(e) then e else Nx.groupGo(Nx.force(a), xs, 0, n, Nx.Groups(Coll.Tip, Coll.Nil))
+    if Nx.isErr(e) then e else Nx.groupGo(Nx.force(a), xs, 0, n, Nx.arrNew(n), Nx.arrNew(n))
   case _ => Nx.typeErr("a list", l)
 
-def Nx.groupGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, g: Nx.Groups): Nx.Val =
-  if i == n then Nx.grpSet(g, Nx.grpOrder(g), Coll.None, Coll.Nil)
+def Nx.groupGo(f: Nx.Val, xs: Ptr, i: I64, n: I64, ks: Ptr, vs: Ptr): Nx.Val =
+  if i == n then Nx.grpSet(ks, vs, n, Coll.None)
   else
     val x = Nx.aget[Ptr](xs, i)
     val r = Nx.apply(f, x)
     r match
-      case Nx.VStr(name, _) => Nx.groupGo(f, xs, i + 1, n, Nx.grpAdd(g, Nx.intern(name), x))
+      case Nx.VStr(name, _) =>
+        Nx.aseti(ks, i, Nx.intern(name))
+        Nx.aset[Ptr](vs, i, x)
+        Nx.groupGo(f, xs, i + 1, n, ks, vs)
       case _ => Nx.typeErr("a string", r)
 
 def Nx.pZipAttrsWith(a: Ptr, l: Nx.Val): Nx.Val = l match
   case Nx.VList(n, xs) =>
     val e = Nx.fnErr(Nx.force(a))
-    if Nx.isErr(e) then e else Nx.zipGo(a, xs, 0, n, Nx.Groups(Coll.Tip, Coll.Nil))
+    if Nx.isErr(e) then e
+    else
+      // the sets flat first, for the count of all their names
+      val sets = Nx.arrNew(n)
+      val r = Nx.zipSets(xs, 0, n, sets, 0)
+      r match
+        case Nx.VInt(m) => Nx.zipFill(sets, 0, n, Nx.arrNew(m), Nx.arrNew(m), 0, a, m)
+        case _ => r
   case _ => Nx.typeErr("a list", l)
 
-def Nx.zipGo(f: Ptr, xs: Ptr, i: I64, n: I64, g: Nx.Groups): Nx.Val =
-  if i == n then Nx.grpSet(g, Nx.grpOrder(g), Coll.Some(f), Coll.Nil)
+// sets[i] = element i forced and flat; the count of all their names (Nx.VInt), or the error of the first that is no set
+def Nx.zipSets(xs: Ptr, i: I64, n: I64, sets: Ptr, acc: I64): Nx.Val =
+  if i == n then Nx.VInt(acc)
   else
     val e = Nx.force(Nx.aget[Ptr](xs, i))
     Nx.flat(e) match
-      case Nx.VAttrs(m, syms, vals) => Nx.zipGo(f, xs, i + 1, n, Nx.zipAdd(g, syms, vals, 0, m))
+      case Nx.VAttrs(m, syms, vals) =>
+        Nx.aset[Nx.Val](sets, i, Nx.VAttrs(m, syms, vals))
+        Nx.zipSets(xs, i + 1, n, sets, acc + m)
       case _ => Nx.typeErr("a set", e)
 
-def Nx.zipAdd(g: Nx.Groups, syms: Ptr, vals: Ptr, i: I64, m: I64): Nx.Groups =
-  if i == m then g else Nx.zipAdd(Nx.grpAdd(g, Nx.ageti(syms, i), Nx.aget[Ptr](vals, i)), syms, vals, i + 1, m)
+def Nx.zipFill(sets: Ptr, i: I64, n: I64, ks: Ptr, vs: Ptr, o: I64, f: Ptr, m: I64): Nx.Val =
+  if i == n then Nx.grpSet(ks, vs, m, Coll.Some(f))
+  else Nx.aget[Nx.Val](sets, i) match
+    case Nx.VAttrs(k, syms, vals) =>
+      // symbol ids and cells are both words
+      Nx.copyCells(syms, 0, ks, o, k)
+      Nx.copyCells(vals, 0, vs, o, k)
+      Nx.zipFill(sets, i + 1, n, ks, vs, o + k, f, m)
+    case _ => Nx.zipFill(sets, i + 1, n, ks, vs, o, f, m)
 
 // ---- genericClosure (primops.cc prim_genericClosure) ----------------------------------------------------------
 

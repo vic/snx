@@ -97,9 +97,10 @@ enum Nx.CDyn:
 extern def Nx.cell(v: Nx.Val): Ptr
 extern def Nx.get(c: Ptr): Nx.Val
 extern def Nx.put(c: Ptr, v: Nx.Val): Unit
-// a thunk: one allocation of 3 words, value (none yet), env, code; Nx.force runs it
+// a thunk: one allocation of 2 words, code (marked, until the value replaces it) and env; Nx.force runs it
 extern def Nx.lazy(env: Ptr, code: Nx.Code): Ptr
 extern def Nx.isLazy(c: Ptr): Bool
+extern def Nx.lazyCode(c: Ptr): Nx.Code
 // C arrays of words: a frame is slot 0 = parent frame, slots 1..n = cells
 extern def Nx.arrNew(n: I64): Ptr
 extern def Nx.aget [A: Type] (p: Ptr, i: I64): A
@@ -125,6 +126,9 @@ extern def Nx.mergeTop(k: I64, t: Ptr, out: Ptr): Unit
 // symbols: ids in first-seen order (attribute order of == and of forcing is this order)
 extern def Nx.intern(s: Str): I64
 extern def Nx.symName(id: I64): Str
+// the shared cell of a symbol's name as a string, Nx.noFrame() until Nx.nameCell makes it
+extern def Nx.nameCellOf(id: I64): Ptr
+extern def Nx.nameCellSet(id: I64, c: Ptr): Unit
 // the index of sym in the n sorted ids at syms, or n when absent (binary search); use Nx.slotOf
 extern def Nx.findSym(syms: Ptr, n: I64, sym: I64): I64
 
