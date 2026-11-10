@@ -339,18 +339,38 @@ int64_t Nx__sortPairs(int64_t* keys, void** vals, int64_t n) {
 }
 
 // the indexes 0..n-1 of syms ordered by the bytes of their names (print-ambiguous.cc:36, attr-set.hh:420-430)
-typedef struct { int64_t sym, i; } nx_si;
-static int nx_name_cmp(const void* a, const void* b) {
-  srs_str x = g_names[((const nx_si*)a)->sym], y = g_names[((const nx_si*)b)->sym];
+// each name keyed by its first eight bytes big-endian (zero padded): most pairs differ there, the rest compare bytes
+typedef struct { uint64_t pre; int64_t sym, i; } nx_si;
+static inline bool nx_name_less(const nx_si* a, const nx_si* b) {
+  if (a->pre != b->pre) return a->pre < b->pre;
+  srs_str x = g_names[a->sym], y = g_names[b->sym];
   int64_t m = x.n < y.n ? x.n : y.n;
   int c = memcmp(x.p, y.p, (size_t)m);
-  return c ? c : (x.n < y.n ? -1 : x.n > y.n);
+  return c ? c < 0 : x.n < y.n;
+}
+// merge sort on t[0..n) with tmp room of n: insertion below 16
+static void nx_name_sort(nx_si* t, nx_si* tmp, int64_t n) {
+  if (n < 16) {
+    for (int64_t i = 1; i < n; i++) { nx_si x = t[i]; int64_t j = i; while (j > 0 && nx_name_less(&x, &t[j - 1])) { t[j] = t[j - 1]; j--; } t[j] = x; }
+    return;
+  }
+  int64_t h = n / 2;
+  nx_name_sort(t, tmp, h); nx_name_sort(t + h, tmp, n - h);
+  int64_t i = 0, j = h, o = 0;
+  while (i < h && j < n) tmp[o++] = nx_name_less(&t[j], &t[i]) ? t[j++] : t[i++];
+  while (i < h) tmp[o++] = t[i++];
+  memcpy(t, tmp, (size_t)o * sizeof *t);
 }
 void* Nx__byName(const int64_t* syms, int64_t n) {
-  nx_si* t = malloc((size_t)(n > 0 ? n : 1) * sizeof *t);
+  nx_si* t = malloc((size_t)(n > 0 ? 2 * n : 1) * sizeof *t);
   if (!t) { fputs("snx: out of memory\n", stderr); exit(70); }
-  for (int64_t i = 0; i < n; i++) { t[i].sym = syms[i]; t[i].i = i; }
-  qsort(t, (size_t)n, sizeof *t, nx_name_cmp);
+  for (int64_t i = 0; i < n; i++) {
+    srs_str s = g_names[syms[i]];
+    uint64_t pre = 0;
+    for (int64_t k = 0; k < 8; k++) pre = pre << 8 | (k < s.n ? s.p[k] : 0);
+    t[i].pre = pre; t[i].sym = syms[i]; t[i].i = i;
+  }
+  nx_name_sort(t, t + n, n);
   int64_t* s = nx_words(n);
   for (int64_t i = 0; i < n; i++) s[i] = t[i].i;
   free(t);
