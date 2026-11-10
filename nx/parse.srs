@@ -29,9 +29,9 @@ enum Nx.BVal:
 enum Nx.BEnt:
   case Nx.BEnt(name: Str, pos: I64, v: Nx.BVal)
 
-// names (in the order they were added) and dyns newest first; idx = the entries by name (rt/snx_rt.c attr index)
+// idx = the entries by name, in the order their names were added (rt/snx_rt.c attr index); dyns newest first
 enum Nx.BSet:
-  case Nx.BSet(p: I64, rec: Bool, names: Coll.List[Str], idx: Ptr, dyns: Coll.List[Nx.DynBind])
+  case Nx.BSet(p: I64, rec: Bool, idx: Ptr, dyns: Coll.List[Nx.DynBind])
 
 enum Nx.SR:
   case Nx.SOk(s: Nx.BSet)
@@ -164,11 +164,35 @@ def Nx.psExpr(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
     else if Nx.psKeyword(x) then Nx.psIf(cx, ts)
     else if Nx.psIsOp(t1, ":") then Nx.psLambda(cx, Nx.psNext(t1), p, x)
     else if Nx.psIsOp(t1, "@") then Nx.psArgAt(cx, Nx.psNext(t1), p, x)
+    else if Nx.psEnds(t1) && !Str.eq(x, "__curPos") then Nx.POk(Nx.PExpr(Nx.EVar(p, x)), t1)
     else Nx.psIf(cx, ts)
   case Nx.TOp(s, p) =>
     if Str.eq(s, "{") && Nx.psLooksFormals(Nx.psNext(ts)) then Nx.psFormalsFn(cx, Nx.psNext(ts), p)
     else Nx.psIf(cx, ts)
+  case Nx.TInt(v, p) =>
+    val t1 = Nx.psNext(ts)
+    if Nx.psEnds(t1) then Nx.POk(Nx.PExpr(Nx.EInt(p, v)), t1) else Nx.psIf(cx, ts)
+  case Nx.TStrOpen(ind, p) => if ind then Nx.psIf(cx, ts) else Nx.psStrExpr(cx, ts, p)
   case _ => Nx.psIf(cx, ts)
+
+// an atom (a variable, an integer, a string of one part) before one of these ends its expression: what psIf would
+// return through expr_op, expr_app and expr_select, without going down the levels
+def Nx.psEnds(ts: I64): Bool = Nx.psPeek(ts) match
+  case Nx.TOp(s, _) => Str.eq(s, ";") || Str.eq(s, ",") || Str.eq(s, "]") || Str.eq(s, ")") || Str.eq(s, "}")
+  case _ => false
+
+// a "..." at ts (its open quote at p)
+def Nx.psStrExpr(cx: Nx.PCx, ts: I64, p: I64): Nx.PR[Nx.PE] =
+  val t1 = Nx.psNext(ts)
+  val t2 = Nx.psNext(t1)
+  Nx.psPeek(t1) match
+    case Nx.TStrClose(_) => if Nx.psEnds(t2) then Nx.POk(Nx.PExpr(Nx.EStr(p, "")), t2) else Nx.psIf(cx, ts)
+    case Nx.TStrPart(s, _) => Nx.psPeek(t2) match
+      case Nx.TStrClose(_) =>
+        val t3 = Nx.psNext(t2)
+        if Nx.psEnds(t3) then Nx.POk(Nx.PExpr(Nx.EStr(p, s)), t3) else Nx.psIf(cx, ts)
+      case _ => Nx.psIf(cx, ts)
+    case _ => Nx.psIf(cx, ts)
 
 // ASSERT expr ';' expr_function, WITH expr ';' expr_function
 def Nx.psAssert(cx: Nx.PCx, ts: I64, p: I64, isAssert: Bool): Nx.PR[Nx.PE] = Nx.psExprE(cx, ts) match
@@ -187,7 +211,7 @@ def Nx.psLet(cx: Nx.PCx, ts: I64, p: I64): Nx.PR[Nx.PE] = Nx.psBinds(cx, ts, Nx.
     else Nx.psExprE(cx, Nx.psNext(t1)) match
       case Nx.PBad(q) => Nx.PBad(q)
       case Nx.POk(b, t2) =>
-        val Nx.BSet(_, _, _, _, dyns) = s
+        val Nx.BSet(_, _, _, dyns) = s
         if Nx.psLookBad(t2) then Nx.PBad(Nx.psAtW(t2))
         else dyns match
           case Coll.Nil => Nx.POk(Nx.PExpr(Nx.ELet(p, Nx.psSetExpr(s), b)), t2)
@@ -346,12 +370,15 @@ def Nx.psFormal(cx: Nx.PCx, ts: I64): Nx.PR[Nx.FmP] = Nx.psPeek(ts) match
 
 def Nx.psIf(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] =
   if Nx.psIsKw(ts, "if") then Nx.psIfThen(cx, Nx.psNext(ts), Nx.psAt(ts))
-  else Nx.psOp(cx, ts, 0) match
-    case Nx.PBad(q) => Nx.PBad(q)
-    case Nx.POk(v, t1) =>
-      if Nx.psIsOp(t1, "<|") then Nx.psPipeFrom(cx, Nx.psNext(t1), Coll.Cons(Nx.psFin(v), Coll.Nil))
-      else if Nx.psIsOp(t1, "|>") then Nx.psPipeInto(cx, Nx.psNext(t1), Nx.psFin(v))
-      else Nx.POk(v, t1)
+  else
+    // a result passed on as it is keeps its box (here and in psOp, psApp, psSelect)
+    val r = Nx.psOp(cx, ts, 0)
+    r match
+      case Nx.PBad(_) => r
+      case Nx.POk(v, t1) =>
+        if Nx.psIsOp(t1, "<|") then Nx.psPipeFrom(cx, Nx.psNext(t1), Coll.Cons(Nx.psFin(v), Coll.Nil))
+        else if Nx.psIsOp(t1, "|>") then Nx.psPipeInto(cx, Nx.psNext(t1), Nx.psFin(v))
+        else r
 
 def Nx.psIfThen(cx: Nx.PCx, ts: I64, p: I64): Nx.PR[Nx.PE] = Nx.psExprE(cx, ts) match
   case Nx.PBad(q) => Nx.PBad(q)
@@ -417,9 +444,13 @@ def Nx.psOpE(cx: Nx.PCx, ts: I64, min: I64): Nx.PR[Nx.Expr] = Nx.psOp(cx, ts, mi
   case Nx.PBad(p) => Nx.PBad(p)
   case Nx.POk(v, t1) => Nx.POk(Nx.psFin(v), t1)
 
-def Nx.psOp(cx: Nx.PCx, ts: I64, min: I64): Nx.PR[Nx.PE] = Nx.psUnary(cx, ts) match
-  case Nx.PBad(p) => Nx.PBad(p)
-  case Nx.POk(v, t1) => Nx.psOpLoop(cx, t1, min, v, 0)
+def Nx.psOp(cx: Nx.PCx, ts: I64, min: I64): Nx.PR[Nx.PE] =
+  val r = Nx.psUnary(cx, ts)
+  r match
+    case Nx.PBad(_) => r
+    case Nx.POk(v, t1) =>
+      val lv = Nx.psLevel(Nx.psPeek(t1))
+      if lv == 0 || lv < min then r else Nx.psOpLoop(cx, t1, min, v, 0)
 
 // '!' expr_op %prec NOT (7): its operand takes the operators above NOT; '-' expr_op %prec NEGATE (12): none
 def Nx.psUnary(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] =
@@ -473,10 +504,12 @@ def Nx.psBin(t: Nx.Tok, a: Nx.Expr, b: Nx.Expr): Nx.Expr = t match
 
 // ---- expr_app, expr_select (parser.y:320-344) --------------------------------------------------------------------
 
-def Nx.psApp(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] = Nx.psSelect(cx, ts, false) match
-  case Nx.PBad(q) => Nx.PBad(q)
-  case Nx.POk(v, t1) =>
-    if Nx.psSimpleStart(t1) then Nx.psAppLoop(cx, t1, Nx.psAt(ts), Nx.psFin(v), Coll.Nil) else Nx.POk(v, t1)
+def Nx.psApp(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] =
+  val r = Nx.psSelect(cx, ts, false)
+  r match
+    case Nx.PBad(_) => r
+    case Nx.POk(v, t1) =>
+      if Nx.psSimpleStart(t1) then Nx.psAppLoop(cx, t1, Nx.psAt(ts), Nx.psFin(v), Coll.Nil) else r
 
 // rargs = the arguments, last first; makeCall one argument at a time is the same as all at once
 def Nx.psAppLoop(cx: Nx.PCx, ts: I64, p: I64, f: Nx.Expr, rargs: Coll.List[Nx.Expr]): Nx.PR[Nx.PE] =
@@ -496,8 +529,9 @@ def Nx.psSelectE(cx: Nx.PCx, ts: I64): Nx.PR[Nx.Expr] = Nx.psSelect(cx, ts, true
 // expr_simple '.' attrpath [OR_KW expr_select], and the cursed `expr_simple OR_KW` = a call of the var "or"
 def Nx.psSelect(cx: Nx.PCx, ts: I64, warn: Bool): Nx.PR[Nx.PE] =
   val p = Nx.psAt(ts)
-  Nx.psSimple(cx, ts) match
-    case Nx.PBad(q) => Nx.PBad(q)
+  val r = Nx.psSimple(cx, ts)
+  r match
+    case Nx.PBad(_) => r
     case Nx.POk(v, t1) =>
       if Nx.psIsOp(t1, ".") then Nx.psAttrPath(cx, Nx.psNext(t1)) match
         case Nx.PBad(q) => Nx.PBad(q)
@@ -510,7 +544,7 @@ def Nx.psSelect(cx: Nx.PCx, ts: I64, warn: Bool): Nx.PR[Nx.PE] =
         val Nx.PCx(src, _, _, _) = cx
         if warn && Nx.psBadFormat(Str.slice(src, p, Nx.psAt(t1) + 2), 0) then Nx.PBad(Nx.NoPos)
         else Nx.POk(Nx.PExpr(Nx.ECall(p, Nx.psFin(v), Coll.Cons(Nx.EVar(p, "or"), Coll.Nil))), Nx.psNext(t1))
-      else Nx.POk(v, t1)
+      else r
 
 // warnIfCursedOr (nixexpr.cc:672-686) passes the snippet of the expression to warn() as a boost::format string with no
 // argument: a % that is not %% throws, an error without a position
@@ -570,8 +604,15 @@ def Nx.psSetBody(cx: Nx.PCx, ts: I64, s: Nx.BSet): Nx.PR[Nx.PE] = Nx.psBinds(cx,
   case Nx.PBad(q) => Nx.PBad(q)
   case Nx.POk(s1, t1) => if Nx.psIsOp(t1, "}") then Nx.POk(Nx.PSet(s1), Nx.psNext(t1)) else Nx.PBad(Nx.psAtW(t1))
 
-// '[' list ']': the elements are expr_select
-def Nx.psList(cx: Nx.PCx, ts: I64, p: I64, acc: Coll.List[Nx.Expr]): Nx.PR[Nx.PE] =
+// '[' list ']': the elements are expr_select; a variable that no . or `or` follows is one without going down
+def Nx.psList(cx: Nx.PCx, ts: I64, p: I64, acc: Coll.List[Nx.Expr]): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
+  case Nx.TId(x, q) =>
+    val t1 = Nx.psNext(ts)
+    if Nx.psKeyword(x) || Str.eq(x, "__curPos") || Nx.psIsOp(t1, ".") || Nx.psIsKw(t1, "or") then Nx.psListElem(cx, ts, p, acc)
+    else Nx.psList(cx, t1, p, Coll.Cons(Nx.EVar(q, x), acc))
+  case _ => Nx.psListElem(cx, ts, p, acc)
+
+def Nx.psListElem(cx: Nx.PCx, ts: I64, p: I64, acc: Coll.List[Nx.Expr]): Nx.PR[Nx.PE] =
   if Nx.psSimpleStart(ts) then Nx.psSelectE(cx, ts) match
     case Nx.PBad(q) => Nx.PBad(q)
     case Nx.POk(e, t1) => Nx.psList(cx, t1, p, Coll.Cons(e, acc))
@@ -797,20 +838,32 @@ def Nx.psBinds(cx: Nx.PCx, ts: I64, s: Nx.BSet): Nx.PR[Nx.BSet] =
     case Nx.POk(s1, t1) => Nx.psBinds(cx, t1, s1)
   else Nx.POk(s, ts)
 
-// attrpath '=' expr ';' then addAttr at the attrpath's position
+// attrpath '=' expr ';' then addAttr at the attrpath's position; ts starts an attribute (Nx.psAttrStart, Nx.psBinds); a name
+// right before = is a path of one
 def Nx.psBind(cx: Nx.PCx, ts: I64, s: Nx.BSet): Nx.PR[Nx.BSet] =
   val pos = Nx.psAt(ts)
-  Nx.psAttrPath(cx, ts) match
+  val t1 = Nx.psNext(ts)
+  Nx.psPeek(ts) match
+    case Nx.TId(x, _) =>
+      if Nx.psIsOp(t1, "=") then Nx.psBindValue(cx, Nx.psNext(t1), s, Coll.Cons(Nx.ASym(x), Coll.Nil), pos)
+      else Nx.psBindPath(cx, ts, s, pos)
+    case _ => Nx.psBindPath(cx, ts, s, pos)
+
+def Nx.psBindPath(cx: Nx.PCx, ts: I64, s: Nx.BSet, pos: I64): Nx.PR[Nx.BSet] = Nx.psAttrPath(cx, ts) match
+  case Nx.PBad(q) => Nx.PBad(q)
+  case Nx.POk(path, t1) =>
+    if !Nx.psIsOp(t1, "=") then Nx.PBad(Nx.psAtW(t1))
+    else Nx.psBindValue(cx, Nx.psNext(t1), s, path, pos)
+
+// the expr after = and the ;
+def Nx.psBindValue(cx: Nx.PCx, ts: I64, s: Nx.BSet, path: Coll.List[Nx.Attr], pos: I64): Nx.PR[Nx.BSet] =
+  Nx.psExpr(cx, ts) match
     case Nx.PBad(q) => Nx.PBad(q)
-    case Nx.POk(path, t1) =>
-      if !Nx.psIsOp(t1, "=") then Nx.PBad(Nx.psAtW(t1))
-      else Nx.psExpr(cx, Nx.psNext(t1)) match
-        case Nx.PBad(q) => Nx.PBad(q)
-        case Nx.POk(v, t2) =>
-          if !Nx.psIsOp(t2, ";") then Nx.PBad(Nx.psAtW(t2))
-          else Nx.psAddPath(cx, s, path, pos, v) match
-              case Nx.SBad(q) => Nx.PBad(Nx.At(q))
-              case Nx.SOk(s1) => Nx.POk(s1, Nx.psNext(t2))
+    case Nx.POk(v, t2) =>
+      if !Nx.psIsOp(t2, ";") then Nx.PBad(Nx.psAtW(t2))
+      else Nx.psAddPath(cx, s, path, pos, v) match
+          case Nx.SBad(q) => Nx.PBad(Nx.At(q))
+          case Nx.SOk(s1) => Nx.POk(s1, Nx.psNext(t2))
 
 // INHERIT attrs ';' and INHERIT '(' expr ')' attrs ';'; the names are checked for duplicates once ';' is read
 def Nx.psInherit(cx: Nx.PCx, ts: I64, s: Nx.BSet): Nx.PR[Nx.BSet] =
@@ -872,34 +925,36 @@ def Nx.psAttrOf(e: Nx.Expr): Nx.Attr = e match
 
 // ---- addAttr (parser-state.hh:195-298) ---------------------------------------------------------------------------
 
-def Nx.psNewSet(p: I64, isRec: Bool): Nx.BSet = Nx.BSet(p, isRec, Coll.Nil, Nx.atNew(), Coll.Nil)
+def Nx.psNewSet(p: I64, isRec: Bool): Nx.BSet = Nx.BSet(p, isRec, Nx.atNew(), Coll.Nil)
 
 // the entry named n
 def Nx.psGet(s: Nx.BSet, n: Str): Coll.Option[Nx.BEnt] =
-  val Nx.BSet(_, _, _, idx, _) = s
+  val Nx.BSet(_, _, idx, _) = s
   val e = Nx.atFind(idx, n)
   if Nx.ptrEq(e, Nx.noFrame()) then Coll.None else Coll.Some(Nx.atEnt[Nx.BEnt](e))
 
 // s with e added, or in place of the entry of its name. The index is updated in place: a set under construction is
 // used linearly (each put's result replaces it; a failed parse drops it)
 def Nx.psPut(s: Nx.BSet, e: Nx.BEnt): Nx.BSet =
-  val Nx.BSet(p, isRec, names, idx, dyns) = s
+  val Nx.BSet(_, _, idx, _) = s
   val Nx.BEnt(n, _, _) = e
-  val names1: Coll.List[Str] = if Nx.atPut(idx, n, e) then Coll.Cons(n, names) else names
-  Nx.BSet(p, isRec, names1, idx, dyns)
+  Nx.atPut(idx, n, e)
+  s
 
 def Nx.psSetExpr(s: Nx.BSet): Nx.Expr =
-  val Nx.BSet(p, isRec, names, _, dyns) = s
-  Nx.EAttrs(p, isRec, Nx.psBindings(s, names, Coll.Nil), Coll.rev(dyns))
+  val Nx.BSet(p, isRec, idx, dyns) = s
+  Nx.EAttrs(p, isRec, Nx.psBindings(idx, Nx.atLen(idx) - 1, Coll.Nil), Coll.rev(dyns))
 
-// names newest first: acc ends oldest first
-def Nx.psBindings(s: Nx.BSet, xs: Coll.List[Str], acc: Coll.List[Nx.Binding]): Coll.List[Nx.Binding] = xs match
-  case Coll.Nil => acc
-  case Coll.Cons(n, t) => Nx.psGet(s, n) match
-    case Coll.Some(h) =>
-      val Nx.BEnt(_, bp, v) = h
-      Nx.psBindings(s, t, Coll.Cons(Nx.psBinding(n, bp, v), acc))
-    case Coll.None => Nx.psBindings(s, t, acc)
+// the entries below i + 1, the last first: acc ends oldest first
+def Nx.psBindings(idx: Ptr, i: I64, acc: Coll.List[Nx.Binding]): Coll.List[Nx.Binding] =
+  if i < 0 then acc
+  else
+    val Nx.BEnt(_, bp, v) = Nx.atAt[Nx.BEnt](idx, i)
+    Nx.psBindings(idx, i - 1, Coll.Cons(Nx.psBinding(Nx.atName(idx, i), bp, v), acc))
+
+// the names in the order they were added
+def Nx.psNames(idx: Ptr, i: I64, acc: Coll.List[Str]): Coll.List[Str] =
+  if i < 0 then acc else Nx.psNames(idx, i - 1, Coll.Cons(Nx.atName(idx, i), acc))
 
 def Nx.psBinding(n: Str, bp: I64, v: Nx.BVal): Nx.Binding = v match
   case Nx.BvPlain(e) => Nx.Bind(n, e, bp)
@@ -912,8 +967,8 @@ def Nx.psBVal(v: Nx.PE): Nx.BVal = v match
   case Nx.PSet(s) => Nx.BvSet(s)
 
 def Nx.psPushDyn(s: Nx.BSet, k: Nx.Expr, e: Nx.Expr): Nx.BSet =
-  val Nx.BSet(p, isRec, names, idx, dyns) = s
-  Nx.BSet(p, isRec, names, idx, Coll.Cons(Nx.DBind(k, e), dyns))
+  val Nx.BSet(p, isRec, idx, dyns) = s
+  Nx.BSet(p, isRec, idx, Coll.Cons(Nx.DBind(k, e), dyns))
 
 def Nx.psAddPath(cx: Nx.PCx, s: Nx.BSet, path: Coll.List[Nx.Attr], pos: I64, v: Nx.PE): Nx.SR = path match
   case Coll.Nil => Nx.SOk(s)
@@ -942,10 +997,13 @@ def Nx.psAddNested(cx: Nx.PCx, s: Nx.BSet, n: Str, rest: Coll.List[Nx.Attr], pos
         case _ => Nx.SBad(pos)
 
 // addAttr of a name: new, or two sets merged (the new set's rec is dropped), or a duplicate at the new definition
-def Nx.psAddSym(cx: Nx.PCx, s: Nx.BSet, n: Str, pos: I64, v: Nx.BVal): Nx.SR = Nx.psGet(s, n) match
-  case Coll.None => Nx.SOk(Nx.psPut(s, Nx.BEnt(n, pos, v)))
-  case Coll.Some(old) =>
-    val Nx.BEnt(_, opos, ov) = old
+def Nx.psAddSym(cx: Nx.PCx, s: Nx.BSet, n: Str, pos: I64, v: Nx.BVal): Nx.SR =
+  val Nx.BSet(_, _, idx, _) = s
+  // one lookup: a new name gets its entry here
+  val e = Nx.atAdd(idx, n, Nx.BEnt(n, pos, v))
+  if Nx.ptrEq(e, Nx.noFrame()) then Nx.SOk(s)
+  else
+    val Nx.BEnt(_, opos, ov) = Nx.atEnt[Nx.BEnt](e)
     ov match
       case Nx.BvSet(j) => v match
         case Nx.BvSet(ae) => Nx.psMerge(cx, j, ae) match
@@ -956,12 +1014,12 @@ def Nx.psAddSym(cx: Nx.PCx, s: Nx.BSet, n: Str, pos: I64, v: Nx.BVal): Nx.SR = N
 
 // ae's names into j in symbol order (its std::map is keyed by Symbol), then ae's dynamic attributes after j's
 def Nx.psMerge(cx: Nx.PCx, j: Nx.BSet, ae: Nx.BSet): Nx.SR =
-  val Nx.BSet(_, _, anames, _, adyns) = ae
-  Nx.psMergeEnts(cx, j, ae, Nx.psBySym(cx, Coll.rev(anames), Coll.Nil)) match
+  val Nx.BSet(_, _, aidx, adyns) = ae
+  Nx.psMergeEnts(cx, j, ae, Nx.psBySym(cx, Nx.psNames(aidx, Nx.atLen(aidx) - 1, Coll.Nil), Coll.Nil)) match
     case Nx.SBad(q) => Nx.SBad(q)
     case Nx.SOk(j1) =>
-      val Nx.BSet(jp, jr, jnames, jidx, jdyns) = j1
-      Nx.SOk(Nx.BSet(jp, jr, jnames, jidx, Coll.revOnto(Coll.rev(adyns), jdyns)))
+      val Nx.BSet(jp, jr, jidx, jdyns) = j1
+      Nx.SOk(Nx.BSet(jp, jr, jidx, Coll.revOnto(Coll.rev(adyns), jdyns)))
 
 // a symbol's creation rank: the evaluator's own first, then the file's by their first identifier.
 // shortcut: a name first created by a string attribute or a formal (after its default) ranks by its first identifier

@@ -41,9 +41,20 @@ int64_t Nx__floatBits(srs_str s) {
   return bits;
 }
 
+// s as 1 to 18 decimal digits (no sign, always in range: the lexer's INT tokens), or false
+static bool nx_digits18(srs_str s, int64_t* v) {
+  if (s.n < 1 || s.n > 18) return false;
+  int64_t x = 0;
+  for (int64_t i = 0; i < s.n; i++) { unsigned d = s.p[i] - (unsigned)'0'; if (d > 9) return false; x = 10 * x + d; }
+  *v = x;
+  return true;
+}
+
 // true when the decimal digits of s do not fit an int64 (Nix: "invalid integer")
 bool Nx__intOverflows(srs_str s) {
   char buf[512];
+  int64_t v;
+  if (nx_digits18(s, &v)) return false;
   if (s.n >= (int64_t)sizeof buf) return true;
   memcpy(buf, s.p, (size_t)s.n); buf[s.n] = 0;
   errno = 0;
@@ -54,6 +65,8 @@ bool Nx__intOverflows(srs_str s) {
 // the value of the decimal digits of s (call Nx.intOverflows first)
 int64_t Nx__intValue(srs_str s) {
   char buf[512];
+  int64_t v;
+  if (nx_digits18(s, &v)) return v;
   int64_t n = s.n < (int64_t)sizeof buf - 1 ? s.n : (int64_t)sizeof buf - 1;
   memcpy(buf, s.p, (size_t)n); buf[n] = 0;
   return (int64_t)strtoll(buf, 0, 10);
@@ -608,7 +621,8 @@ int64_t Nx__sbAddEsc(nx_sb* b, srs_str s) {
 
 // ── lexer byte classes and runs (nx/lex.srs): one table lookup a byte instead of a chain of compares. A class bit per
 // flex class; -1 (past the end, Str.at) and NUL are in none
-enum { NX_ALPHA = 1, NX_DIGIT = 2, NX_ID = 4, NX_PC = 8, NX_SCHEME = 16, NX_URI = 32, NX_WS = 64 };
+// NX_IDPC: in both ID and PATH_CHAR (one run serves both)
+enum { NX_ALPHA = 1, NX_DIGIT = 2, NX_ID = 4, NX_PC = 8, NX_SCHEME = 16, NX_URI = 32, NX_WS = 64, NX_IDPC = 128 };
 static uint8_t nx_cls[256];
 __attribute__((constructor)) static void nx_cls_init(void) {
   for (int c = 0; c < 256; c++) {
@@ -621,37 +635,48 @@ __attribute__((constructor)) static void nx_cls_init(void) {
     if (a || d || c == '+' || c == '-' || c == '.') k |= NX_SCHEME;
     if (a || d || (c && strchr("%/?:@&=+$,-_.!~*'", c))) k |= NX_URI;
     if (c == ' ' || c == 9 || c == 13 || c == '\n') k |= NX_WS;
+    if (a || d || c == '_' || c == '-') k |= NX_IDPC;
     nx_cls[c] = k;
   }
 }
 static inline bool nx_is(int64_t c, uint8_t k) { return c >= 0 && c < 256 && (nx_cls[c] & k); }
-bool Nx__lxDigit(int64_t c) { return nx_is(c, NX_DIGIT); }
-bool Nx__lxAlpha(int64_t c) { return nx_is(c, NX_ALPHA); }
-bool Nx__lxIdChar(int64_t c) { return nx_is(c, NX_ID); }
-bool Nx__lxPc(int64_t c) { return nx_is(c, NX_PC); }
-bool Nx__lxSchemeChar(int64_t c) { return nx_is(c, NX_SCHEME); }
-bool Nx__lxUriChar(int64_t c) { return nx_is(c, NX_URI); }
-bool Nx__lxWs(int64_t c) { return nx_is(c, NX_WS); }
-// the end of the run of class k in s from i
+// SWAR: the bytes of word w equal to b, as the high bit of each (exact for the lowest one, which is all that is read)
+#define NX_ONES 0x0101010101010101ull
+static inline uint64_t nx_zeros(uint64_t v) { return (v - NX_ONES) & ~v & (NX_ONES << 7); }
+static inline uint64_t nx_eq8(uint64_t w, uint8_t b) { return nx_zeros(w ^ (NX_ONES * b)); }
+// the end of the run of class k in s from i (0 <= i): four bytes a bound check
 static inline int64_t nx_run(srs_str s, int64_t i, uint8_t k) {
-  if (i < 0) return i;
+  for (; i + 4 <= s.n; i += 4) {
+    if (!(nx_cls[s.p[i]] & k)) return i;
+    if (!(nx_cls[s.p[i + 1]] & k)) return i + 1;
+    if (!(nx_cls[s.p[i + 2]] & k)) return i + 2;
+    if (!(nx_cls[s.p[i + 3]] & k)) return i + 3;
+  }
   while (i < s.n && (nx_cls[s.p[i]] & k)) i++;
   return i;
 }
-int64_t Nx__lxDigitsEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_DIGIT); }
-int64_t Nx__lxIdRun(srs_str s, int64_t i) { return nx_run(s, i, NX_ID); }
-int64_t Nx__lxPcEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_PC); }
-int64_t Nx__lxSchemeEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_SCHEME); }
-int64_t Nx__lxUricEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_URI); }
-int64_t Nx__lxWsEnd(srs_str s, int64_t i) { return nx_run(s, i, NX_WS); }
+// the end of the whitespace run from i: spaces 8 bytes a word (indentation), the other bytes one by one
+static inline int64_t nx_wsRun(srs_str s, int64_t i) {
+  for (;;) {
+    for (uint64_t w; i + 8 <= s.n; i += 8) {
+      memcpy(&w, s.p + i, 8);
+      if ((w ^= 0x2020202020202020ull)) { i += __builtin_ctzll(w) >> 3; break; }
+    }
+    if (i < s.n && (nx_cls[s.p[i]] & NX_WS)) i++;
+    else return i;
+  }
+}
 // the end of a # comment's line: at \r, \n or the end
-int64_t Nx__lxLineEnd(srs_str s, int64_t i) {
-  if (i < 0) return i;
+static int64_t nx_lineEnd(srs_str s, int64_t i) {
+  for (uint64_t w, m; i + 8 <= s.n; i += 8) {
+    memcpy(&w, s.p + i, 8);
+    if ((m = nx_eq8(w, '\n') | nx_eq8(w, 13))) return i + (__builtin_ctzll(m) >> 3);
+  }
   while (i < s.n && s.p[i] != '\n' && s.p[i] != 13) i++;
   return i;
 }
 // the end of a /* comment whose body starts at j (after the */), or i when it does not close
-int64_t Nx__lxCommentEnd(srs_str s, int64_t j, int64_t i) {
+static int64_t nx_commentEnd(srs_str s, int64_t j, int64_t i) {
   for (; j >= 0 && j + 1 < s.n; j++) if (s.p[j] == '*' && s.p[j + 1] == '/') return j + 2;
   return i;
 }
@@ -681,24 +706,37 @@ __attribute__((constructor)) static void nx_scls_init(void) {
   nx_scls['"'] |= NX_SSTR; nx_scls['\\'] |= NX_SSTR | NX_SNPLAIN; nx_scls['$'] |= NX_SSTR | NX_SIND;
   nx_scls['\''] |= NX_SIND; nx_scls[13] |= NX_SNPLAIN; nx_scls[0] |= NX_SNPLAIN;
 }
-static inline int nx_at(srs_str s, int64_t i) { return i >= 0 && i < s.n ? s.p[i] : -1; }
-// <STRING>: the run ([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})+ from i
-int64_t Nx__lxStrRun(srs_str s, int64_t i) {
-  if (i < 0) return i;
+static inline int nx_at(srs_str s, int64_t i) { return (uint64_t)i < (uint64_t)s.n ? s.p[i] : -1; }
+// <STRING>: the first STRING rule's match from i: the run ([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})+, then a $ right
+// before " when the run ends there. As end * 2 + 1 when the match has a backslash, CR or NUL (unescapeStr changes
+// it or checks it), else end * 2
+int64_t Nx__lxStrPart(srs_str s, int64_t i) {
+  int64_t np = 0;
   for (;;) {
-    while (i < s.n && !(nx_scls[s.p[i]] & NX_SSTR)) i++;
+    for (uint64_t w, m; i + 8 <= s.n; i += 8) {
+      memcpy(&w, s.p + i, 8);
+      if ((m = nx_eq8(w, '"') | nx_eq8(w, '\\') | nx_eq8(w, '$') | nx_eq8(w, 13) | nx_zeros(w))) { i += __builtin_ctzll(m) >> 3; break; }
+    }
+    while (i < s.n && !(nx_scls[s.p[i]] & (NX_SSTR | NX_SNPLAIN))) i++;
     int c = nx_at(s, i), d = nx_at(s, i + 1);
-    if (c == -1 || c == '"') return i;
-    if (c == '\\') { if (d == -1) return i; i += 2; }
-    else if (d == '\\') { if (nx_at(s, i + 2) == -1) return i; i += 3; }
-    else if (d == -1 || d == '{' || d == '"') return i;
-    else i += 2;
+    if (c == -1 || c == '"') break;
+    if (c == 13 || c == 0) { np = 1; i++; }
+    else if (c == '\\') { if (d == -1) break; np = 1; i += 2; }
+    else if (d == '\\') { if (nx_at(s, i + 2) == -1) break; np = 1; i += 3; }
+    else if (d == -1 || d == '{' || d == '"') break;
+    else { if (d == 13 || d == 0) np = 1; i += 2; }
   }
+  if (nx_at(s, i) == '$' && nx_at(s, i + 1) == '"') i++;
+  return i << 1 | np;
 }
 // <IND_STRING>: the run ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i
 int64_t Nx__lxIndRun(srs_str s, int64_t i) {
   if (i < 0) return i;
   for (;;) {
+    for (uint64_t w, m; i + 8 <= s.n; i += 8) {
+      memcpy(&w, s.p + i, 8);
+      if ((m = nx_eq8(w, '$') | nx_eq8(w, '\''))) { i += __builtin_ctzll(m) >> 3; break; }
+    }
     while (i < s.n && !(nx_scls[s.p[i]] & NX_SIND)) i++;
     int c = nx_at(s, i), d = nx_at(s, i + 1);
     if (c == -1) return i;
@@ -707,13 +745,6 @@ int64_t Nx__lxIndRun(srs_str s, int64_t i) {
     i += 2;
   }
 }
-// no backslash, CR or NUL in [i, e): unescapeStr would return the bytes as they are
-bool Nx__lxPlain(srs_str s, int64_t i, int64_t e) {
-  if (i < 0) i = 0;
-  if (e > s.n) e = s.n;
-  for (; i < e; i++) if (nx_scls[s.p[i]] & NX_SNPLAIN) return false;
-  return true;
-}
 // a NUL byte in [i, e)
 bool Nx__lxAnyNul(srs_str s, int64_t i, int64_t e) {
   if (i < 0) i = 0;
@@ -721,33 +752,265 @@ bool Nx__lxAnyNul(srs_str s, int64_t i, int64_t e) {
   return e > i && memchr(s.p + i, 0, (size_t)(e - i)) != NULL;
 }
 
-// ── the parser's attribute index (nx/parse.srs Nx.BSet): name -> entry word, open addressing on FNV-1a; a set under
-// construction is updated in place; a slot is taken when its entry word is set. Freed by Nx.atFreeAll
-typedef struct nx_atab { srs_str* k; void** v; int64_t n, cap; struct nx_atab* next; } nx_atab;
-// every index made since the last Nx.atFreeAll (a file's sets: dead once it is parsed)
-static nx_atab* g_atabs;
-void* Nx__atNew(void) { nx_atab* t = calloc(1, sizeof *t); if (!t) { fputs("snx: out of memory\n", stderr); exit(70); } t->next = g_atabs; g_atabs = t; return t; }
-int64_t Nx__atFreeAll(void) { while (g_atabs) { nx_atab* t = g_atabs; g_atabs = t->next; free(t->k); free(t->v); free(t); } return 0; }
+// ── one DEFAULT lexeme (nx/lex.srs Nx.lxGo): the rule flex picks at i (the longest match, the earlier rule on a tie)
+// and the end of its match, in one pass. The rule codes are the order of Nx.LxRule (nx/lex.srs Nx.lxRuleOf)
+enum { NX_R_ANY, NX_R_OP, NX_R_ID, NX_R_INT, NX_R_FLOAT, NX_R_DOLLAR, NX_R_CLOSE, NX_R_OPEN, NX_R_QUOTE, NX_R_INDOPEN,
+       NX_R_SEGDOLLAR, NX_R_PATH, NX_R_SPATH, NX_R_URI, NX_R_SKIP };
+// == != <= >= && || -> // ++ <| |>
+static inline bool nx_op2(int a, int b) {
+  switch (a) {
+  case '=': case '!': case '<': case '>': return b == '=' || (a == '<' && b == '|');
+  case '&': return b == '&';
+  case '|': return b == '|' || b == '>';
+  case '-': return b == '>';
+  case '/': return b == '/';
+  case '+': return b == '+';
+  default: return false;
+  }
+}
+// ... and the two-byte operators
+static int64_t nx_opEnd(srs_str s, int64_t i) {
+  int c = nx_at(s, i), d = nx_at(s, i + 1);
+  if (c == '.' && d == '.' && nx_at(s, i + 2) == '.') return i + 3;
+  return nx_op2(c, d) ? i + 2 : i;
+}
+// FLOAT (([1-9][0-9]*\.[0-9]*)|(0?\.[0-9]+))([Ee][+-]?[0-9]+)?
+static int64_t nx_floatEnd(srs_str s, int64_t i) {
+  int c = nx_at(s, i);
+  int64_t m;
+  if (c >= '1' && c <= '9') { int64_t d = nx_run(s, i, NX_DIGIT); m = nx_at(s, d) == '.' ? nx_run(s, d + 1, NX_DIGIT) : i; }
+  else if (c == '0' && nx_at(s, i + 1) == '.' && nx_is(nx_at(s, i + 2), NX_DIGIT)) m = nx_run(s, i + 2, NX_DIGIT);
+  else if (c == '.' && nx_is(nx_at(s, i + 1), NX_DIGIT)) m = nx_run(s, i + 1, NX_DIGIT);
+  else m = i;
+  if (m == i) return i;
+  int e = nx_at(s, m), sg = nx_at(s, m + 1);
+  int64_t k = sg == '+' || sg == '-' ? m + 2 : m + 1;
+  return (e == 'e' || e == 'E') && nx_is(nx_at(s, k), NX_DIGIT) ? nx_run(s, k, NX_DIGIT) : m;
+}
+// (\/{PATH_CHAR}+)+\/? from j, or i when there is none
+static int64_t nx_segs(srs_str s, int64_t j, int64_t i) {
+  if (!(nx_at(s, j) == '/' && nx_is(nx_at(s, j + 1), NX_PC))) return i;
+  j = nx_run(s, j + 1, NX_PC);
+  while (nx_at(s, j) == '/' && nx_is(nx_at(s, j + 1), NX_PC)) j = nx_run(s, j + 1, NX_PC);
+  return nx_at(s, j) == '/' ? j + 1 : j;
+}
+// PATH {PATH_CHAR}*(\/{PATH_CHAR}+)+\/? ; HPATH \~(\/{PATH_CHAR}+)+\/?
+static int64_t nx_pathEnd(srs_str s, int64_t i) { return nx_segs(s, nx_run(s, i, NX_PC), i); }
+static int64_t nx_hpathEnd(srs_str s, int64_t i) { return nx_at(s, i) == '~' ? nx_segs(s, i + 1, i) : i; }
+// PATH_SEG {PATH_CHAR}*\/
+static int64_t nx_segEnd(srs_str s, int64_t i) { int64_t j = nx_run(s, i, NX_PC); return nx_at(s, j) == '/' ? j + 1 : i; }
+// {PATH_SEG}\$\{ | {HPATH_START}\$\{ (the whole match, ${ included)
+static int64_t nx_segDollarEnd(srs_str s, int64_t i) {
+  int64_t j = nx_at(s, i) == '~' && nx_at(s, i + 1) == '/' ? i + 2 : nx_segEnd(s, i);
+  return j > i && nx_at(s, j) == '$' && nx_at(s, j + 1) == '{' ? j + 2 : i;
+}
+// SPATH \<{PATH_CHAR}+(\/{PATH_CHAR}+)*\>
+static int64_t nx_spathEnd(srs_str s, int64_t i) {
+  if (!(nx_at(s, i) == '<' && nx_is(nx_at(s, i + 1), NX_PC))) return i;
+  int64_t j = nx_run(s, i + 1, NX_PC);
+  while (nx_at(s, j) == '/' && nx_is(nx_at(s, j + 1), NX_PC)) j = nx_run(s, j + 1, NX_PC);
+  return nx_at(s, j) == '>' ? j + 1 : i;
+}
+// URI [a-zA-Z][a-zA-Z0-9\+\-\.]*\:[a-zA-Z0-9\%\/\?\:\@\&\=\+\$\,\-\_\.\!\~\*\']+
+static int64_t nx_uriEnd(srs_str s, int64_t i) {
+  if (!nx_is(nx_at(s, i), NX_ALPHA)) return i;
+  int64_t j = nx_run(s, i + 1, NX_SCHEME);
+  return nx_at(s, j) == ':' && nx_is(nx_at(s, j + 1), NX_URI) ? nx_run(s, j + 1, NX_URI) : i;
+}
+// the first of the candidate rules (in file order) whose end is the largest, as end * 16 + rule
+static inline int64_t nx_pick(int n, const int64_t* e, const int* r) {
+  int b = 0;
+  for (int k = 1; k < n; k++) if (e[k] > e[b]) b = k;
+  return e[b] << 4 | r[b];
+}
+// the rule at i (i < s.n) and the end of its match, as end * 16 + rule: the first byte picks the rules that can start
+// with it. PATH and PATH_SEG${ need / right after the PATH_CHAR run from i, URI needs : (scheme chars are PATH_CHARs)
+int64_t Nx__lxScan(srs_str s, int64_t i) {
+  int c = s.p[i];
+  uint8_t k = nx_cls[c];
+  if (k & NX_WS) return nx_wsRun(s, i) << 4 | NX_R_SKIP;
+  if (k & NX_ALPHA) {
+    // the ID run and the PATH_CHAR run from i in one pass while their bytes are in both classes
+    int64_t j = nx_run(s, i + 1, NX_IDPC);
+    uint8_t kj = j < s.n ? nx_cls[s.p[j]] : 0;
+    int64_t id = kj & NX_ID ? nx_run(s, j, NX_ID) : j;
+    int x = nx_at(s, kj & NX_PC ? nx_run(s, j, NX_PC) : j);
+    if (x != '/' && x != ':') return id << 4 | NX_R_ID;
+    int64_t e[4] = { id, nx_segDollarEnd(s, i), nx_pathEnd(s, i), nx_uriEnd(s, i) };
+    static const int r[4] = { NX_R_ID, NX_R_SEGDOLLAR, NX_R_PATH, NX_R_URI };
+    return nx_pick(4, e, r);
+  }
+  // PATH and PATH_SEG${ match from a PATH_CHAR only when / follows its PATH_CHAR run; else they are no candidates
+  bool path = k & NX_PC && nx_at(s, nx_run(s, i, NX_PC)) == '/';
+  if (k & NX_DIGIT) {
+    int64_t d = nx_run(s, i, NX_DIGIT), f = nx_floatEnd(s, i);
+    if (!path) return f > d ? f << 4 | NX_R_FLOAT : d << 4 | NX_R_INT;
+    int64_t e[4] = { d, f, nx_segDollarEnd(s, i), nx_pathEnd(s, i) };
+    static const int r[4] = { NX_R_INT, NX_R_FLOAT, NX_R_SEGDOLLAR, NX_R_PATH };
+    return nx_pick(4, e, r);
+  }
+  switch (c) {
+  case '#': return nx_lineEnd(s, i + 1) << 4 | NX_R_SKIP;
+  case '_': {
+    if (!path) return nx_run(s, i + 1, NX_ID) << 4 | NX_R_ID;
+    int64_t e[3] = { nx_run(s, i + 1, NX_ID), nx_segDollarEnd(s, i), nx_pathEnd(s, i) };
+    static const int r[3] = { NX_R_ID, NX_R_SEGDOLLAR, NX_R_PATH };
+    return nx_pick(3, e, r);
+  }
+  case '.': {
+    if (!path) {
+      int64_t e[3] = { nx_opEnd(s, i), nx_floatEnd(s, i), i + 1 };
+      static const int r[3] = { NX_R_OP, NX_R_FLOAT, NX_R_ANY };
+      return nx_pick(3, e, r);
+    }
+    int64_t e[5] = { nx_opEnd(s, i), nx_floatEnd(s, i), nx_segDollarEnd(s, i), nx_pathEnd(s, i), i + 1 };
+    static const int r[5] = { NX_R_OP, NX_R_FLOAT, NX_R_SEGDOLLAR, NX_R_PATH, NX_R_ANY };
+    return nx_pick(5, e, r);
+  }
+  case '-': case '+': case '/': {
+    if (!path && c != '/') { int64_t o = nx_opEnd(s, i); return o > i ? o << 4 | NX_R_OP : (i + 1) << 4 | NX_R_ANY; }
+    int64_t cm = c == '/' && nx_at(s, i + 1) == '*' ? nx_commentEnd(s, i + 2, i) : i;
+    int64_t e[5] = { nx_opEnd(s, i), nx_segDollarEnd(s, i), nx_pathEnd(s, i), cm, i + 1 };
+    static const int r[5] = { NX_R_OP, NX_R_SEGDOLLAR, NX_R_PATH, NX_R_SKIP, NX_R_ANY };
+    return nx_pick(5, e, r);
+  }
+  case '~': {
+    int64_t e[3] = { nx_segDollarEnd(s, i), nx_hpathEnd(s, i), i + 1 };
+    static const int r[3] = { NX_R_SEGDOLLAR, NX_R_PATH, NX_R_ANY };
+    return nx_pick(3, e, r);
+  }
+  case '<': {
+    int64_t e[3] = { nx_opEnd(s, i), nx_spathEnd(s, i), i + 1 };
+    static const int r[3] = { NX_R_OP, NX_R_SPATH, NX_R_ANY };
+    return nx_pick(3, e, r);
+  }
+  // no operator starts with these: {ANY}
+  case ',': case ';': case '(': case ')': case '[': case ']': case ':': case '@': case '?': case '*': return (i + 1) << 4 | NX_R_ANY;
+  case '=': return nx_at(s, i + 1) == '=' ? (i + 2) << 4 | NX_R_OP : (i + 1) << 4 | NX_R_ANY;
+  case '$': return nx_at(s, i + 1) == '{' ? (i + 2) << 4 | NX_R_DOLLAR : (i + 1) << 4 | NX_R_ANY;
+  case '{': return (i + 1) << 4 | NX_R_OPEN;
+  case '}': return (i + 1) << 4 | NX_R_CLOSE;
+  case '"': return (i + 1) << 4 | NX_R_QUOTE;
+  case '\'': {
+    if (nx_at(s, i + 1) != '\'') return (i + 1) << 4 | NX_R_ANY;
+    // \'\'(\ *\n)?
+    int64_t j = i + 2;
+    while (nx_at(s, j) == ' ') j++;
+    return (nx_at(s, j) == '\n' ? j + 1 : i + 2) << 4 | NX_R_INDOPEN;
+  }
+  default: {
+    int64_t o = nx_opEnd(s, i);
+    return o > i ? o << 4 | NX_R_OP : (i + 1) << 4 | NX_R_ANY;
+  }
+  }
+}
+// the end of the one skip lexeme at i (whitespace, # comment, closed /* comment: Nx__lxScan's NX_R_SKIP), or i
+static inline int64_t nx_skipEnd(srs_str s, int64_t i) {
+  int c = nx_at(s, i);
+  if (nx_is(c, NX_WS)) return nx_wsRun(s, i);
+  if (c == '#') return nx_lineEnd(s, i + 1);
+  if (c == '/' && nx_at(s, i + 1) == '*') return nx_commentEnd(s, i + 2, i);
+  return i;
+}
+// the end of the skip lexemes from i, one after the other
+int64_t Nx__lxSkip(srs_str s, int64_t i) {
+  while (i < s.n) {
+    uint8_t c = s.p[i];
+    if (nx_cls[c] & NX_WS) i = nx_wsRun(s, i);
+    else if (c == '#') i = nx_lineEnd(s, i + 1);
+    else if (c == '/' && i + 1 < s.n && s.p[i + 1] == '*') { int64_t e = nx_commentEnd(s, i + 2, i); if (e == i) break; i = e; }
+    else break;
+  }
+  return i;
+}
+// the begin of the last skip lexeme in [i, j) (j = Nx__lxSkip(s, i)), or lb when there is none
+int64_t Nx__lxLastSkip(srs_str s, int64_t i, int64_t j, int64_t lb) {
+  while (i < j) { lb = i; i = nx_skipEnd(s, i); }
+  return lb;
+}
+// <INPATH,INPATH_SLASH> {PATH}|{PATH_SEG}|{PATH_CHAR}+: the end of the longest of the three from i, or i
+int64_t Nx__lxPathPieceEnd(srs_str s, int64_t i) {
+  int64_t p = nx_pathEnd(s, i), g = nx_segEnd(s, i), c = nx_run(s, i, NX_PC);
+  return p > g ? (p > c ? p : c) : (g > c ? g : c);
+}
+
+// ── the parser's attribute index (nx/parse.srs Nx.BSet): name -> entry word, the entries in the order their names
+// were first put. Up to NX_ATLIN names are found by a scan, more by open addressing on nx_hash (slot = position + 1,
+// 0 = free). A set under construction is updated in place. The indexes and their arrays are bumped from one pool
+// (a file's sets: dead once it is parsed), emptied by Nx.atFreeAll
+typedef struct nx_atab { srs_str* k; void** v; int32_t* slot; int64_t n, cap, scap; } nx_atab;
+typedef struct nx_atchunk { struct nx_atchunk* next; size_t cap, used; } nx_atchunk;
+enum { NX_ATCHUNK = 1 << 16, NX_ATLIN = 8 };
+static nx_atchunk* g_atpool;
+// n zeroed bytes from the pool
+static void* nx_at_alloc(size_t n) {
+  n = (n + 15) & ~(size_t)15;
+  nx_atchunk* c = g_atpool;
+  if (!c || c->used + n > c->cap) {
+    size_t cap = n > NX_ATCHUNK ? n : NX_ATCHUNK;
+    c = malloc(sizeof *c + 16 + cap);
+    if (!c) { fputs("snx: out of memory\n", stderr); exit(70); }
+    c->next = g_atpool; c->cap = cap; c->used = 0; g_atpool = c;
+  }
+  char* p = (char*)(c + 1) + 16 - ((uintptr_t)(c + 1) & 15) + c->used;
+  c->used += n;
+  return memset(p, 0, n);
+}
+void* Nx__atNew(void) { return nx_at_alloc(sizeof(nx_atab)); }
+// every chunk goes but the first one made (its pages stay touched for the next file)
+int64_t Nx__atFreeAll(void) {
+  while (g_atpool && g_atpool->next) { nx_atchunk* c = g_atpool; g_atpool = c->next; free(c); }
+  if (g_atpool) { if (g_atpool->cap > NX_ATCHUNK) { free(g_atpool); g_atpool = 0; } else g_atpool->used = 0; }
+  return 0;
+}
+// the slot of name n: its entry's, or the free one where it goes
 static int64_t nx_at_slot(nx_atab* t, srs_str n) {
-  uint64_t m = (uint64_t)t->cap - 1, j = nx_hash(n) & m;
-  for (; t->v[j]; j = (j + 1) & m) if (t->k[j].n == n.n && nx_same(t->k[j].p, n.p, n.n)) return (int64_t)j;
+  uint64_t m = (uint64_t)t->scap - 1, j = nx_hash(n) & m;
+  for (; t->slot[j]; j = (j + 1) & m) { srs_str k = t->k[t->slot[j] - 1]; if (k.n == n.n && nx_same(k.p, n.p, n.n)) break; }
   return (int64_t)j;
 }
-void* Nx__atFind(nx_atab* t, srs_str n) { return t->cap ? t->v[nx_at_slot(t, n)] : 0; }
-void* Nx__atEnt(void* e) { return e; }
-bool Nx__atPut(nx_atab* t, srs_str n, void* x) {
-  if (2 * (t->n + 1) > t->cap) {
-    nx_atab o = *t; t->cap = o.cap ? 2 * o.cap : 8; t->n = 0;
-    t->k = calloc((size_t)t->cap, sizeof *t->k); t->v = calloc((size_t)t->cap, sizeof *t->v);
-    if (!t->k || !t->v) { fputs("snx: out of memory\n", stderr); exit(70); }
-    for (int64_t i = 0; i < o.cap; i++) if (o.v[i]) { int64_t j = nx_at_slot(t, o.k[i]); t->k[j] = o.k[i]; t->v[j] = o.v[i]; t->n++; }
-    free(o.k); free(o.v);
+// the position of name n, or -1
+static int64_t nx_at_pos(nx_atab* t, srs_str n) {
+  if (!t->scap) {
+    for (int64_t i = 0; i < t->n; i++) if (t->k[i].n == n.n && nx_same(t->k[i].p, n.p, n.n)) return i;
+    return -1;
   }
-  int64_t j = nx_at_slot(t, n);
-  bool fresh = !t->v[j];
-  if (fresh) { t->k[j] = n; t->n++; }
-  t->v[j] = x;
-  return fresh;
+  return (int64_t)t->slot[nx_at_slot(t, n)] - 1;
+}
+// a slot table of 4 slots a name (at most half full until it doubles)
+static void nx_at_rehash(nx_atab* t) {
+  t->scap = t->scap ? 2 * t->scap : 4 * NX_ATLIN;
+  t->slot = nx_at_alloc((size_t)t->scap * sizeof *t->slot);
+  for (int64_t i = 0; i < t->n; i++) t->slot[nx_at_slot(t, t->k[i])] = (int32_t)(i + 1);
+}
+void* Nx__atFind(nx_atab* t, srs_str n) { int64_t i = nx_at_pos(t, n); return i < 0 ? 0 : t->v[i]; }
+void* Nx__atEnt(void* e) { return e; }
+int64_t Nx__atLen(nx_atab* t) { return t->n; }
+void* Nx__atAt(nx_atab* t, int64_t i) { return t->v[i]; }
+srs_str Nx__atName(nx_atab* t, int64_t i) { return t->k[i]; }
+// x as the last entry, n being new
+static void nx_at_append(nx_atab* t, srs_str n, void* x) {
+  if (t->n == t->cap) {
+    nx_atab o = *t; t->cap = o.cap ? 2 * o.cap : 4;
+    t->k = nx_at_alloc((size_t)t->cap * sizeof *t->k); t->v = nx_at_alloc((size_t)t->cap * sizeof *t->v);
+    if (o.n) { memcpy(t->k, o.k, (size_t)o.n * sizeof *t->k); memcpy(t->v, o.v, (size_t)o.n * sizeof *t->v); }
+  }
+  t->k[t->n] = n; t->v[t->n] = x; t->n++;
+  if (t->scap) { if (4 * t->n > 2 * t->scap) nx_at_rehash(t); else t->slot[nx_at_slot(t, n)] = (int32_t)t->n; }
+  else if (t->n > NX_ATLIN) nx_at_rehash(t);
+}
+// x as the entry of n: in place of n's entry, or a new last one
+int64_t Nx__atPut(nx_atab* t, srs_str n, void* x) {
+  int64_t i = nx_at_pos(t, n);
+  if (i >= 0) t->v[i] = x; else nx_at_append(t, n, x);
+  return 0;
+}
+// the entry of n; when there is none (0), x becomes it, the new last one
+void* Nx__atAdd(nx_atab* t, srs_str n, void* x) {
+  int64_t i = nx_at_pos(t, n);
+  if (i >= 0) return t->v[i];
+  nx_at_append(t, n, x);
+  return 0;
 }
 
 // ── token vector (nx/lex.srs): the lexer's tokens in order; the parser reads them by index (Nx__tsBind). One array

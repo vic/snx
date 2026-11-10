@@ -67,23 +67,13 @@ extern def Nx.attrName(s: Str): Str
 // the position record of a symbol array (rt/snx_fs.c), Nx.noFrame() when none
 extern def Nx.posGet(key: Ptr): Ptr
 extern def Nx.posPut(key: Ptr, rec: Ptr): Unit
-// lexer byte classes (flex classes of nx/lex.srs) and the end of a run of one class from i (rt/snx_rt.c table)
-extern def Nx.lxDigit(c: I64): Bool
-extern def Nx.lxAlpha(c: I64): Bool
-extern def Nx.lxIdChar(c: I64): Bool
-extern def Nx.lxPc(c: I64): Bool
-extern def Nx.lxSchemeChar(c: I64): Bool
-extern def Nx.lxUriChar(c: I64): Bool
-extern def Nx.lxWs(c: I64): Bool
-extern def Nx.lxDigitsEnd(s: Str, i: I64): I64
-extern def Nx.lxIdRun(s: Str, i: I64): I64
-extern def Nx.lxPcEnd(s: Str, i: I64): I64
-extern def Nx.lxSchemeEnd(s: Str, i: I64): I64
-extern def Nx.lxUricEnd(s: Str, i: I64): I64
-extern def Nx.lxWsEnd(s: Str, i: I64): I64
-// the end of a # comment's line; of a /* comment whose body starts at j, or i when it does not close
-extern def Nx.lxLineEnd(s: Str, i: I64): I64
-extern def Nx.lxCommentEnd(s: Str, j: I64, i: I64): I64
+// the lexer's DEFAULT rules (nx/lex.srs Nx.lxRuleOf): the rule at i < Str.len(s) and the end of its match, as end * 16
+// + the rule's code; the end of a path piece from i, or i (rt/snx_rt.c)
+extern def Nx.lxScan(s: Str, i: I64): I64
+extern def Nx.lxPathPieceEnd(s: Str, i: I64): I64
+// the end of the whitespace and comments from i; the begin of the last of them in [i, j), or lb when there is none
+extern def Nx.lxSkip(s: Str, i: I64): I64
+extern def Nx.lxLastSkip(s: Str, i: I64, j: I64, lb: I64): I64
 // a hash of the bytes of s (rt/snx_rt.c FNV-1a): a key, names that collide are told apart by Str.eq
 extern def Nx.strKey(s: Str): I64
 // a word buffer (rt/snx_rt.c, nx/load.srs): words, pointers and strings put in order and got back in the same order
@@ -108,18 +98,23 @@ extern def Nx.tvFree(v: Ptr): Unit
 extern def Nx.tsBind(v: Ptr): Unit
 extern def Nx.tsAt [A: Type] (i: I64): A
 extern def Nx.tsLen(): I64
-// <STRING> run ([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})+ and <IND_STRING> run ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i;
-// no backslash, CR or NUL in [i, e) (unescapeStr returns the bytes as they are); a NUL in [i, e)
-extern def Nx.lxStrRun(s: Str, i: I64): I64
+// <STRING> part from i: the end of the first STRING rule's match (the run, and a $ before "), times 2, plus 1 when it
+// has a backslash, CR or NUL (else unescapeStr returns its bytes as they are); <IND_STRING> run
+// ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i; a NUL in [i, e)
+extern def Nx.lxStrPart(s: Str, i: I64): I64
 extern def Nx.lxIndRun(s: Str, i: I64): I64
-extern def Nx.lxPlain(s: Str, i: I64, e: I64): Bool
 extern def Nx.lxAnyNul(s: Str, i: I64, e: I64): Bool
 // the parser's index of a set's entries by name (rt/snx_rt.c, nx/parse.srs Nx.BSet): the entry or none (Nx.noFrame);
-// put replaces and tells whether the name is new
+// put replaces the entry of the name or adds it last; the count, entry i and name i in the order names were added
 extern def Nx.atNew(): Ptr
 extern def Nx.atFind(t: Ptr, n: Str): Ptr
 extern def Nx.atEnt [A: Type] (e: Ptr): A
-extern def Nx.atPut [A: Type] (t: Ptr, n: Str, x: A): Bool
+extern def Nx.atPut [A: Type] (t: Ptr, n: Str, x: A): Unit
+// the entry of n, or none (Nx.noFrame) after x became it
+extern def Nx.atAdd [A: Type] (t: Ptr, n: Str, x: A): Ptr
+extern def Nx.atLen(t: Ptr): I64
+extern def Nx.atAt [A: Type] (t: Ptr, i: I64): A
+extern def Nx.atName(t: Ptr, i: I64): Str
 // every attr index freed: call when no set under construction is alive (nx/load.srs, after a file is compiled)
 extern def Nx.atFreeAll(): Unit
 // a Unix socket client (rt/snx_net.c, nx/wire.srs): a connected fd or -1; send all of s; up to n bytes (fewer only at
