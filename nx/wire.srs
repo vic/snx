@@ -1,0 +1,999 @@
+// snx wire: a Nix daemon client for nix-conformance SPEC.md "wire". `snx wire SOCKET OP ARG...` connects to SOCKET,
+// runs one operation as Nix 2.34.8's RemoteStore does (worker protocol 1.18 to 1.38) and prints one answer line.
+// Law: libstore/worker-protocol-connection.cc (handshake, postHandshake, processStderrReturn), worker-protocol.cc and
+// common-protocol.cc (the serialisers), remote-store.cc and uds-remote-store.cc (the operations), libutil/serialise.cc
+// (readNum: a u64 little-endian that must fit its C++ type; readString: length, bytes, zero padding to 8).
+// The client writes its whole side once it knows the daemon's version (no later reply changes what it sends), reads the
+// daemon to the end of the stream and parses that: a reply cut short is a read past the end.
+
+// ---- protocol constants (worker-protocol.hh, worker-protocol.cc) ------------------------------------------------
+
+def Nx.wMagic1(): I64 = 1852405859  // WORKER_MAGIC_1 0x6e697863
+def Nx.wMagic2(): I64 = 1685612911  // WORKER_MAGIC_2 0x6478696f
+def Nx.wMajor(): I64 = 1
+def Nx.wClientMinor(): I64 = 38     // WorkerProto::latest
+def Nx.wMinimumMinor(): I64 = 18    // WorkerProto::minimum
+def Nx.wOldestMinor(): I64 = 10     // "the Nix daemon version is too old"
+def Nx.wMinorSpan(): I64 = 256      // Version::Number::toWire: (major << 8) | minor
+def Nx.wHelloLen(): I64 = 16        // WORKER_MAGIC_2 and the daemon's version
+def Nx.wFieldInt(): I64 = 0         // Logger::Field::tInt
+def Nx.wFieldString(): I64 = 1      // Logger::Field::tString
+def Nx.wOptNone(): I64 = 0          // the tag of an absent std::optional<microseconds>
+def Nx.wOptSome(): I64 = 1
+
+// the C++ type a readNum<T> reads into: the u64 must not exceed its maximum
+enum Nx.WKind:
+  case Nx.WkBool
+  case Nx.WkU8
+  case Nx.WkU32
+  case Nx.WkI64
+  case Nx.WkU64
+
+// a value of 2^63 or more reads as negative (Nx.narWord)
+def Nx.wFits(v: I64, k: Nx.WKind): Bool = k match
+  case Nx.WkBool => v >= 0 && v <= 1
+  case Nx.WkU8 => v >= 0 && v <= 255
+  case Nx.WkU32 => v >= 0 && v <= 4294967295
+  case Nx.WkI64 => v >= 0
+  case Nx.WkU64 => true
+
+// STDERR_* of worker-protocol.hh
+enum Nx.WMsg:
+  case Nx.WmNext
+  case Nx.WmRead
+  case Nx.WmWrite
+  case Nx.WmLast
+  case Nx.WmError
+  case Nx.WmStart
+  case Nx.WmStop
+  case Nx.WmResult
+  case Nx.WmUnknown
+
+def Nx.wMsg(v: I64): Nx.WMsg =
+  if v == 1869376871 then Nx.WmNext           // 0x6f6c6d67
+  else if v == 1684108385 then Nx.WmRead      // 0x64617461
+  else if v == 1684108310 then Nx.WmWrite     // 0x64617416
+  else if v == 1634497651 then Nx.WmLast      // 0x616c7473
+  else if v == 1668838512 then Nx.WmError     // 0x63787470
+  else if v == 1398035028 then Nx.WmStart     // 0x53545254
+  else if v == 1398034256 then Nx.WmStop      // 0x53544f50
+  else if v == 1381190740 then Nx.WmResult    // 0x52534c54
+  else Nx.WmUnknown
+
+// WorkerProto::Op
+enum Nx.WorkerOp:
+  case Nx.WopAddIndirectRoot
+  case Nx.WopSetOptions
+  case Nx.WopQueryPathInfo
+  case Nx.WopQuerySubstitutablePathInfos
+  case Nx.WopQueryValidPaths
+  case Nx.WopNarFromPath
+  case Nx.WopQueryMissing
+  case Nx.WopQueryDerivationOutputMap
+  case Nx.WopAddMultipleToStore
+  case Nx.WopBuildPathsWithResults
+
+def Nx.wOpCode(o: Nx.WorkerOp): I64 = o match
+  case Nx.WopAddIndirectRoot => 12
+  case Nx.WopSetOptions => 19
+  case Nx.WopQueryPathInfo => 26
+  case Nx.WopQuerySubstitutablePathInfos => 30
+  case Nx.WopQueryValidPaths => 31
+  case Nx.WopNarFromPath => 38
+  case Nx.WopQueryMissing => 40
+  case Nx.WopQueryDerivationOutputMap => 41
+  case Nx.WopAddMultipleToStore => 44
+  case Nx.WopBuildPathsWithResults => 46
+
+// what a protocol minor adds, and the minor that adds it
+enum Nx.WSince:
+  case Nx.WfReserveSpace
+  case Nx.WfCpuAffinity
+  case Nx.WfPathInfoExtra
+  case Nx.WfValidFlag
+  case Nx.WfMissing
+  case Nx.WfSubstCa
+  case Nx.WfOutputMap
+  case Nx.WfErrorInfo
+  case Nx.WfSubstituteFlag
+  case Nx.WfBuiltOutputs
+  case Nx.WfBuildTimes
+  case Nx.WfAddMultiple
+  case Nx.WfDaemonVersion
+  case Nx.WfBuildResults
+  case Nx.WfTrust
+  case Nx.WfCpuTimes
+  case Nx.WfFeatures
+
+def Nx.wSince(f: Nx.WSince): I64 = f match
+  case Nx.WfReserveSpace => 11    // postHandshake: obsolete reserveSpace
+  case Nx.WfCpuAffinity => 14     // postHandshake: obsolete CPU affinity
+  case Nx.WfPathInfoExtra => 16   // UnkeyedValidPathInfo: ultimate, sigs, ca
+  case Nx.WfValidFlag => 17       // queryPathInfo: the valid flag
+  case Nx.WfMissing => 19         // QueryMissing
+  case Nx.WfSubstCa => 22         // QuerySubstitutablePathInfos with content addresses
+  case Nx.WfOutputMap => 22       // QueryDerivationOutputMap
+  case Nx.WfErrorInfo => 26       // STDERR_ERROR as readError
+  case Nx.WfSubstituteFlag => 27  // QueryValidPaths: maybeSubstitute
+  case Nx.WfBuiltOutputs => 28    // BuildResult: builtOutputs
+  case Nx.WfBuildTimes => 29      // BuildResult: timesBuilt, isNonDeterministic, startTime, stopTime
+  case Nx.WfAddMultiple => 32     // AddMultipleToStore
+  case Nx.WfDaemonVersion => 33   // ClientHandshakeInfo: daemonNixVersion
+  case Nx.WfBuildResults => 34    // BuildPathsWithResults
+  case Nx.WfTrust => 35           // ClientHandshakeInfo: remoteTrustsUs
+  case Nx.WfCpuTimes => 37        // BuildResult: cpuUser, cpuSystem
+  case Nx.WfFeatures => 38        // the feature exchange
+
+def Nx.wHas(minor: I64, f: Nx.WSince): Bool = minor >= Nx.wSince(f)
+
+// ---- reading the daemon's stream ---------------------------------------------------------------------------------
+
+enum Nx.WNum:
+  case Nx.WNumAt(v: I64, next: I64)
+  case Nx.WNumNo
+
+enum Nx.WStr:
+  case Nx.WStrAt(v: Str, next: I64)
+  case Nx.WStrNo
+
+enum Nx.WList:
+  case Nx.WListAt(v: Coll.List[Str], next: I64)
+  case Nx.WListNo
+
+enum Nx.WPos:
+  case Nx.WAt(next: I64)
+  case Nx.WNo
+
+def Nx.wNum(s: Str, p: I64, k: Nx.WKind): Nx.WNum =
+  if p + 8 > Str.len(s) then Nx.WNumNo
+  else
+    val v = Nx.narWord(s, p, 7, 0)
+    if Nx.wFits(v, k) then Nx.WNumAt(v, p + 8) else Nx.WNumNo
+
+def Nx.wStr(s: Str, p: I64): Nx.WStr = Nx.narStr(s, p, Str.len(s)) match
+  case Nx.NsOk(b, len, next) => Nx.WStrAt(Str.slice(s, b, b + len), next)
+  case Nx.NsBad => Nx.WStrNo
+
+def Nx.wStrAfter(s: Str, r: Nx.WPos): Nx.WStr = r match
+  case Nx.WAt(p) => Nx.wStr(s, p)
+  case Nx.WNo => Nx.WStrNo
+
+def Nx.wSkipNum(s: Str, r: Nx.WPos, k: Nx.WKind): Nx.WPos = r match
+  case Nx.WNo => Nx.WNo
+  case Nx.WAt(p) => Nx.wNum(s, p, k) match
+    case Nx.WNumAt(_, q) => Nx.WAt(q)
+    case Nx.WNumNo => Nx.WNo
+
+def Nx.wSkipStr(s: Str, r: Nx.WPos): Nx.WPos = Nx.wStrAfter(s, r) match
+  case Nx.WStrAt(_, q) => Nx.WAt(q)
+  case Nx.WStrNo => Nx.WNo
+
+// a u64 that must be 0 (readError asserts havePos == 0)
+def Nx.wZero(s: Str, r: Nx.WPos): Nx.WPos = r match
+  case Nx.WNo => Nx.WNo
+  case Nx.WAt(p) => Nx.wNum(s, p, Nx.WkU64) match
+    case Nx.WNumAt(v, q) => if v == 0 then Nx.WAt(q) else Nx.WNo
+    case Nx.WNumNo => Nx.WNo
+
+// readStrings: a count and the strings, newest first
+def Nx.wStrs(s: Str, p: I64): Nx.WList = Nx.wNum(s, p, Nx.WkU64) match
+  case Nx.WNumAt(n, q) => Nx.wStrsGo(s, q, n, Coll.Nil)
+  case Nx.WNumNo => Nx.WListNo
+
+def Nx.wStrsGo(s: Str, p: I64, n: I64, acc: Coll.List[Str]): Nx.WList =
+  if n == 0 then Nx.WListAt(acc, p)
+  else Nx.wStr(s, p) match
+    case Nx.WStrAt(x, q) => Nx.wStrsGo(s, q, n - 1, Coll.Cons(x, acc))
+    case Nx.WStrNo => Nx.WListNo
+
+def Nx.wSkipStrs(s: Str, r: Nx.WPos): Nx.WPos = r match
+  case Nx.WNo => Nx.WNo
+  case Nx.WAt(p) => Nx.wStrs(s, p) match
+    case Nx.WListAt(_, q) => Nx.WAt(q)
+    case Nx.WListNo => Nx.WNo
+
+// ---- store paths, sets, derived paths ---------------------------------------------------------------------------
+
+// StoreDirConfig::parseStorePath: canonPath (of an absolute path), then a store path; printStorePath spells it back
+def Nx.wPath(x: Str): Coll.Option[Str] =
+  if Str.at(x, 0) != '/' then Coll.None
+  else
+    val c = Nx.canonPath(x)
+    if Nx.isStorePath(c) then Coll.Some(c) else Coll.None
+
+// x put into the sorted list xs, once
+def Nx.wIns(xs: Coll.List[Str], x: Str): Coll.List[Str] = xs match
+  case Coll.Nil => Coll.Cons(x, Coll.Nil)
+  case Coll.Cons(h, t) =>
+    if Str.eq(h, x) then xs
+    else if Nx.strLess(x, h) then Coll.Cons(x, xs)
+    else Coll.Cons(h, Nx.wIns(t, x))
+
+def Nx.wSort(xs: Coll.List[Str], acc: Coll.List[Str]): Coll.List[Str] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => Nx.wSort(t, Nx.wIns(acc, h))
+
+def Nx.wJoin(xs: Coll.List[Str]): Str =
+  val b = Nx.sbNew()
+  Nx.wJoinGo(b, xs, true)
+  Nx.sbGet(b)
+
+def Nx.wJoinGo(b: Ptr, xs: Coll.List[Str], first: Bool): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    if first then () else Nx.sbAdd(b, ",")
+    Nx.sbAdd(b, h)
+    Nx.wJoinGo(b, t, false)
+
+// Serialise<StorePathSet>: a count and the paths, as a sorted set
+def Nx.wPaths(s: Str, p: I64): Nx.WList = Nx.wNum(s, p, Nx.WkU64) match
+  case Nx.WNumAt(n, q) => Nx.wPathsGo(s, q, n, Coll.Nil)
+  case Nx.WNumNo => Nx.WListNo
+
+def Nx.wPathsGo(s: Str, p: I64, n: I64, acc: Coll.List[Str]): Nx.WList =
+  if n == 0 then Nx.WListAt(acc, p)
+  else Nx.wStr(s, p) match
+    case Nx.WStrNo => Nx.WListNo
+    case Nx.WStrAt(x, q) => Nx.wPath(x) match
+      case Coll.Some(c) => Nx.wPathsGo(s, q, n - 1, Nx.wIns(acc, c))
+      case Coll.None => Nx.WListNo
+
+def Nx.wPathsAfter(s: Str, r: Nx.WPos): Nx.WList = r match
+  case Nx.WAt(p) => Nx.wPaths(s, p)
+  case Nx.WNo => Nx.WListNo
+
+// Serialise<std::optional<StorePath>>: "" is none
+def Nx.wOptPath(x: Str): Coll.Option[Str] = if Str.len(x) == 0 then Coll.Some("") else Nx.wPath(x)
+
+def Nx.wLastAt(s: Str, c: I64, i: I64): I64 =
+  if i < 0 then i else if Str.at(s, i) == c then i else Nx.wLastAt(s, c, i - 1)
+
+// OutputsSpec::parse: "*", or names split at "," (each checkName), as a sorted set; to_string joins them with ","
+def Nx.wOutputs(x: Str): Coll.Option[Str] =
+  if Str.eq(x, "*") then Coll.Some(x) else Nx.wOutputsGo(x, 0, Coll.Nil)
+
+def Nx.wOutputsGo(x: Str, b: I64, acc: Coll.List[Str]): Coll.Option[Str] =
+  val c = Nx.byteAt(x, ',', b)
+  val e = if c < 0 then Str.len(x) else c
+  val name = Str.slice(x, b, e)
+  if !Nx.storeNameOk(name) then Coll.None
+  else if c < 0 then Coll.Some(Nx.wJoin(Nx.wIns(acc, name)))
+  else Nx.wOutputsGo(x, c + 1, Nx.wIns(acc, name))
+
+// DerivedPath::parseLegacy (derived-path.cc), spelled back by to_string_legacy: PATH, or DRV!OUTPUTS split at the last
+// "!"; a DRV that is itself built needs the dynamic-derivations feature, which is off, and no store path holds a "!"
+def Nx.wDerived(x: Str): Coll.Option[Str] =
+  val k = Nx.wLastAt(x, '!', Str.len(x) - 1)
+  if k < 0 then Nx.wPath(x)
+  else Nx.wPath(Str.slice(x, 0, k)) match
+    case Coll.None => Coll.None
+    case Coll.Some(d) => Nx.wOutputs(Nx.drvAfter(x, k + 1)) match
+      case Coll.None => Coll.None
+      case Coll.Some(o) => Coll.Some(Nx.cat(Nx.cat(d, "!"), o))
+
+// ---- hashes, signatures, content addresses -------------------------------------------------------------------------
+
+// Nx.parseAnyHash: the algorithm comes from the hash itself
+def Nx.wAnyAlgo(): I64 = 0 - 1
+
+// Signature::parse (local-keys.cc parseColonBase64): NAME:BASE64, both not empty; to_string encodes the data again
+def Nx.wSig(x: Str): Coll.Option[Str] =
+  val c = Nx.byteAt(x, ':', 0)
+  if c <= 0 then Coll.None
+  else
+    val data = Nx.unb64(Nx.drvAfter(x, c + 1))
+    if Str.len(data) <= 0 then Coll.None else Coll.Some(Nx.cat(Str.slice(x, 0, c + 1), Nx.b64(data)))
+
+def Nx.wSigs(xs: Coll.List[Str], acc: Coll.List[Str]): Coll.Option[Coll.List[Str]] = xs match
+  case Coll.Nil => Coll.Some(acc)
+  case Coll.Cons(h, t) => Nx.wSig(h) match
+    case Coll.Some(g) => Nx.wSigs(t, Nx.wIns(acc, g))
+    case Coll.None => Coll.None
+
+// ContentAddress::parseOpt (content-address.cc): "", text:ALGO:HASH or fixed:[r:]ALGO:HASH with the hash in base16,
+// nix32 or base64 by its length (parseNonSRIUnprefixed); rendered with the hash in nix32. fixed:git: needs the
+// git-hashing feature, which is off.
+def Nx.wCa(c: Str): Coll.Option[Str] =
+  if Str.len(c) == 0 then Coll.Some(c)
+  else if Nx.drvHasPrefix(c, "text:") then Nx.wCaHash("text:", Nx.drvAfter(c, 5))
+  else if Nx.drvHasPrefix(c, "fixed:r:") then Nx.wCaHash("fixed:r:", Nx.drvAfter(c, 8))
+  else if Nx.drvHasPrefix(c, "fixed:git:") then Coll.None
+  else if Nx.drvHasPrefix(c, "fixed:") then Nx.wCaHash("fixed:", Nx.drvAfter(c, 6))
+  else Coll.None
+
+def Nx.wCaHash(prefix: Str, rest: Str): Coll.Option[Str] =
+  val k = Nx.byteAt(rest, ':', 0)
+  if k < 0 then Coll.None
+  else Nx.hashAlgo(Str.slice(rest, 0, k)) match
+    case Coll.None => Coll.None
+    case Coll.Some(a) => Nx.parseDigest(a, Nx.drvAfter(rest, k + 1)) match
+      case Coll.None => Coll.None
+      case Coll.Some(raw) => Coll.Some(Nx.cat(Nx.cat(prefix, Nx.drAlgoName(a)), Nx.cat(":", Nx.b32(raw))))
+
+// DrvOutput::parse (realisation.cc): HASH!NAME, the hash with its algorithm (parseAnyPrefixed)
+def Nx.wDrvOutput(x: Str): Bool =
+  val k = Nx.byteAt(x, '!', 0)
+  if k < 0 then false
+  else Nx.parseAnyHash(Str.slice(x, 0, k), Nx.wAnyAlgo()) match
+    case Nx.HashOk(_, _) => true
+    case Nx.HashBad(_) => false
+
+// a Realisation from JSON (realisation.cc): an object with id (a DrvOutput), outPath (a store path's base name) and,
+// when present, signatures (an array of signatures)
+def Nx.wRealisation(x: Str): Bool = Nx.pFromJson(Nx.VStr(x, Coll.Nil)) match
+  case Nx.VAttrs(n, syms, vals) =>
+    val id = Nx.strAttr(n, syms, vals, "id")
+    val out = Nx.strAttr(n, syms, vals, "outPath")
+    id match
+      case Nx.VStr(i, _) => out match
+        case Nx.VStr(o, _) => Nx.wDrvOutput(i) && Nx.isStorePath(Nx.cat("/nix/store/", o)) && Nx.wRealSigs(n, syms, vals)
+        case _ => false
+      case _ => false
+  case _ => false
+
+def Nx.wRealSigs(n: I64, syms: Ptr, vals: Ptr): Bool =
+  val i = Nx.findSym(syms, n, Nx.intern("signatures"))
+  if i == n then true
+  else Nx.force(Nx.aget[Ptr](vals, i)) match
+    case Nx.VList(k, xs) => Nx.wSigCells(xs, 0, k)
+    case _ => false
+
+def Nx.wSigCells(xs: Ptr, j: I64, k: I64): Bool =
+  if j >= k then true
+  else Nx.force(Nx.aget[Ptr](xs, j)) match
+    case Nx.VStr(g, _) => Nx.wSig(g) match
+      case Coll.Some(_) => Nx.wSigCells(xs, j + 1, k)
+      case Coll.None => false
+    case _ => false
+
+// ---- stderr (processStderrReturn) ----------------------------------------------------------------------------------
+
+// how the daemon's stderr ends: STDERR_LAST, the daemon's error, or a stream the client refuses
+enum Nx.WLog:
+  case Nx.WLogLast(next: I64)
+  case Nx.WLogErr(msg: Str)
+  case Nx.WLogNo
+
+enum Nx.WStep:
+  case Nx.WStepOn(next: I64)
+  case Nx.WStepEnd(r: Nx.WLog)
+
+// log lines, activities and results are read and dropped; STDERR_READ has no source and STDERR_WRITE no sink here
+def Nx.wLog(s: Str, p: I64, minor: I64): Nx.WLog = Nx.wLogStep(s, p, minor) match
+  case Nx.WStepOn(q) => Nx.wLog(s, q, minor)
+  case Nx.WStepEnd(r) => r
+
+def Nx.wLogStep(s: Str, p: I64, minor: I64): Nx.WStep = Nx.wNum(s, p, Nx.WkU64) match
+  case Nx.WNumNo => Nx.WStepEnd(Nx.WLogNo)
+  case Nx.WNumAt(m, q) => Nx.wMsg(m) match
+    case Nx.WmLast => Nx.WStepEnd(Nx.WLogLast(q))
+    case Nx.WmError => Nx.WStepEnd(Nx.wError(s, q, minor))
+    case Nx.WmNext => Nx.wOn(Nx.wSkipStr(s, Nx.WAt(q)))
+    case Nx.WmStart => Nx.wOn(Nx.wStart(s, q))
+    case Nx.WmStop => Nx.wOn(Nx.wSkipNum(s, Nx.WAt(q), Nx.WkU64))
+    case Nx.WmResult => Nx.wOn(Nx.wFields(s, Nx.wSkipNum(s, Nx.wSkipNum(s, Nx.WAt(q), Nx.WkU64), Nx.WkU32)))
+    case _ => Nx.WStepEnd(Nx.WLogNo)
+
+def Nx.wOn(r: Nx.WPos): Nx.WStep = r match
+  case Nx.WAt(q) => Nx.WStepOn(q)
+  case Nx.WNo => Nx.WStepEnd(Nx.WLogNo)
+
+// STDERR_START_ACTIVITY: id, level, type, text, fields, parent
+def Nx.wStart(s: Str, p: I64): Nx.WPos =
+  val a = Nx.wSkipNum(s, Nx.WAt(p), Nx.WkU64)
+  val b = Nx.wSkipNum(s, Nx.wSkipNum(s, a, Nx.WkU32), Nx.WkU32)
+  Nx.wSkipNum(s, Nx.wFields(s, Nx.wSkipStr(s, b)), Nx.WkU64)
+
+// readFields: a count, then each field's type and an integer or a string
+def Nx.wFields(s: Str, r: Nx.WPos): Nx.WPos = r match
+  case Nx.WNo => Nx.WNo
+  case Nx.WAt(p) => Nx.wNum(s, p, Nx.WkU32) match
+    case Nx.WNumAt(n, q) => Nx.wFieldsGo(s, q, n)
+    case Nx.WNumNo => Nx.WNo
+
+def Nx.wFieldsGo(s: Str, p: I64, n: I64): Nx.WPos =
+  if n == 0 then Nx.WAt(p)
+  else Nx.wNum(s, p, Nx.WkU32) match
+    case Nx.WNumNo => Nx.WNo
+    case Nx.WNumAt(t, q) =>
+      val r: Nx.WPos = if t == Nx.wFieldInt() then Nx.wSkipNum(s, Nx.WAt(q), Nx.WkU64) else if t == Nx.wFieldString() then Nx.wSkipStr(s, Nx.WAt(q)) else Nx.WNo
+      r match
+        case Nx.WAt(e) => Nx.wFieldsGo(s, e, n - 1)
+        case Nx.WNo => Nx.WNo
+
+// STDERR_ERROR: readError (serialise.cc) from 1.26 on, a message and a status before
+def Nx.wError(s: Str, p: I64, minor: I64): Nx.WLog =
+  if Nx.wHas(minor, Nx.WfErrorInfo) then Nx.wErrorInfo(s, p)
+  else Nx.wStr(s, p) match
+    case Nx.WStrNo => Nx.WLogNo
+    case Nx.WStrAt(msg, q) => Nx.wLogMsg(Nx.wSkipNum(s, Nx.WAt(q), Nx.WkU32), msg)
+
+def Nx.wLogMsg(r: Nx.WPos, msg: Str): Nx.WLog = r match
+  case Nx.WAt(_) => Nx.WLogErr(msg)
+  case Nx.WNo => Nx.WLogNo
+
+// type "Error" (asserted), level, a removed name, the message, no position (asserted), traces without positions
+def Nx.wErrorInfo(s: Str, p: I64): Nx.WLog = Nx.wStr(s, p) match
+  case Nx.WStrNo => Nx.WLogNo
+  case Nx.WStrAt(ty, q) =>
+    if !Str.eq(ty, "Error") then Nx.WLogNo
+    else Nx.wStrAfter(s, Nx.wSkipStr(s, Nx.wSkipNum(s, Nx.WAt(q), Nx.WkU32))) match
+      case Nx.WStrNo => Nx.WLogNo
+      case Nx.WStrAt(msg, e) => Nx.wLogMsg(Nx.wTraces(s, Nx.wZero(s, Nx.WAt(e))), msg)
+
+def Nx.wTraces(s: Str, r: Nx.WPos): Nx.WPos = r match
+  case Nx.WNo => Nx.WNo
+  case Nx.WAt(p) => Nx.wNum(s, p, Nx.WkU64) match
+    case Nx.WNumAt(n, q) => Nx.wTracesGo(s, Nx.WAt(q), n)
+    case Nx.WNumNo => Nx.WNo
+
+def Nx.wTracesGo(s: Str, r: Nx.WPos, n: I64): Nx.WPos =
+  if n == 0 then r
+  else
+    val e = Nx.wSkipStr(s, Nx.wZero(s, r))
+    e match
+      case Nx.WAt(_) => Nx.wTracesGo(s, e, n - 1)
+      case Nx.WNo => Nx.WNo
+
+// ---- the handshake ---------------------------------------------------------------------------------------------
+
+// BasicClientConnection::handshake and RemoteStore::initConnection: WORKER_MAGIC_2, then a daemon of major 1 and minor
+// 10 or more; the answer is the minor both speak, which must be WorkerProto::minimum or more
+def Nx.wHello(s: Str): Coll.Option[I64] = Nx.wNum(s, 0, Nx.WkU32) match
+  case Nx.WNumNo => Coll.None
+  case Nx.WNumAt(magic, p) => Nx.wNum(s, p, Nx.WkU32) match
+    case Nx.WNumNo => Coll.None
+    case Nx.WNumAt(v, _) =>
+      val minor = v % Nx.wMinorSpan()
+      val m = if minor < Nx.wClientMinor() then minor else Nx.wClientMinor()
+      if magic != Nx.wMagic2() || v / Nx.wMinorSpan() % Nx.wMinorSpan() != Nx.wMajor() then Coll.None
+      else if minor < Nx.wOldestMinor() || m < Nx.wMinimumMinor() then Coll.None
+      else Coll.Some(m)
+
+enum Nx.WGreet:
+  case Nx.WGreetAt(version: Str, trust: Str, next: I64)
+  case Nx.WGreetNo
+
+// Serialise<std::optional<TrustedFlag>>
+def Nx.wTrust(s: Str, p: I64): Nx.WStr = Nx.wNum(s, p, Nx.WkU8) match
+  case Nx.WNumNo => Nx.WStrNo
+  case Nx.WNumAt(t, q) =>
+    if t == 0 then Nx.WStrAt("unknown", q)
+    else if t == 1 then Nx.WStrAt("yes", q)
+    else if t == 2 then Nx.WStrAt("no", q)
+    else Nx.WStrNo
+
+def Nx.wNoStr(r: Nx.WPos, x: Str): Nx.WStr = r match
+  case Nx.WAt(p) => Nx.WStrAt(x, p)
+  case Nx.WNo => Nx.WStrNo
+
+// the daemon's features, ClientHandshakeInfo (its version and trust), the stderr after the handshake and after
+// SetOptions
+def Nx.wGreet(s: Str, m: I64): Nx.WGreet =
+  val a: Nx.WPos = if Nx.wHas(m, Nx.WfFeatures) then Nx.wSkipStrs(s, Nx.WAt(Nx.wHelloLen())) else Nx.WAt(Nx.wHelloLen())
+  val v: Nx.WStr = if Nx.wHas(m, Nx.WfDaemonVersion) then Nx.wStrAfter(s, a) else Nx.wNoStr(a, "")
+  v match
+    case Nx.WStrNo => Nx.WGreetNo
+    case Nx.WStrAt(ver, q) =>
+      val t: Nx.WStr = if Nx.wHas(m, Nx.WfTrust) then Nx.wTrust(s, q) else Nx.WStrAt("unknown", q)
+      t match
+        case Nx.WStrNo => Nx.WGreetNo
+        case Nx.WStrAt(trust, e) => Nx.wLog(s, e, m) match
+          case Nx.WLogLast(f) => Nx.wLog(s, f, m) match
+            case Nx.WLogLast(g) => Nx.WGreetAt(ver, trust, g)
+            case _ => Nx.WGreetNo
+          case _ => Nx.WGreetNo
+
+// ---- the client's side ------------------------------------------------------------------------------------------
+
+def Nx.wPut(b: Ptr, v: I64): Unit = Nx.wPutGo(b, v, 8)
+
+def Nx.wPutGo(b: Ptr, v: I64, k: I64): Unit =
+  if k == 0 then ()
+  else
+    Nx.sbAdd(b, Nx.byte(v % 256))
+    Nx.wPutGo(b, v / 256, k - 1)
+
+def Nx.wPutStr(b: Ptr, x: Str): Unit =
+  Nx.wPut(b, Str.len(x))
+  Nx.sbAdd(b, x)
+  Nx.wZeros(b, Nx.narPad(Str.len(x)))
+
+def Nx.wZeros(b: Ptr, n: I64): Unit =
+  if n == 0 then ()
+  else
+    Nx.sbAdd(b, Nx.byte(0))
+    Nx.wZeros(b, n - 1)
+
+def Nx.wPutStrs(b: Ptr, xs: Coll.List[Str]): Unit =
+  Nx.wPut(b, Coll.length(xs))
+  Nx.wPutEach(b, xs)
+
+def Nx.wPutEach(b: Ptr, xs: Coll.List[Str]): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.wPutStr(b, h)
+    Nx.wPutEach(b, t)
+
+// QuerySubstitutablePathInfos from 1.22: each path with no content address
+def Nx.wPutPairs(b: Ptr, xs: Coll.List[Str]): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.wPutStr(b, h)
+    Nx.wPutStr(b, "")
+    Nx.wPutPairs(b, t)
+
+// RemoteStore::setOptions with Nix's defaults: keepFailed, keepGoing, tryFallback, verbosity (lvlError), maxBuildJobs,
+// maxSilentTime, true (obsolete useBuildHook), verboseBuild (lvlError), log type, print build trace, buildCores,
+// useSubstitutes; then no overrides
+def Nx.wSetOptions(b: Ptr): Unit =
+  Nx.wPut(b, Nx.wOpCode(Nx.WopSetOptions))
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 1)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 1)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 0)
+  Nx.wPut(b, 1)
+  Nx.wPut(b, 0)
+
+// each of xs parsed as a store path, as a sorted set (parseStorePath of each argument)
+def Nx.wArgPaths(xs: Coll.List[Str], acc: Coll.List[Str]): Coll.Option[Coll.List[Str]] = xs match
+  case Coll.Nil => Coll.Some(acc)
+  case Coll.Cons(h, t) => Nx.wPath(h) match
+    case Coll.Some(c) => Nx.wArgPaths(t, Nx.wIns(acc, c))
+    case Coll.None => Coll.None
+
+// each of xs parsed as a derived path (DerivedPath::parseLegacy), newest first
+def Nx.wArgDerived(xs: Coll.List[Str], acc: Coll.List[Str]): Coll.Option[Coll.List[Str]] = xs match
+  case Coll.Nil => Coll.Some(acc)
+  case Coll.Cons(h, t) => Nx.wDerived(h) match
+    case Coll.Some(d) => Nx.wArgDerived(t, Coll.Cons(d, acc))
+    case Coll.None => Coll.None
+
+// an operation on one store path: its code and the path
+def Nx.wPutPathOp(b: Ptr, o: Nx.WorkerOp, args: Coll.List[Str]): Bool = args match
+  case Coll.Nil => false
+  case Coll.Cons(h, _) => Nx.wPath(h) match
+    case Coll.None => false
+    case Coll.Some(c) =>
+      Nx.wPut(b, Nx.wOpCode(o))
+      Nx.wPutStr(b, c)
+      true
+
+// QueryValidPaths: the set, then from 1.27 the substitute flag
+def Nx.wPutValid(b: Ptr, m: I64, args: Coll.List[Str], subst: Bool): Bool = Nx.wArgPaths(args, Coll.Nil) match
+  case Coll.None => false
+  case Coll.Some(ps) =>
+    Nx.wPut(b, Nx.wOpCode(Nx.WopQueryValidPaths))
+    Nx.wPutStrs(b, ps)
+    val flag = if subst then 1 else 0
+    if Nx.wHas(m, Nx.WfSubstituteFlag) then Nx.wPut(b, flag) else ()
+    true
+
+// QuerySubstitutablePathInfos: a path set before 1.22, a map of paths to content addresses from it
+def Nx.wPutSubst(b: Ptr, m: I64, args: Coll.List[Str]): Bool = Nx.wArgPaths(args, Coll.Nil) match
+  case Coll.None => false
+  case Coll.Some(ps) =>
+    Nx.wPut(b, Nx.wOpCode(Nx.WopQuerySubstitutablePathInfos))
+    if Nx.wHas(m, Nx.WfSubstCa) then
+      Nx.wPut(b, Coll.length(ps))
+      Nx.wPutPairs(b, ps)
+    else Nx.wPutStrs(b, ps)
+    true
+
+// QueryMissing and BuildPathsWithResults: the derived paths (to_string_legacy), and for a build the mode bmNormal
+// shortcut: before 1.30 Nix writes a StorePathWithOutputs (the same text for DRV!OUTPUTS, refused for a plain .drv);
+// upgrade when a case covers a daemon older than 1.30
+def Nx.wPutDerived(b: Ptr, o: Nx.WorkerOp, args: Coll.List[Str], build: Bool): Bool = Nx.wArgDerived(args, Coll.Nil) match
+  case Coll.None => false
+  case Coll.Some(ds) =>
+    Nx.wPut(b, Nx.wOpCode(o))
+    Nx.wPutStrs(b, Coll.rev(ds))
+    if build then Nx.wPut(b, 0) else ()
+    true
+
+// AddMultipleToStore of no paths: repair, dontCheckSigs, then the framed source (one frame of the count 0, the empty
+// frame); before 1.32 Store::addMultipleToStore reads the count 0 and sends nothing
+def Nx.wPutAddMultiple(b: Ptr, m: I64): Bool =
+  if Nx.wHas(m, Nx.WfAddMultiple) then
+    Nx.wPut(b, Nx.wOpCode(Nx.WopAddMultipleToStore))
+    Nx.wPut(b, 0)
+    Nx.wPut(b, 0)
+    Nx.wPut(b, 8)
+    Nx.wPut(b, 0)
+    Nx.wPut(b, 0)
+    true
+  else true
+
+def Nx.wPutIndirect(b: Ptr, args: Coll.List[Str]): Bool = args match
+  case Coll.Nil => false
+  case Coll.Cons(h, _) =>
+    Nx.wPut(b, Nx.wOpCode(Nx.WopAddIndirectRoot))
+    Nx.wPutStr(b, h)
+    true
+
+// ---- the operations ---------------------------------------------------------------------------------------------
+
+enum Nx.WireOp:
+  case Nx.WoConnect
+  case Nx.WoPathInfo
+  case Nx.WoValidPaths
+  case Nx.WoSubstitute
+  case Nx.WoMissing
+  case Nx.WoOutputMap
+  case Nx.WoSubstitutable
+  case Nx.WoBuild
+  case Nx.WoIndirectRoot
+  case Nx.WoNar
+  case Nx.WoAddMultiple
+  case Nx.WoUnknown
+
+def Nx.wireOp(s: Str): Nx.WireOp =
+  if Str.eq(s, "connect") then Nx.WoConnect
+  else if Str.eq(s, "path-info") then Nx.WoPathInfo
+  else if Str.eq(s, "valid-paths") then Nx.WoValidPaths
+  else if Str.eq(s, "substitute") then Nx.WoSubstitute
+  else if Str.eq(s, "missing") then Nx.WoMissing
+  else if Str.eq(s, "output-map") then Nx.WoOutputMap
+  else if Str.eq(s, "substitutable") then Nx.WoSubstitutable
+  else if Str.eq(s, "build") then Nx.WoBuild
+  else if Str.eq(s, "indirect-root") then Nx.WoIndirectRoot
+  else if Str.eq(s, "nar") then Nx.WoNar
+  else if Str.eq(s, "add-multiple") then Nx.WoAddMultiple
+  else Nx.WoUnknown
+
+// the client's side after the daemon's version: features (none), postHandshake, SetOptions, the operation; none when
+// an argument is refused or the operation needs a fallback Nix runs on other operations:
+// shortcut: QueryMissing before 1.19, QueryDerivationOutputMap before 1.22 and BuildPathsWithResults before 1.34 are
+// refused; upgrade when a case covers such a daemon
+def Nx.wRequest(op: Nx.WireOp, m: I64, args: Coll.List[Str]): Coll.Option[Str] =
+  val b = Nx.sbNew()
+  if Nx.wHas(m, Nx.WfFeatures) then Nx.wPut(b, 0) else ()
+  if Nx.wHas(m, Nx.WfCpuAffinity) then Nx.wPut(b, 0) else ()
+  if Nx.wHas(m, Nx.WfReserveSpace) then Nx.wPut(b, 0) else ()
+  Nx.wSetOptions(b)
+  val ok = op match
+    case Nx.WoConnect => true
+    case Nx.WoPathInfo => Nx.wPutPathOp(b, Nx.WopQueryPathInfo, args)
+    case Nx.WoNar => Nx.wPutPathOp(b, Nx.WopNarFromPath, args)
+    case Nx.WoOutputMap => Nx.wHas(m, Nx.WfOutputMap) && Nx.wPutPathOp(b, Nx.WopQueryDerivationOutputMap, args)
+    case Nx.WoValidPaths => Nx.wPutValid(b, m, args, false)
+    case Nx.WoSubstitute => Nx.wPutValid(b, m, args, true)
+    case Nx.WoSubstitutable => Nx.wPutSubst(b, m, args)
+    case Nx.WoMissing => Nx.wHas(m, Nx.WfMissing) && Nx.wPutDerived(b, Nx.WopQueryMissing, args, false)
+    case Nx.WoBuild => Nx.wHas(m, Nx.WfBuildResults) && Nx.wPutDerived(b, Nx.WopBuildPathsWithResults, args, true)
+    case Nx.WoIndirectRoot => Nx.wPutIndirect(b, args)
+    case Nx.WoAddMultiple => Nx.wPutAddMultiple(b, m)
+    case Nx.WoUnknown => false
+  if ok then Coll.Some(Nx.sbGet(b)) else Coll.None
+
+// queryPathInfo: an error whose message holds "is not valid" is none (old daemons), then from 1.17 the valid flag
+def Nx.wrPathInfo(s: Str, p: I64, m: I64): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogErr(msg) => if Nx.hasSub(msg, "is not valid", 0) then "none" else "error"
+  case Nx.WLogNo => "error"
+  case Nx.WLogLast(q) =>
+    if !Nx.wHas(m, Nx.WfValidFlag) then Nx.wInfo(s, q, m)
+    else Nx.wNum(s, q, Nx.WkBool) match
+      case Nx.WNumNo => "error"
+      case Nx.WNumAt(valid, r) => if valid == 0 then "none" else Nx.wInfo(s, r, m)
+
+// Serialise<UnkeyedValidPathInfo>: deriver, narHash (Hash::parseAny, SHA-256), references, registrationTime, narSize
+def Nx.wInfo(s: Str, p: I64, m: I64): Str = Nx.wStr(s, p) match
+  case Nx.WStrNo => "error"
+  case Nx.WStrAt(d, q) => Nx.wOptPath(d) match
+    case Coll.None => "error"
+    case Coll.Some(dv) => Nx.wStr(s, q) match
+      case Nx.WStrNo => "error"
+      case Nx.WStrAt(h, r) => Nx.parseAnyHash(h, Nx.algoOf("sha256")) match
+        case Nx.HashBad(_) => "error"
+        case Nx.HashOk(_, raw) => Nx.wInfoRefs(s, r, m, dv, Nx.b16(raw))
+
+def Nx.wInfoRefs(s: Str, p: I64, m: I64, dv: Str, nar: Str): Str = Nx.wPaths(s, p) match
+  case Nx.WListNo => "error"
+  case Nx.WListAt(refs, q) => Nx.wNum(s, q, Nx.WkI64) match
+    case Nx.WNumNo => "error"
+    case Nx.WNumAt(time, r) => Nx.wNum(s, r, Nx.WkU64) match
+      case Nx.WNumNo => "error"
+      case Nx.WNumAt(size, e) =>
+        val b = Nx.sbNew()
+        Nx.sbAdd(b, "info deriver=")
+        Nx.sbAdd(b, dv)
+        Nx.sbAdd(b, " nar=")
+        Nx.sbAdd(b, nar)
+        Nx.sbAdd(b, " refs=")
+        Nx.sbAdd(b, Nx.wJoin(refs))
+        Nx.sbAdd(b, " time=")
+        Nx.sbAdd(b, Nx.intStr(time))
+        Nx.sbAdd(b, " size=")
+        Nx.sbAdd(b, Nx.u64Str(size))
+        if Nx.wHas(m, Nx.WfPathInfoExtra) then Nx.wInfoTail(s, e, b)
+        else
+          Nx.sbAdd(b, " ultimate=0 sigs= ca=")
+          Nx.sbGet(b)
+
+// from 1.16: ultimate, the signatures (a set), the content address
+def Nx.wInfoTail(s: Str, p: I64, b: Ptr): Str = Nx.wNum(s, p, Nx.WkBool) match
+  case Nx.WNumNo => "error"
+  case Nx.WNumAt(u, q) => Nx.wStrs(s, q) match
+    case Nx.WListNo => "error"
+    case Nx.WListAt(raw, r) => Nx.wSigs(Coll.rev(raw), Coll.Nil) match
+      case Coll.None => "error"
+      case Coll.Some(sigs) => Nx.wStr(s, r) match
+        case Nx.WStrNo => "error"
+        case Nx.WStrAt(c, _) => Nx.wCa(c) match
+          case Coll.None => "error"
+          case Coll.Some(ca) =>
+            Nx.sbAdd(b, " ultimate=")
+            Nx.sbAdd(b, Nx.intStr(u))
+            Nx.sbAdd(b, " sigs=")
+            Nx.sbAdd(b, Nx.wJoin(sigs))
+            Nx.sbAdd(b, " ca=")
+            Nx.sbAdd(b, ca)
+            Nx.sbGet(b)
+
+// QueryValidPaths: a path set
+def Nx.wrPaths(s: Str, p: I64, m: I64, lead: Str): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogLast(q) => Nx.wPaths(s, q) match
+    case Nx.WListAt(ps, _) => Nx.cat(lead, Nx.wJoin(ps))
+    case Nx.WListNo => "error"
+  case _ => "error"
+
+// QueryMissing: willBuild, willSubstitute, unknown, downloadSize, narSize
+def Nx.wrMissing(s: Str, p: I64, m: I64): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogLast(q) => Nx.wPaths(s, q) match
+    case Nx.WListNo => "error"
+    case Nx.WListAt(build, q2) => Nx.wPaths(s, q2) match
+      case Nx.WListNo => "error"
+      case Nx.WListAt(subst, q3) => Nx.wPaths(s, q3) match
+        case Nx.WListNo => "error"
+        case Nx.WListAt(unknown, q4) => Nx.wNum(s, q4, Nx.WkU64) match
+          case Nx.WNumNo => "error"
+          case Nx.WNumAt(dl, q5) => Nx.wNum(s, q5, Nx.WkU64) match
+            case Nx.WNumNo => "error"
+            case Nx.WNumAt(nar, _) =>
+              val b = Nx.sbNew()
+              Nx.sbAdd(b, "missing build=")
+              Nx.sbAdd(b, Nx.wJoin(build))
+              Nx.sbAdd(b, " subst=")
+              Nx.sbAdd(b, Nx.wJoin(subst))
+              Nx.sbAdd(b, " unknown=")
+              Nx.sbAdd(b, Nx.wJoin(unknown))
+              Nx.sbAdd(b, " download=")
+              Nx.sbAdd(b, Nx.u64Str(dl))
+              Nx.sbAdd(b, " nar=")
+              Nx.sbAdd(b, Nx.u64Str(nar))
+              Nx.sbGet(b)
+  case _ => "error"
+
+// an entry of a map read with insert_or_assign: its key and its answer text
+enum Nx.WEntry:
+  case Nx.WEnt(key: Str, line: Str)
+
+def Nx.wKeyed(xs: Coll.List[Nx.WEntry], k: Str, line: Str): Coll.List[Nx.WEntry] = xs match
+  case Coll.Nil => Coll.Cons(Nx.WEnt(k, line), Coll.Nil)
+  case Coll.Cons(e, t) => e match
+    case Nx.WEnt(ek, _) => if Str.eq(ek, k) then Coll.Cons(Nx.WEnt(k, line), t) else Coll.Cons(e, Nx.wKeyed(t, k, line))
+
+def Nx.wLines(xs: Coll.List[Nx.WEntry], acc: Coll.List[Str]): Coll.List[Str] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(e, t) => e match
+    case Nx.WEnt(_, line) => Nx.wLines(t, Nx.wIns(acc, line))
+
+// QueryDerivationOutputMap: a map of output names to optional store paths
+def Nx.wrOutputMap(s: Str, p: I64, m: I64): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogLast(q) => Nx.wNum(s, q, Nx.WkU64) match
+    case Nx.WNumAt(n, r) => Nx.wOutputsMap(s, r, n, Coll.Nil)
+    case Nx.WNumNo => "error"
+  case _ => "error"
+
+def Nx.wOutputsMap(s: Str, p: I64, n: I64, acc: Coll.List[Nx.WEntry]): Str =
+  if n == 0 then Nx.cat("outputs ", Nx.wJoin(Nx.wLines(acc, Coll.Nil)))
+  else Nx.wStr(s, p) match
+    case Nx.WStrNo => "error"
+    case Nx.WStrAt(name, q) => Nx.wStr(s, q) match
+      case Nx.WStrNo => "error"
+      case Nx.WStrAt(x, r) => Nx.wOptPath(x) match
+        case Coll.None => "error"
+        case Coll.Some(path) =>
+          val shown = if Str.len(path) == 0 then "-" else path
+          Nx.wOutputsMap(s, r, n - 1, Nx.wKeyed(acc, name, Nx.cat(Nx.cat(name, "="), shown)))
+
+// QuerySubstitutablePathInfos: a count, then each path, deriver, references, downloadSize, narSize
+def Nx.wrSubstitutable(s: Str, p: I64, m: I64): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogLast(q) => Nx.wNum(s, q, Nx.WkU64) match
+    case Nx.WNumAt(n, r) => Nx.wSubstGo(s, r, n, Coll.Nil)
+    case Nx.WNumNo => "error"
+  case _ => "error"
+
+def Nx.wSubstGo(s: Str, p: I64, n: I64, acc: Coll.List[Str]): Str =
+  if n == 0 then Nx.cat("subst ", Nx.wJoin(acc))
+  else Nx.wStr(s, p) match
+    case Nx.WStrNo => "error"
+    case Nx.WStrAt(x, q) => Nx.wPath(x) match
+      case Coll.None => "error"
+      case Coll.Some(path) => Nx.wStr(s, q) match
+        case Nx.WStrNo => "error"
+        case Nx.WStrAt(d, r) => Nx.wOptPath(d) match
+          case Coll.None => "error"
+          case Coll.Some(_) => Nx.wPaths(s, r) match
+            case Nx.WListNo => "error"
+            case Nx.WListAt(_, e) =>
+              val f = Nx.wSkipNum(s, Nx.wSkipNum(s, Nx.WAt(e), Nx.WkU64), Nx.WkU64)
+              f match
+                case Nx.WAt(g) => Nx.wSubstGo(s, g, n - 1, Nx.wIns(acc, path))
+                case Nx.WNo => "error"
+
+// the wire values of buildResultStatusTable (common-protocol.cc): Built, Substituted, AlreadyValid and
+// ResolvesToAlreadyValid succeed, the rest up to NoSubstituters fail
+enum Nx.WStatus:
+  case Nx.WsSuccess
+  case Nx.WsFailure
+  case Nx.WsBad
+
+def Nx.wStatus(v: I64): Nx.WStatus =
+  if v <= 2 || v == 13 then Nx.WsSuccess else if v <= 14 then Nx.WsFailure else Nx.WsBad
+
+// BuildPathsWithResults: a count of KeyedBuildResult, one answer line each
+def Nx.wrBuild(s: Str, p: I64, m: I64): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogLast(q) => Nx.wNum(s, q, Nx.WkU64) match
+    case Nx.WNumAt(n, r) => Nx.wResults(s, r, m, n, Coll.Nil)
+    case Nx.WNumNo => "error"
+  case _ => "error"
+
+def Nx.wResults(s: Str, p: I64, m: I64, n: I64, acc: Coll.List[Str]): Str =
+  if n == 0 then Nx.wBuilt(Coll.rev(acc))
+  else Nx.wResult(s, p, m) match
+    case Nx.WStrAt(line, q) => Nx.wResults(s, q, m, n - 1, Coll.Cons(line, acc))
+    case Nx.WStrNo => "error"
+
+def Nx.wBuilt(lines: Coll.List[Str]): Str =
+  val b = Nx.sbNew()
+  Nx.sbAdd(b, "built")
+  Nx.wBuiltGo(b, lines)
+  Nx.sbGet(b)
+
+def Nx.wBuiltGo(b: Ptr, xs: Coll.List[Str]): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.sbAdd(b, "\n")
+    Nx.sbAdd(b, h)
+    Nx.wBuiltGo(b, t)
+
+// KeyedBuildResult: the derived path (parseLegacy from 1.30), then BuildResult: the status, the message (kept for a
+// failure only)
+def Nx.wResult(s: Str, p: I64, m: I64): Nx.WStr = Nx.wStr(s, p) match
+  case Nx.WStrNo => Nx.WStrNo
+  case Nx.WStrAt(x, q) => Nx.wDerived(x) match
+    case Coll.None => Nx.WStrNo
+    case Coll.Some(path) => Nx.wNum(s, q, Nx.WkU8) match
+      case Nx.WNumNo => Nx.WStrNo
+      case Nx.WNumAt(st, r) => Nx.wStr(s, r) match
+        case Nx.WStrNo => Nx.WStrNo
+        case Nx.WStrAt(msg, e) =>
+          val line = Nx.cat(Nx.cat(path, " status="), Nx.intStr(st))
+          Nx.wStatus(st) match
+            case Nx.WsBad => Nx.WStrNo
+            case Nx.WsSuccess => Nx.wResultRest(s, e, m, line)
+            case Nx.WsFailure => Nx.wResultRest(s, e, m, Nx.cat(Nx.cat(line, " msg="), msg))
+
+// timesBuilt, isNonDeterministic, startTime, stopTime (1.29); cpuUser, cpuSystem (1.37); builtOutputs (1.28)
+def Nx.wResultRest(s: Str, p: I64, m: I64, line: Str): Nx.WStr =
+  val a = Nx.wSkipNum(s, Nx.wSkipNum(s, Nx.WAt(p), Nx.WkU32), Nx.WkBool)
+  val t: Nx.WPos = if Nx.wHas(m, Nx.WfBuildTimes) then Nx.wSkipNum(s, Nx.wSkipNum(s, a, Nx.WkI64), Nx.WkI64) else Nx.WAt(p)
+  val c: Nx.WPos = if Nx.wHas(m, Nx.WfCpuTimes) then Nx.wMicros(s, Nx.wMicros(s, t)) else t
+  val o: Nx.WPos = if Nx.wHas(m, Nx.WfBuiltOutputs) then Nx.wDrvOutputs(s, c) else c
+  Nx.wNoStr(o, line)
+
+// Serialise<std::optional<std::chrono::microseconds>>: a tag, then for some an int64
+def Nx.wMicros(s: Str, r: Nx.WPos): Nx.WPos = r match
+  case Nx.WNo => Nx.WNo
+  case Nx.WAt(p) => Nx.wNum(s, p, Nx.WkU8) match
+    case Nx.WNumNo => Nx.WNo
+    case Nx.WNumAt(tag, q) =>
+      if tag == Nx.wOptNone() then Nx.WAt(q)
+      else if tag == Nx.wOptSome() then Nx.wSkipNum(s, Nx.WAt(q), Nx.WkI64)
+      else Nx.WNo
+
+// DrvOutputs: a count, then each DrvOutput and its Realisation as JSON
+def Nx.wDrvOutputs(s: Str, r: Nx.WPos): Nx.WPos = r match
+  case Nx.WNo => Nx.WNo
+  case Nx.WAt(p) => Nx.wNum(s, p, Nx.WkU64) match
+    case Nx.WNumNo => Nx.WNo
+    case Nx.WNumAt(n, q) => Nx.wDrvOutputsGo(s, q, n)
+
+def Nx.wDrvOutputsGo(s: Str, p: I64, n: I64): Nx.WPos =
+  if n == 0 then Nx.WAt(p)
+  else Nx.wStr(s, p) match
+    case Nx.WStrNo => Nx.WNo
+    case Nx.WStrAt(k, q) => Nx.wStr(s, q) match
+      case Nx.WStrNo => Nx.WNo
+      case Nx.WStrAt(v, e) => if Nx.wDrvOutput(k) && Nx.wRealisation(v) then Nx.wDrvOutputsGo(s, e, n - 1) else Nx.WNo
+
+// AddIndirectRoot: readInt, any value of an unsigned int
+def Nx.wrIndirect(s: Str, p: I64, m: I64): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogLast(q) => Nx.wNum(s, q, Nx.WkU32) match
+    case Nx.WNumAt(_, _) => "ok"
+    case Nx.WNumNo => "error"
+  case _ => "error"
+
+// NarFromPath: copyNAR parses one NAR (parseDump) and stops after it
+def Nx.wrNar(s: Str, p: I64, m: I64): Str = Nx.wLog(s, p, m) match
+  case Nx.WLogLast(q) => Nx.narCheck(Nx.drvAfter(s, q)) match
+    case Nx.NarOk(n, sha) => Nx.cat(Nx.cat("nar ", Nx.intStr(n)), Nx.cat(" ", sha))
+    case Nx.NarBad => "error"
+  case _ => "error"
+
+// AddMultipleToStore: the stderr after the upload
+def Nx.wrAddMultiple(s: Str, p: I64, m: I64): Str =
+  if !Nx.wHas(m, Nx.WfAddMultiple) then "ok"
+  else Nx.wLog(s, p, m) match
+    case Nx.WLogLast(_) => "ok"
+    case _ => "error"
+
+def Nx.wConverse(op: Nx.WireOp, s: Str, m: I64): Str = Nx.wGreet(s, m) match
+  case Nx.WGreetNo => "error"
+  case Nx.WGreetAt(ver, trust, p) => op match
+    case Nx.WoConnect =>
+      val b = Nx.sbNew()
+      Nx.sbAdd(b, "ok minor=")
+      Nx.sbAdd(b, Nx.intStr(m))
+      Nx.sbAdd(b, " version=")
+      Nx.sbAdd(b, ver)
+      Nx.sbAdd(b, " trusted=")
+      Nx.sbAdd(b, trust)
+      Nx.sbGet(b)
+    case Nx.WoPathInfo => Nx.wrPathInfo(s, p, m)
+    case Nx.WoValidPaths => Nx.wrPaths(s, p, m, "paths ")
+    case Nx.WoSubstitute => Nx.wrPaths(s, p, m, "paths ")
+    case Nx.WoMissing => Nx.wrMissing(s, p, m)
+    case Nx.WoOutputMap => Nx.wrOutputMap(s, p, m)
+    case Nx.WoSubstitutable => Nx.wrSubstitutable(s, p, m)
+    case Nx.WoBuild => Nx.wrBuild(s, p, m)
+    case Nx.WoIndirectRoot => Nx.wrIndirect(s, p, m)
+    case Nx.WoNar => Nx.wrNar(s, p, m)
+    case Nx.WoAddMultiple => Nx.wrAddMultiple(s, p, m)
+    case Nx.WoUnknown => "error"
+
+// the answer line of op against the daemon at sock: "error" for any reply the client refuses
+def Nx.wireAnswer(sock: Str, op: Nx.WireOp, args: Coll.List[Str]): Str =
+  val fd = Nx.netOpen(sock)
+  if fd < 0 then "error"
+  else
+    val b = Nx.sbNew()
+    Nx.wPut(b, Nx.wMagic1())
+    Nx.wPut(b, Nx.wMajor() * Nx.wMinorSpan() + Nx.wClientMinor())
+    if !Nx.netSend(fd, Nx.sbGet(b)) then "error"
+    else
+      val hello = Nx.netRead(fd, Nx.wHelloLen())
+      Nx.wHello(hello) match
+        case Coll.None => "error"
+        case Coll.Some(m) => Nx.wRequest(op, m, args) match
+          case Coll.None => "error"
+          case Coll.Some(req) =>
+            if !Nx.netSend(fd, req) then "error"
+            else
+              val rest = Nx.netDrain(fd)
+              if Str.len(rest) < 0 then "error" else Nx.wConverse(op, Nx.cat(hello, rest), m)
+
+def Nx.wArgs(i: I64, acc: Coll.List[Str]): Coll.List[Str] =
+  if i < 4 then acc else Nx.wArgs(i - 1, Coll.Cons(Args.at(i), acc))
+
+// `snx wire SOCKET OP ARG...`: exit 3 for an operation snx does not have
+def Nx.answerWire(): I64 =
+  if Args.count() < 4 then 2
+  else
+    val op = Nx.wireOp(Args.at(3))
+    op match
+      case Nx.WoUnknown => 3
+      case _ => Nx.wirePrint(Nx.wireAnswer(Args.at(2), op, Nx.wArgs(Args.count() - 1, Coll.Nil)))
+
+def Nx.wirePrint(line: Str): I64 =
+  Console.print(line)
+  Console.print("\n")
+  0

@@ -122,3 +122,10 @@ extern def Nx.atEnt [A: Type] (e: Ptr): A
 extern def Nx.atPut [A: Type] (t: Ptr, n: Str, x: A): Bool
 // every attr index freed: call when no set under construction is alive (nx/load.srs, after a file is compiled)
 extern def Nx.atFreeAll(): Unit
+// a Unix socket client (rt/snx_net.c, nx/wire.srs): a connected fd or -1; send all of s; up to n bytes (fewer only at
+// the end of the stream); every byte to the end (length -1 = a read error); an unsigned decimal
+extern def Nx.netOpen(path: Str): I64
+extern def Nx.netSend(fd: I64, s: Str): Bool
+extern def Nx.netRead(fd: I64, n: I64): Str
+extern def Nx.netDrain(fd: I64): Str
+extern def Nx.u64Str(v: I64): Str

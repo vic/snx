@@ -1,8 +1,8 @@
 // snx: the command line. `snx parse FILE` answers as nix-conformance SPEC.md "parse": `ok TREE` or `error LINE:COL`,
 // with FILE read as /case/input.nix and $HOME as /home/case. `snx check FILE`: exit 0 iff FILE parses and has no
 // undefined variable. `snx eval FILE [FLAG...]`: the value as `nix-instantiate --eval --strict FILE` prints it, exit 1
-// on an error (its message on stderr). FILE of check and eval is an absolute path. Exit 3 = an operation or flag snx
-// does not have yet.
+// on an error (its message on stderr). FILE of check and eval is an absolute path. `snx wire SOCKET OP ARG...`: SPEC.md
+// "wire", a daemon client (nx/wire.srs). Exit 3 = an operation or flag snx does not have yet.
 
 enum Nx.Op:
   case Nx.OpParse
@@ -274,6 +274,7 @@ def main(): I64 =
   if Args.count() < 3 then
     Console.eprint("usage: snx parse|nar|drv|check|eval FILE\n")
     2
+  else if Str.eq(Args.at(1), "wire") then Nx.answerWire()
   else
     val src = Files.read(Args.at(2))
     if Str.len(src) < 0 then

@@ -12,5 +12,7 @@ case $op in
   eval) exec timeout 5 "$snx" eval "$(realpath -s "$file")" "$@" ;;
   eval-xml) exec timeout 5 "$snx" eval-xml "$(realpath -s "$file")" "$@" ;;
   flake) exec timeout 5 "$snx" flake "$(realpath -s "$file")" ;;
+  # wire SOCKET OP ARG...: FILE is the daemon's socket
+  wire) exec timeout 5 "$snx" wire "$file" "$@" ;;
   *) exit 3 ;;
 esac
