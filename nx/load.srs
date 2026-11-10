@@ -1,19 +1,437 @@
-// a file loaded for import: lexed and parsed in an arena of its own, freed before Nx.loadFile returns, so its tokens
-// and syntax tree die with it; the compiler reads the tree and builds the code in the importer's region (outer)
+// a file loaded for import: lexed, parsed and compiled in an arena of its own, freed before Nx.loadFile returns. The
+// tokens and the syntax tree die with it; the compiled code survives as words (rt/snx_rt.c word buffer, written in
+// that arena) and is rebuilt in the caller's region. Strings are copied as (bytes, length): their bytes are never in
+// an arena (source text, malloc'd, static). Base env cells, symbol ids and the symbol arrays of sets (words, keys
+// of the position records) are run-wide and copied as they are; the records get the file's new file and source cells.
 
 enum Nx.LoadResult:
   case Nx.Loaded(c: Nx.Code)
   case Nx.LoadUndefined(p: I64, name: Str)
   case Nx.LoadBad
 
-def Nx.loadFile {outer: Region} (src: Str, dir: Str, home: Str, file: Str): Nx.LoadResult =
-  handle inner = Srs.Arena()
-  val r = Nx.loadOf{outer}(Nx.parse(src, dir, home), file, src)
-  inner.free()
+// the words: Nx.wbOk then the code, Nx.wbUndef then the offset and the name, or Nx.wbBad
+def Nx.wbOk(): I64 = 0
+def Nx.wbUndef(): I64 = 1
+def Nx.wbBad(): I64 = 2
+
+def Nx.loadFile(src: Str, dir: Str, home: Str, file: Str): Nx.LoadResult =
+  val b = Nx.loadWords(src, dir, home, file)
+  Nx.posCells(Nx.strCell(file), Nx.strCell(src))
+  val r = Nx.loadRead(b, Nx.wbGet(b))
+  Nx.wbFree(b)
   r
 
-def Nx.loadOf {r: Region} (pr: Nx.ParseResult, file: Str, src: Str): Nx.LoadResult = pr match
-  case Nx.Parsed(e) => Nx.compile(e, file, src) match
-    case Nx.Compiled(c) => Nx.Loaded(c)
-    case Nx.Undefined(p, name) => Nx.LoadUndefined(p, name)
-  case _ => Nx.LoadBad
+def Nx.loadRead(b: Ptr, st: I64): Nx.LoadResult =
+  if st == Nx.wbOk() then Nx.Loaded(Nx.desC(b))
+  else if st == Nx.wbUndef() then Nx.loadUndef(b)
+  else Nx.LoadBad
+
+def Nx.loadUndef(b: Ptr): Nx.LoadResult =
+  val p = Nx.wbGet(b)
+  Nx.LoadUndefined(p, Nx.wbGetS(b))
+
+def Nx.loadWords(src: Str, dir: Str, home: Str, file: Str): Ptr =
+  handle r = Srs.Arena()
+  val b = Nx.wbNew()
+  Nx.parse(src, dir, home) match
+    case Nx.Parsed(e) => Nx.compile(e, file, src) match
+      case Nx.Compiled(c) =>
+        Nx.wbPut(b, Nx.wbOk())
+        Nx.serC(b, c)
+      case Nx.Undefined(p, name) =>
+        Nx.wbPut(b, Nx.wbUndef())
+        Nx.wbPut(b, p)
+        Nx.wbPutS(b, name)
+    case _ => Nx.wbPut(b, Nx.wbBad())
+  b
+
+def Nx.wbBool(b: Ptr, x: Bool): Unit = Nx.wbPut(b, if x then 1 else 0)
+def Nx.rdBool(b: Ptr): Bool = Nx.wbGet(b) == 1
+
+// ---- out: one tag word per node, in Nx.Code's case order, then its fields in order --------------------------------
+
+def Nx.serC(b: Ptr, c: Nx.Code): Unit = c match
+  case Nx.CConst(v, _) =>
+    Nx.wbPut(b, 0)
+    Nx.serConst(b, v)
+  case Nx.CLocal(up, i) =>
+    Nx.wbPut(b, 1)
+    Nx.wbPut(b, up)
+    Nx.wbPut(b, i)
+  case Nx.CWithVar(sym, ups, name) =>
+    Nx.wbPut(b, 2)
+    Nx.wbPut(b, sym)
+    Nx.wbPut(b, Coll.length(ups))
+    Nx.serInts(b, ups)
+    Nx.wbPutS(b, name)
+  case Nx.CCell(x) =>
+    Nx.wbPut(b, 3)
+    Nx.wbPutP(b, x)
+  case Nx.CCurPos(file, line, col) =>
+    Nx.wbPut(b, 4)
+    Nx.wbPutS(b, file)
+    Nx.wbPut(b, line)
+    Nx.wbPut(b, col)
+  case Nx.CStr(s) =>
+    Nx.wbPut(b, 5)
+    Nx.wbPutS(b, s)
+  case Nx.CPath(s) =>
+    Nx.wbPut(b, 6)
+    Nx.wbPutS(b, s)
+  case Nx.CConcat(fs, n, parts) =>
+    Nx.wbPut(b, 7)
+    Nx.wbBool(b, fs)
+    Nx.wbPut(b, n)
+    Nx.serArr(b, parts, 0, n)
+  case Nx.CList(n, xs) =>
+    Nx.wbPut(b, 8)
+    Nx.wbPut(b, n)
+    Nx.serArr(b, xs, 0, n)
+  case Nx.CAttrs(n, syms, vals, dyn) =>
+    Nx.wbPut(b, 9)
+    Nx.serSet(b, n, syms, vals, dyn)
+  case Nx.CRecAttrs(n, syms, vals, dyn) =>
+    Nx.wbPut(b, 10)
+    Nx.serSet(b, n, syms, vals, dyn)
+  case Nx.CLet(n, vals, body) =>
+    Nx.wbPut(b, 11)
+    Nx.wbPut(b, n)
+    Nx.serArr(b, vals, 0, n)
+    Nx.serC(b, body)
+  case Nx.CWith(a, body) =>
+    Nx.wbPut(b, 12)
+    Nx.serC(b, a)
+    Nx.serC(b, body)
+  case Nx.CLam(arg, nf, fms, ell, ns, body, name) =>
+    Nx.wbPut(b, 13)
+    Nx.wbBool(b, arg)
+    Nx.wbPut(b, nf)
+    Nx.wbPutP(b, fms)
+    Nx.serFormals(b, fms, 0, nf)
+    Nx.wbBool(b, ell)
+    Nx.wbPut(b, ns)
+    Nx.serC(b, body)
+    Nx.wbPutS(b, name)
+  case Nx.CCall(f, n, args) =>
+    Nx.wbPut(b, 14)
+    Nx.serC(b, f)
+    Nx.wbPut(b, n)
+    Nx.serArr(b, args, 0, n)
+  case Nx.CPrimCall(id, n, args) =>
+    Nx.wbPut(b, 15)
+    Nx.wbPut(b, id)
+    Nx.wbPut(b, n)
+    Nx.serArr(b, args, 0, n)
+  case Nx.CNum(op, x, y, early) =>
+    Nx.wbPut(b, 16)
+    Nx.wbPut(b, Nx.numOpTag(op))
+    Nx.serC(b, x)
+    Nx.serC(b, y)
+    Nx.wbBool(b, early)
+  case Nx.CSelect(e, path, d) =>
+    Nx.wbPut(b, 17)
+    Nx.serC(b, e)
+    Nx.serKeys(b, path)
+    Nx.serOpt(b, d)
+  case Nx.CHas(e, path) =>
+    Nx.wbPut(b, 18)
+    Nx.serC(b, e)
+    Nx.serKeys(b, path)
+  case Nx.CIf(x, t, e) =>
+    Nx.wbPut(b, 19)
+    Nx.serC(b, x)
+    Nx.serC(b, t)
+    Nx.serC(b, e)
+  case Nx.CAssert(x, body, src, p) =>
+    Nx.wbPut(b, 20)
+    Nx.serC(b, x)
+    Nx.serC(b, body)
+    Nx.wbPutS(b, src)
+    Nx.wbPut(b, p)
+  case Nx.CNot(a) =>
+    Nx.wbPut(b, 21)
+    Nx.serC(b, a)
+  case Nx.CAnd(x, y) =>
+    Nx.wbPut(b, 22)
+    Nx.serC(b, x)
+    Nx.serC(b, y)
+  case Nx.COr(x, y) =>
+    Nx.wbPut(b, 23)
+    Nx.serC(b, x)
+    Nx.serC(b, y)
+  case Nx.CImpl(x, y) =>
+    Nx.wbPut(b, 24)
+    Nx.serC(b, x)
+    Nx.serC(b, y)
+  case Nx.CBin(op, x, y) =>
+    Nx.wbPut(b, 25)
+    Nx.wbPut(b, Nx.binOpTag(op))
+    Nx.serC(b, x)
+    Nx.serC(b, y)
+  case Nx.CLamArg(body, name) =>
+    Nx.wbPut(b, 26)
+    Nx.serC(b, body)
+    Nx.wbPutS(b, name)
+  case Nx.CAppSlots(n) =>
+    Nx.wbPut(b, 27)
+    Nx.wbPut(b, n)
+  case Nx.CApp1(f) =>
+    Nx.wbPut(b, 28)
+    Nx.wbPutP(b, f)
+
+// a literal's value (Nx.konst: numbers, strings without context, paths, the undefined-variable error)
+def Nx.serConst(b: Ptr, v: Nx.Val): Unit = v match
+  case Nx.VInt(n) =>
+    Nx.wbPut(b, 0)
+    Nx.wbPut(b, n)
+  case Nx.VFloat(x) =>
+    Nx.wbPut(b, 1)
+    Nx.wbPut(b, x)
+  case Nx.VStr(s, _) =>
+    Nx.wbPut(b, 2)
+    Nx.wbPutS(b, s)
+  case Nx.VPath(s) =>
+    Nx.wbPut(b, 3)
+    Nx.wbPutS(b, s)
+  case Nx.VErr(_, msg) =>
+    Nx.wbPut(b, 4)
+    Nx.wbPutS(b, msg)
+  case Nx.VBool(x) =>
+    Nx.wbPut(b, 5)
+    Nx.wbBool(b, x)
+  case _ => Nx.wbPut(b, 6)
+
+def Nx.serInts(b: Ptr, xs: Coll.List[I64]): Unit = xs match
+  case Coll.Nil => ()
+  case Coll.Cons(h, t) =>
+    Nx.wbPut(b, h)
+    Nx.serInts(b, t)
+
+def Nx.serArr(b: Ptr, a: Ptr, i: I64, n: I64): Unit =
+  if i < n then
+    Nx.serC(b, Nx.aget[Nx.Code](a, i))
+    Nx.serArr(b, a, i + 1, n)
+  else ()
+
+
+def Nx.serSet(b: Ptr, n: I64, syms: Ptr, vals: Ptr, dyn: Coll.List[Nx.CDyn]): Unit =
+  Nx.wbPut(b, n)
+  Nx.wbPutP(b, syms)
+  Nx.serArr(b, vals, 0, n)
+  Nx.wbPut(b, Coll.length(dyn))
+  Nx.serDyn(b, dyn)
+
+def Nx.serDyn(b: Ptr, ds: Coll.List[Nx.CDyn]): Unit = ds match
+  case Coll.Nil => ()
+  case Coll.Cons(d, t) => d match
+    case Nx.CDynBind(k, v) =>
+      Nx.serC(b, k)
+      Nx.serC(b, v)
+      Nx.serDyn(b, t)
+
+def Nx.serFormals(b: Ptr, fms: Ptr, i: I64, n: I64): Unit =
+  if i < n then Nx.aget[Nx.CFormal](fms, i) match
+    case Nx.CFm(sym, d) =>
+      Nx.wbPut(b, sym)
+      Nx.serOpt(b, d)
+      Nx.serFormals(b, fms, i + 1, n)
+  else ()
+
+def Nx.serOpt(b: Ptr, d: Coll.Option[Nx.Code]): Unit = d match
+  case Coll.None => Nx.wbPut(b, 0)
+  case Coll.Some(c) =>
+    Nx.wbPut(b, 1)
+    Nx.serC(b, c)
+
+def Nx.serKeys(b: Ptr, ks: Coll.List[Nx.CKey]): Unit =
+  Nx.wbPut(b, Coll.length(ks))
+  Nx.serKeyList(b, ks)
+
+def Nx.serKeyList(b: Ptr, ks: Coll.List[Nx.CKey]): Unit = ks match
+  case Coll.Nil => ()
+  case Coll.Cons(k, t) =>
+    k match
+      case Nx.KSym(sym) =>
+        Nx.wbPut(b, 0)
+        Nx.wbPut(b, sym)
+      case Nx.KDyn(e) =>
+        Nx.wbPut(b, 1)
+        Nx.serC(b, e)
+    Nx.serKeyList(b, t)
+
+def Nx.numOpTag(op: Nx.NumOp): I64 = op match
+  case Nx.NAdd => 0
+  case Nx.NSub => 1
+  case Nx.NMul => 2
+  case Nx.NDiv => 3
+  case Nx.NLess => 4
+  case Nx.NAnd => 5
+  case Nx.NOr => 6
+  case Nx.NXor => 7
+
+def Nx.numOpOfTag(t: I64): Nx.NumOp =
+  if t == 0 then Nx.NAdd else if t == 1 then Nx.NSub else if t == 2 then Nx.NMul else if t == 3 then Nx.NDiv
+  else if t == 4 then Nx.NLess else if t == 5 then Nx.NAnd else if t == 6 then Nx.NOr else Nx.NXor
+
+def Nx.binOpTag(op: Nx.BinOp): I64 = op match
+  case Nx.OEq => 0
+  case Nx.ONe => 1
+  case Nx.OUpdate => 2
+  case Nx.OListConcat => 3
+
+def Nx.binOpOfTag(t: I64): Nx.BinOp = if t == 0 then Nx.OEq else if t == 1 then Nx.ONe else if t == 2 then Nx.OUpdate else Nx.OListConcat
+
+// ---- back in: the same order; every field read into a val first (C leaves call arguments in no order) ----------
+
+def Nx.desC(b: Ptr): Nx.Code =
+  val t = Nx.wbGet(b)
+  if t == 0 then Nx.konst(Nx.desConst(b))
+  else if t == 1 then
+    val up = Nx.wbGet(b)
+    val i = Nx.wbGet(b)
+    Nx.CLocal(up, i)
+  else if t == 2 then
+    val sym = Nx.wbGet(b)
+    val n = Nx.wbGet(b)
+    val ups = Nx.desInts(b, n, Coll.Nil)
+    Nx.CWithVar(sym, ups, Nx.wbGetS(b))
+  else if t == 3 then Nx.CCell(Nx.wbGetP(b))
+  else if t == 4 then
+    val file = Nx.wbGetS(b)
+    val line = Nx.wbGet(b)
+    val col = Nx.wbGet(b)
+    Nx.CCurPos(file, line, col)
+  else if t == 5 then Nx.CStr(Nx.wbGetS(b))
+  else if t == 6 then Nx.CPath(Nx.wbGetS(b))
+  else if t == 7 then
+    val fs = Nx.rdBool(b)
+    val n = Nx.wbGet(b)
+    Nx.CConcat(fs, n, Nx.desArr(b, Nx.arrNew(n), 0, n))
+  else if t == 8 then
+    val n = Nx.wbGet(b)
+    Nx.CList(n, Nx.desArr(b, Nx.arrNew(n), 0, n))
+  else if t == 9 || t == 10 then Nx.desSet(b, t == 10)
+  else if t == 11 then
+    val n = Nx.wbGet(b)
+    val vals = Nx.desArr(b, Nx.arrNew(n), 0, n)
+    Nx.CLet(n, vals, Nx.desC(b))
+  else if t == 12 then
+    val a = Nx.desC(b)
+    Nx.CWith(a, Nx.desC(b))
+  else if t == 13 then Nx.desLam(b)
+  else if t == 14 then
+    val f = Nx.desC(b)
+    val n = Nx.wbGet(b)
+    Nx.CCall(f, n, Nx.desArr(b, Nx.arrNew(n), 0, n))
+  else if t == 15 then
+    val id = Nx.wbGet(b)
+    val n = Nx.wbGet(b)
+    Nx.CPrimCall(id, n, Nx.desArr(b, Nx.arrNew(n), 0, n))
+  else if t == 16 then
+    val op = Nx.numOpOfTag(Nx.wbGet(b))
+    val x = Nx.desC(b)
+    val y = Nx.desC(b)
+    Nx.CNum(op, x, y, Nx.rdBool(b))
+  else if t == 17 then
+    val e = Nx.desC(b)
+    val path = Nx.desKeys(b)
+    Nx.CSelect(e, path, Nx.desOpt(b))
+  else if t == 18 then
+    val e = Nx.desC(b)
+    Nx.CHas(e, Nx.desKeys(b))
+  else if t == 19 then
+    val x = Nx.desC(b)
+    val y = Nx.desC(b)
+    Nx.CIf(x, y, Nx.desC(b))
+  else if t == 20 then
+    val x = Nx.desC(b)
+    val body = Nx.desC(b)
+    val src = Nx.wbGetS(b)
+    Nx.CAssert(x, body, src, Nx.wbGet(b))
+  else if t == 21 then Nx.CNot(Nx.desC(b))
+  else if t == 22 then
+    val x = Nx.desC(b)
+    Nx.CAnd(x, Nx.desC(b))
+  else if t == 23 then
+    val x = Nx.desC(b)
+    Nx.COr(x, Nx.desC(b))
+  else if t == 24 then
+    val x = Nx.desC(b)
+    Nx.CImpl(x, Nx.desC(b))
+  else if t == 25 then
+    val op = Nx.binOpOfTag(Nx.wbGet(b))
+    val x = Nx.desC(b)
+    Nx.CBin(op, x, Nx.desC(b))
+  else if t == 26 then
+    val body = Nx.desC(b)
+    Nx.CLamArg(body, Nx.wbGetS(b))
+  else if t == 27 then Nx.CAppSlots(Nx.wbGet(b))
+  else Nx.CApp1(Nx.wbGetP(b))
+
+def Nx.desConst(b: Ptr): Nx.Val =
+  val t = Nx.wbGet(b)
+  if t == 0 then Nx.VInt(Nx.wbGet(b))
+  else if t == 1 then Nx.VFloat(Nx.wbGet(b))
+  else if t == 2 then Nx.VStr(Nx.wbGetS(b), Coll.Nil)
+  else if t == 3 then Nx.VPath(Nx.wbGetS(b))
+  else if t == 4 then Nx.VErr(Nx.KOther, Nx.wbGetS(b))
+  else if t == 5 then Nx.bool(Nx.rdBool(b))
+  else Nx.VNull
+
+// n ints, in the order they were put
+def Nx.desInts(b: Ptr, n: I64, acc: Coll.List[I64]): Coll.List[I64] =
+  if n == 0 then Coll.rev(acc)
+  else
+    val x = Nx.wbGet(b)
+    Nx.desInts(b, n - 1, Coll.Cons(x, acc))
+
+def Nx.desArr(b: Ptr, a: Ptr, i: I64, n: I64): Ptr =
+  if i < n then
+    Nx.aset[Nx.Code](a, i, Nx.desC(b))
+    Nx.desArr(b, a, i + 1, n)
+  else a
+
+
+def Nx.desSet(b: Ptr, isRec: Bool): Nx.Code =
+  val n = Nx.wbGet(b)
+  val syms = Nx.wbGetP(b)
+  Nx.posMove(syms, syms)
+  val vals = Nx.desArr(b, Nx.arrNew(n), 0, n)
+  val m = Nx.wbGet(b)
+  val dyn = Nx.desDyn(b, m, Coll.Nil)
+  if isRec then Nx.CRecAttrs(n, syms, vals, dyn) else Nx.CAttrs(n, syms, vals, dyn)
+
+def Nx.desDyn(b: Ptr, n: I64, acc: Coll.List[Nx.CDyn]): Coll.List[Nx.CDyn] =
+  if n == 0 then Coll.rev(acc)
+  else
+    val k = Nx.desC(b)
+    val v = Nx.desC(b)
+    Nx.desDyn(b, n - 1, Coll.Cons(Nx.CDynBind(k, v), acc))
+
+def Nx.desLam(b: Ptr): Nx.Code =
+  val arg = Nx.rdBool(b)
+  val nf = Nx.wbGet(b)
+  val old = Nx.wbGetP(b)
+  val fms = Nx.desFormals(b, Nx.arrNew(nf), 0, nf)
+  Nx.posMove(old, fms)
+  val ell = Nx.rdBool(b)
+  val ns = Nx.wbGet(b)
+  val body = Nx.desC(b)
+  Nx.CLam(arg, nf, fms, ell, ns, body, Nx.wbGetS(b))
+
+def Nx.desFormals(b: Ptr, a: Ptr, i: I64, n: I64): Ptr =
+  if i < n then
+    val sym = Nx.wbGet(b)
+    Nx.aset[Nx.CFormal](a, i, Nx.CFm(sym, Nx.desOpt(b)))
+    Nx.desFormals(b, a, i + 1, n)
+  else a
+
+def Nx.desOpt(b: Ptr): Coll.Option[Nx.Code] = if Nx.wbGet(b) == 0 then Coll.None else Coll.Some(Nx.desC(b))
+
+def Nx.desKeys(b: Ptr): Coll.List[Nx.CKey] = Nx.desKeyList(b, Nx.wbGet(b), Coll.Nil)
+
+def Nx.desKeyList(b: Ptr, n: I64, acc: Coll.List[Nx.CKey]): Coll.List[Nx.CKey] =
+  if n == 0 then Coll.rev(acc)
+  else
+    val k: Nx.CKey = if Nx.wbGet(b) == 0 then Nx.KSym(Nx.wbGet(b)) else Nx.KDyn(Nx.desC(b))
+    Nx.desKeyList(b, n - 1, Coll.Cons(k, acc))
