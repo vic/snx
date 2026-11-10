@@ -122,7 +122,6 @@ def Nx.lxTop(st: Coll.List[Nx.LxState]): Nx.LxState = st match
 // one lexeme from i in the state on top of st, then the rest: one self tail call (a C loop), nothing allocated but
 // tokens and stack cells. lb = begin of the last lexeme, pb = the one before it; a lexeme from i makes them (i, lb).
 def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Ptr, lb: I64, pb: I64): Ptr =
-  val c = Str.at(s, i)
   Nx.lxTop(st) match
     case Nx.LxDef =>
       // the whitespace and comments from i end at j (rt/snx_rt.c, one call for the whole run); then the lexeme at j.
@@ -132,8 +131,9 @@ def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Ptr, lb: I64
       if j >= n then Nx.lxEnd(out, n)
       else
         val k = Nx.lxScan(s, j)
-        val r = Nx.lxRuleOf(k % 16)
-        val e = k / 16
+        val ku = U64.ofI64(k)
+        val e = I64.ofU64(ku >> 4)
+        val r = Nx.lxRuleOf(I64.ofU64(ku & U64.ofI64(15)))
         val t = Str.slice(s, j, e)
         r match
           case Nx.LxAny =>
@@ -163,6 +163,7 @@ def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Ptr, lb: I64
           // Nx.lxSkip left none: kept for a total match
           case Nx.LxSkip => Nx.lxGo(s, n, e, st, out, j, lb)
     case Nx.LxStr =>
+      val c = Str.at(s, i)
       if c == '"' then Nx.lxGo(s, n, i + 1, Nx.lxPop(st), Nx.tvPush(out, Nx.TStrClose(i)), i, lb)
       else if c == '$' && Str.at(s, i + 1) == '{' then Nx.lxGo(s, n, i + 2, Coll.Cons(Nx.LxDef, st), Nx.tvPush(out, Nx.TDollarCurly(i)), i, lb)
       else
@@ -174,6 +175,7 @@ def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Ptr, lb: I64
         else if Nx.lxRawNul(s, i, e) then Nx.lxBad(out, i)
         else Nx.lxGo(s, n, e, st, Nx.tvPush(out, Nx.TStrPart(Nx.lxUnescape(s, i, e), i)), i, lb)
     case Nx.LxInd =>
+      val c = Str.at(s, i)
       val d = Str.at(s, i + 2)
       val e = Nx.lxIndRun(s, i)
       // at '': ''$ is $, ''' is '', ''\{ANY} is the unescaped byte, else '' closes
@@ -189,12 +191,14 @@ def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Ptr, lb: I64
       else if c == '$' || c == '\'' then Nx.lxGo(s, n, i + 1, st, Nx.tvPush(out, Nx.TStrPart(Nx.byte(c), i)), i, lb)
       else Nx.lxEnd(out, n)
     case Nx.LxPath =>
+      val c = Str.at(s, i)
       val e = Nx.lxPathPieceEnd(s, i)
       if c == '$' && Str.at(s, i + 1) == '{' then Nx.lxGo(s, n, i + 2, Coll.Cons(Nx.LxDef, Coll.Cons(Nx.LxPath, Nx.lxPop(st))), Nx.tvPush(out, Nx.TDollarCurly(i)), i, lb)
       else if e > i then Nx.lxGo(s, n, e, Coll.Cons(Nx.lxPathState(s, e), Nx.lxPop(st)), Nx.tvPush(out, Nx.TPathPart(Str.slice(s, i, e), i)), i, lb)
       else if i >= n then Nx.lxEnd(Nx.tvPush(out, Nx.TPathClose(pb)), lb)
       else Nx.lxGo(s, n, i, Nx.lxPop(st), Nx.tvPush(out, Nx.TPathClose(lb)), lb, pb)
     case Nx.LxPathSlash =>
+      val c = Str.at(s, i)
       val e = Nx.lxPathPieceEnd(s, i)
       if c == '$' && Str.at(s, i + 1) == '{' then Nx.lxGo(s, n, i + 2, Coll.Cons(Nx.LxDef, Coll.Cons(Nx.LxPath, Nx.lxPop(st))), Nx.tvPush(out, Nx.TDollarCurly(i)), i, lb)
       else if e > i then Nx.lxGo(s, n, e, Coll.Cons(Nx.lxPathState(s, e), Nx.lxPop(st)), Nx.tvPush(out, Nx.TPathPart(Str.slice(s, i, e), i)), i, lb)
