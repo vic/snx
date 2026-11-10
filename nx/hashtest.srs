@@ -11,6 +11,7 @@ def Nx.htNum(s: Str): I64 = Nx.intValue(s)
 def main(): I64 =
   handle c = Srs.Console()
   handle a = Srs.Args()
+  handle r = Srs.Arena()
   handle f = Srs.Files()
   val src = Files.read(Args.at(3))
   if Str.len(src) < 0 then
