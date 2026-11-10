@@ -1,0 +1,373 @@
+// snx tree printer (SPEC.md "parse"): Nx.Expr -> the S-expression, no trailing newline. The oracle is
+// nix-conformance/oracle/parse-oracle.cc; its three normalisation rules are done here while printing.
+
+extern def Nx.treeFloatNeg(bits: I64): I64
+
+// a literal after the negation rule (rule 3)
+enum Nx.Lit:
+  case Nx.LInt(v: I64)
+  case Nx.LFlt(bits: I64)
+  case Nx.NoLit
+
+// a name of a sortable element (rule 1)
+trait Nx.Named [A: Type]:
+  def nameOf(x: A): Str
+
+given Nx.Named[Nx.Binding]:
+  def nameOf(x: Nx.Binding): Str = x match
+    case Nx.Bind(n, _) => n
+    case Nx.BInherit(n) => n
+    case Nx.BInheritFrom(n, _) => n
+
+given Nx.Named[Nx.Formal]:
+  def nameOf(x: Nx.Formal): Str = x match
+    case Nx.Fm(n, _) => n
+
+// ---- strings -------------------------------------------------------------------------------------------------
+
+// a < b as bytes
+def Nx.strLt(a: Str, b: Str, i: I64): Bool =
+  if i >= Str.len(a) then i < Str.len(b)
+  else if i >= Str.len(b) then false
+  else
+    val x = Str.at(a, i)
+    val y = Str.at(b, i)
+    if x < y then true else if x > y then false else Nx.strLt(a, b, i + 1)
+
+def Nx.hexDigit(d: I64): I64 = if d < 10 then 48 + d else 87 + d
+
+def Nx.quoteFrom(s: Str, i: I64): Unit =
+  if i < Str.len(s) then
+    val c = Str.at(s, i)
+    if c == 34 || c == 92 then
+      Console.printChar(92)
+      Console.printChar(c)
+    else if c < 32 || c > 126 then
+      Console.printChar(92)
+      Console.printChar(120)
+      Console.printChar(Nx.hexDigit(c / 16))
+      Console.printChar(Nx.hexDigit(c - c / 16 * 16))
+    else Console.printChar(c)
+    Nx.quoteFrom(s, i + 1)
+  else Console.print("")
+
+def Nx.quote(s: Str): Unit =
+  Console.printChar(34)
+  Nx.quoteFrom(s, 0)
+  Console.printChar(34)
+
+// ---- merge sort (stable, tail-recursive merge with an accumulator) ---------------------------------------------
+
+def Nx.take [A: Type] (xs: Coll.List[A], n: I64, acc: Coll.List[A]): Coll.List[A] =
+  if n <= 0 then Coll.rev(acc)
+  else xs match
+    case Coll.Nil => Coll.rev(acc)
+    case Coll.Cons(h, t) => Nx.take(t, n - 1, Coll.Cons(h, acc))
+
+def Nx.drop [A: Type] (xs: Coll.List[A], n: I64): Coll.List[A] =
+  if n <= 0 then xs
+  else xs match
+    case Coll.Nil => xs
+    case Coll.Cons(_, t) => Nx.drop(t, n - 1)
+
+// acc holds the merged prefix reversed
+def Nx.merge [A: Type] {k: Nx.Named[A]} (a: Coll.List[A], b: Coll.List[A], acc: Coll.List[A]): Coll.List[A] = a match
+  case Coll.Nil => Coll.revOnto(acc, b)
+  case Coll.Cons(x, xt) => b match
+    case Coll.Nil => Coll.revOnto(acc, a)
+    case Coll.Cons(y, yt) =>
+      if Nx.strLt(k.nameOf(y), k.nameOf(x), 0) then Nx.merge(a, yt, Coll.Cons(y, acc))
+      else Nx.merge(xt, b, Coll.Cons(x, acc))
+
+def Nx.sortN [A: Type] {k: Nx.Named[A]} (xs: Coll.List[A], n: I64): Coll.List[A] =
+  if n < 2 then xs
+  else
+    val h = n / 2
+    Nx.merge(Nx.sortN(Nx.take(xs, h, Coll.Nil), h), Nx.sortN(Nx.drop(xs, h), n - h), Coll.Nil)
+
+def Nx.sort [A: Type] {k: Nx.Named[A]} (xs: Coll.List[A]): Coll.List[A] = Nx.sortN(xs, Coll.length(xs))
+
+// ---- negation (rule 3) -----------------------------------------------------------------------------------------
+
+def Nx.isSub(f: Nx.Expr): Bool = f match
+  case Nx.EVar(_, n) => Str.eq(n, "__sub")
+  case _ => false
+
+def Nx.isZero(l: Nx.Lit): Bool = l match
+  case Nx.LInt(v) => v == 0
+  case _ => false
+
+def Nx.isLit(l: Nx.Lit): Bool = l match
+  case Nx.NoLit => false
+  case _ => true
+
+def Nx.negate(l: Nx.Lit): Nx.Lit = l match
+  case Nx.LInt(v) => Nx.LInt(0 - v)
+  case Nx.LFlt(b) => Nx.LFlt(Nx.treeFloatNeg(b))
+  case Nx.NoLit => Nx.NoLit
+
+// e as a literal, when it prints as one: a literal, or __sub 0 applied to exactly one such, from the inside out
+def Nx.litOf(e: Nx.Expr): Nx.Lit = e match
+  case Nx.EInt(_, v) => Nx.LInt(v)
+  case Nx.EFloat(_, b) => Nx.LFlt(b)
+  case Nx.ECall(_, f, args) => if Nx.isSub(f) then Nx.litOfSub(args) else Nx.NoLit
+  case _ => Nx.NoLit
+
+def Nx.litOfSub(args: Coll.List[Nx.Expr]): Nx.Lit = args match
+  case Coll.Cons(a0, t) => if Nx.isZero(Nx.litOf(a0)) then Nx.litOfSub2(t) else Nx.NoLit
+  case Coll.Nil => Nx.NoLit
+
+def Nx.litOfSub2(t: Coll.List[Nx.Expr]): Nx.Lit = t match
+  case Coll.Cons(a1, rest) => rest match
+    case Coll.Nil => Nx.negate(Nx.litOf(a1))
+    case Coll.Cons(_, _) => Nx.NoLit
+  case Coll.Nil => Nx.NoLit
+
+// ---- printing --------------------------------------------------------------------------------------------------
+
+def Nx.printLit(l: Nx.Lit): Unit = l match
+  case Nx.LInt(v) =>
+    Console.print("(int ")
+    Console.printI64(v)
+    Console.print(")")
+  case Nx.LFlt(b) =>
+    Console.print("(float ")
+    Console.print(Nx.hex64(b))
+    Console.print(")")
+  case Nx.NoLit => Console.print("")
+
+def Nx.printArgs(xs: Coll.List[Nx.Expr]): Unit = xs match
+  case Coll.Nil => Console.print("")
+  case Coll.Cons(h, t) =>
+    Console.print(" ")
+    Nx.printTree(h)
+    Nx.printArgs(t)
+
+def Nx.printPlainCall(f: Nx.Expr, args: Coll.List[Nx.Expr]): Unit =
+  Console.print("(call ")
+  Nx.printTree(f)
+  Nx.printArgs(args)
+  Console.print(")")
+
+// the literal head of a call whose first two arguments are 0 and a literal; alone when nothing follows
+def Nx.printNegCall(l: Nx.Lit, rest: Coll.List[Nx.Expr]): Unit = rest match
+  case Coll.Nil => Nx.printLit(l)
+  case Coll.Cons(_, _) =>
+    Console.print("(call ")
+    Nx.printLit(l)
+    Nx.printArgs(rest)
+    Console.print(")")
+
+def Nx.printCall(f: Nx.Expr, args: Coll.List[Nx.Expr]): Unit =
+  if Nx.isSub(f) then Nx.printSubCall(f, args) else Nx.printPlainCall(f, args)
+
+def Nx.printSubCall(f: Nx.Expr, args: Coll.List[Nx.Expr]): Unit = args match
+  case Coll.Nil => Nx.printPlainCall(f, args)
+  case Coll.Cons(a0, t) => if Nx.isZero(Nx.litOf(a0)) then Nx.printSubCall2(f, args, t) else Nx.printPlainCall(f, args)
+
+def Nx.printSubCall2(f: Nx.Expr, args: Coll.List[Nx.Expr], t: Coll.List[Nx.Expr]): Unit = t match
+  case Coll.Nil => Nx.printPlainCall(f, args)
+  case Coll.Cons(a1, rest) =>
+    val l = Nx.litOf(a1)
+    if Nx.isLit(l) then Nx.printNegCall(Nx.negate(l), rest) else Nx.printPlainCall(f, args)
+
+def Nx.p1(tag: Str, a: Nx.Expr): Unit =
+  Console.print("(")
+  Console.print(tag)
+  Console.print(" ")
+  Nx.printTree(a)
+  Console.print(")")
+
+def Nx.p2(tag: Str, a: Nx.Expr, b: Nx.Expr): Unit =
+  Console.print("(")
+  Console.print(tag)
+  Console.print(" ")
+  Nx.printTree(a)
+  Console.print(" ")
+  Nx.printTree(b)
+  Console.print(")")
+
+def Nx.p3(tag: Str, a: Nx.Expr, b: Nx.Expr, c: Nx.Expr): Unit =
+  Console.print("(")
+  Console.print(tag)
+  Console.print(" ")
+  Nx.printTree(a)
+  Console.print(" ")
+  Nx.printTree(b)
+  Console.print(" ")
+  Nx.printTree(c)
+  Console.print(")")
+
+def Nx.printAttrPath(path: Coll.List[Nx.Attr]): Unit =
+  Console.print("(attrpath")
+  Nx.printAttrElems(path)
+  Console.print(")")
+
+def Nx.printAttrElems(xs: Coll.List[Nx.Attr]): Unit = xs match
+  case Coll.Nil => Console.print("")
+  case Coll.Cons(h, t) =>
+    Console.print(" ")
+    h match
+      case Nx.ASym(s) => Nx.quote(s)
+      case Nx.ADyn(e) => Nx.p1("dyn", e)
+    Nx.printAttrElems(t)
+
+def Nx.printBinds(xs: Coll.List[Nx.Binding]): Unit = xs match
+  case Coll.Nil => Console.print("")
+  case Coll.Cons(h, t) =>
+    Console.print(" (bind ")
+    h match
+      case Nx.Bind(n, e) =>
+        Nx.quote(n)
+        Console.print(" ")
+        Nx.printTree(e)
+      case Nx.BInherit(n) =>
+        Nx.quote(n)
+        Console.print(" (inherit)")
+      case Nx.BInheritFrom(n, e) =>
+        Nx.quote(n)
+        Console.print(" ")
+        Nx.p1("inherit-from", e)
+    Console.print(")")
+    Nx.printBinds(t)
+
+def Nx.printFormals(xs: Coll.List[Nx.Formal]): Unit = xs match
+  case Coll.Nil => Console.print("")
+  case Coll.Cons(h, t) =>
+    Console.print(" (formal ")
+    h match
+      case Nx.Fm(n, d) =>
+        Nx.quote(n)
+        d match
+          case Coll.None => Console.print("")
+          case Coll.Some(e) =>
+            Console.print(" ")
+            Nx.printTree(e)
+    Console.print(")")
+    Nx.printFormals(t)
+
+def Nx.printLambda(arg: Coll.Option[Str], formals: Coll.Option[Nx.Formals], body: Nx.Expr): Unit =
+  Console.print("(lambda ")
+  arg match
+    case Coll.None => Console.print("_")
+    case Coll.Some(s) => Nx.quote(s)
+  Console.print(" ")
+  formals match
+    case Coll.None => Console.print("_")
+    case Coll.Some(f) => f match
+      case Nx.Fms(ell, fs) =>
+        Console.print("(formals")
+        Nx.printFormals(Nx.sort(fs))
+        Console.print(if ell then " ...)" else ")")
+  Console.print(" ")
+  Nx.printTree(body)
+  Console.print(")")
+
+// ---- strings made of parts (rule 2) ----------------------------------------------------------------------------
+
+def Nx.allStr(xs: Coll.List[Nx.Expr]): Bool = xs match
+  case Coll.Nil => true
+  case Coll.Cons(h, t) => h match
+    case Nx.EStr(_, _) => Nx.allStr(t)
+    case _ => false
+
+// run = the joined (str ...) parts seen since the last other part; inRun = one was seen
+def Nx.flushRun(run: Str, inRun: Bool, force: Bool): Unit =
+  if inRun && !(force && Str.len(run) == 0) then
+    Console.print(" (str ")
+    Nx.quote(run)
+    Console.print(")")
+  else Console.print("")
+
+def Nx.concatParts(xs: Coll.List[Nx.Expr], run: Str, inRun: Bool, force: Bool): Unit = xs match
+  case Coll.Nil => Nx.flushRun(run, inRun, force)
+  case Coll.Cons(h, t) => h match
+    case Nx.EStr(_, s) => Nx.concatParts(t, Nx.cat(run, s), true, force)
+    case _ =>
+      Nx.flushRun(run, inRun, force)
+      Console.print(" ")
+      Nx.printTree(h)
+      Nx.concatParts(t, "", false, force)
+
+def Nx.joinStrs(xs: Coll.List[Nx.Expr], run: Str): Str = xs match
+  case Coll.Nil => run
+  case Coll.Cons(h, t) => h match
+    case Nx.EStr(_, s) => Nx.joinStrs(t, Nx.cat(run, s))
+    case _ => run
+
+def Nx.printConcat(force: Bool, parts: Coll.List[Nx.Expr]): Unit =
+  if force && Nx.allStr(parts) then
+    Console.print("(str ")
+    Nx.quote(Nx.joinStrs(parts, ""))
+    Console.print(")")
+  else
+    Console.print(if force then "(interp" else "(+")
+    Nx.concatParts(parts, "", false, force)
+    Console.print(")")
+
+def Nx.printTree(e: Nx.Expr): Unit = e match
+  case Nx.EInt(_, v) => Nx.printLit(Nx.LInt(v))
+  case Nx.EFloat(_, b) => Nx.printLit(Nx.LFlt(b))
+  case Nx.EStr(_, s) =>
+    Console.print("(str ")
+    Nx.quote(s)
+    Console.print(")")
+  case Nx.EConcat(_, force, parts) => Nx.printConcat(force, parts)
+  case Nx.EPath(_, s) =>
+    Console.print("(path ")
+    Nx.quote(s)
+    Console.print(")")
+  case Nx.EVar(_, n) =>
+    Console.print("(var ")
+    Nx.quote(n)
+    Console.print(")")
+  case Nx.ECurPos(_) => Console.print("(cur-pos)")
+  case Nx.ESelect(_, x, path, d) =>
+    Console.print("(select ")
+    Nx.printTree(x)
+    Console.print(" ")
+    Nx.printAttrPath(path)
+    d match
+      case Coll.None => Console.print("")
+      case Coll.Some(y) =>
+        Console.print(" ")
+        Nx.printTree(y)
+    Console.print(")")
+  case Nx.EHas(_, x, path) =>
+    Console.print("(has ")
+    Nx.printTree(x)
+    Console.print(" ")
+    Nx.printAttrPath(path)
+    Console.print(")")
+  case Nx.EAttrs(_, isRec, binds, dyns) =>
+    Console.print(if isRec then "(attrs rec" else "(attrs nonrec")
+    Nx.printBinds(Nx.sort(binds))
+    Nx.printDynBinds(dyns)
+    Console.print(")")
+  case Nx.EList(_, xs) =>
+    Console.print("(list")
+    Nx.printArgs(xs)
+    Console.print(")")
+  case Nx.ELambda(_, arg, formals, body) => Nx.printLambda(arg, formals, body)
+  case Nx.ECall(_, f, args) => Nx.printCall(f, args)
+  case Nx.ELet(_, a, b) => Nx.p2("let", a, b)
+  case Nx.EWith(_, a, b) => Nx.p2("with", a, b)
+  case Nx.EIf(_, c, t, f) => Nx.p3("if", c, t, f)
+  case Nx.EAssert(_, c, b) => Nx.p2("assert", c, b)
+  case Nx.ENot(_, a) => Nx.p1("!", a)
+  case Nx.EEq(_, a, b) => Nx.p2("==", a, b)
+  case Nx.ENe(_, a, b) => Nx.p2("!=", a, b)
+  case Nx.EAnd(_, a, b) => Nx.p2("&&", a, b)
+  case Nx.EOr(_, a, b) => Nx.p2("||", a, b)
+  case Nx.EImpl(_, a, b) => Nx.p2("->", a, b)
+  case Nx.EUpdate(_, a, b) => Nx.p2("//", a, b)
+  case Nx.EListConcat(_, a, b) => Nx.p2("++", a, b)
+
+def Nx.printDynBinds(xs: Coll.List[Nx.DynBind]): Unit = xs match
+  case Coll.Nil => Console.print("")
+  case Coll.Cons(h, t) =>
+    h match
+      case Nx.DBind(k, v) =>
+        Console.print(" ")
+        Nx.p2("dyn-bind", k, v)
+    Nx.printDynBinds(t)

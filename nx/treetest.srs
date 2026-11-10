@@ -1,0 +1,101 @@
+// test main for nx/tree.srs: hand-built Nx.Expr values, one printed tree per line. Expected text: tests/tree.out.
+def Nx.l1 [A: Type] (a: A): Coll.List[A] = Coll.Cons(a, Coll.Nil)
+def Nx.l2 [A: Type] (a: A, b: A): Coll.List[A] = Coll.Cons(a, Coll.Cons(b, Coll.Nil))
+def Nx.l3 [A: Type] (a: A, b: A, c: A): Coll.List[A] = Coll.Cons(a, Coll.Cons(b, Coll.Cons(c, Coll.Nil)))
+
+def Nx.tv(n: Str): Nx.Expr = Nx.EVar(0, n)
+def Nx.ts(s: Str): Nx.Expr = Nx.EStr(0, s)
+def Nx.ti(v: I64): Nx.Expr = Nx.EInt(0, v)
+def Nx.tf(b: I64): Nx.Expr = Nx.EFloat(0, b)
+def Nx.tc(f: Nx.Expr, args: Coll.List[Nx.Expr]): Nx.Expr = Nx.ECall(0, f, args)
+def Nx.tsub(args: Coll.List[Nx.Expr]): Nx.Expr = Nx.tc(Nx.tv("__sub"), args)
+def Nx.tneg(a: Nx.Expr): Nx.Expr = Nx.tsub(Nx.l2(Nx.ti(0), a))
+def Nx.tb(n: Str, e: Nx.Expr): Nx.Binding = Nx.Bind(n, e)
+def Nx.tat(b: Bool, bs: Coll.List[Nx.Binding], ds: Coll.List[Nx.DynBind]): Nx.Expr = Nx.EAttrs(0, b, bs, ds)
+def Nx.tfm(n: Str): Nx.Formal = Nx.Fm(n, Coll.None)
+
+def Nx.line(e: Nx.Expr): Unit =
+  Nx.printTree(e)
+  Console.print("\n")
+
+def Nx.cases1(): Unit =
+  // (int 1), (float ...): SPEC table; (float 4004000000000000): 2043df26...nix.exp
+  Nx.line(Nx.ti(1))
+  Nx.line(Nx.tf(4609434218613702656))
+  // escapes: `"` `\` newline 0xff; 038af019...nix.exp `(str "\x0ab")`, 9e39f26e...nix.exp `"a\\n  "`
+  Nx.line(Nx.ts(Nx.cat(Nx.cat(Nx.cat("a\"b\\c", Nx.byte(10)), Nx.byte(255)), "b")))
+  Nx.line(Nx.EPath(0, "/case/a"))
+  Nx.line(Nx.tv("x"))
+  Nx.line(Nx.ECurPos(0))
+  // 038af019...nix.exp: dyn of a string; SPEC table select with `or`
+  Nx.line(Nx.ESelect(0, Nx.tv("r"), Nx.l1(Nx.ADyn(Nx.ts(Nx.cat(Nx.byte(10), "b")))), Coll.None))
+  Nx.line(Nx.ESelect(0, Nx.tv("e"), Nx.l2(Nx.ASym("a"), Nx.ADyn(Nx.tv("b"))), Coll.Some(Nx.tv("d"))))
+  Nx.line(Nx.EHas(0, Nx.tv("e"), Nx.l1(Nx.ASym("a"))))
+  Nx.line(Nx.EList(0, Nx.l2(Nx.tv("a"), Nx.tv("b"))))
+  Nx.line(Nx.EList(0, Coll.Nil))
+  // __findFile: SPEC table `<a>`; 812726f1...nix.exp
+  Nx.line(Nx.tc(Nx.tv("__findFile"), Nx.l2(Nx.tv("__nixPath"), Nx.ts("a"))))
+  Nx.line(Nx.tc(Nx.tv("f"), Nx.l2(Nx.tv("a"), Nx.tv("b"))))
+
+def Nx.cases2(): Unit =
+  // rule 1, binds sorted as bytes ("B" < "a" < "ab" < "b"), dyn-binds after in source order; 2043df26...nix.exp
+  Nx.line(Nx.tat(false, Nx.l3(Nx.tb("b", Nx.ti(1)), Nx.tb("ab", Nx.ti(2)), Nx.tb("a", Nx.ti(3))), Coll.Nil))
+  Nx.line(Nx.tat(false, Nx.l2(Nx.tb("a", Nx.ti(1)), Nx.tb("B", Nx.ti(2))), Coll.Nil))
+  Nx.line(Nx.tat(false, Coll.Cons(Nx.BInheritFrom("q", Nx.tv("z")), Coll.Cons(Nx.BInherit("r"), Coll.Cons(Nx.tb("a", Nx.ti(1)), Coll.Nil))),
+    Nx.l1(Nx.DBind(Nx.EConcat(0, true, Nx.l2(Nx.ts("x"), Nx.tv("y"))), Nx.ti(3)))))
+  // dyn-binds keep source order: c649b81d...nix.exp
+  Nx.line(Nx.tat(false, Coll.Nil, Nx.l2(Nx.DBind(Nx.tv("b"), Nx.ti(1)), Nx.DBind(Nx.tv("a"), Nx.ti(2)))))
+  Nx.line(Nx.tat(true, Coll.Nil, Coll.Nil))
+  Nx.line(Nx.ELet(0, Nx.tat(false, Nx.l1(Nx.tb("a", Nx.ti(1))), Coll.Nil), Nx.tv("b")))
+  // lambda: 5d615003...nix.exp `(lambda "a" _ B)`; formals form: oracle/parse-oracle.cc (no .exp shows one)
+  Nx.line(Nx.ELambda(0, Coll.Some("x"), Coll.None, Nx.tv("b")))
+  Nx.line(Nx.ELambda(0, Coll.Some("x"), Coll.Some(Nx.Fms(true, Nx.l3(Nx.tfm("b"), Nx.Fm("a", Coll.Some(Nx.ti(1))), Nx.tfm("B")))), Nx.tv("b")))
+  Nx.line(Nx.ELambda(0, Coll.None, Coll.Some(Nx.Fms(false, Nx.l1(Nx.tfm("a")))), Nx.tv("b")))
+  Nx.line(Nx.ELambda(0, Coll.None, Coll.Some(Nx.Fms(true, Coll.Nil)), Nx.tv("b")))
+  Nx.line(Nx.EWith(0, Nx.tv("a"), Nx.tv("b")))
+  Nx.line(Nx.EIf(0, Nx.tv("c"), Nx.tv("t"), Nx.tv("e")))
+  Nx.line(Nx.EAssert(0, Nx.tv("c"), Nx.tv("b")))
+
+def Nx.cases3(): Unit =
+  val a = Nx.tv("a")
+  val b = Nx.tv("b")
+  Nx.line(Nx.ENot(0, a))
+  Nx.line(Nx.EEq(0, a, b))
+  Nx.line(Nx.ENe(0, a, b))
+  Nx.line(Nx.EAnd(0, a, b))
+  Nx.line(Nx.EOr(0, a, b))
+  Nx.line(Nx.EImpl(0, a, b))
+  Nx.line(Nx.EUpdate(0, a, b))
+  Nx.line(Nx.EListConcat(0, a, b))
+  // rule 2, (+): adjacent strs join, an empty str stays; 0a09c87c...nix.exp
+  Nx.line(Nx.EConcat(0, false, Coll.Cons(Nx.EPath(0, "/case/a/b/"), Coll.Cons(Nx.ts("/"), Coll.Cons(Nx.ts("c"), Coll.Cons(Nx.tv("v"), Coll.Cons(Nx.ts("d"), Coll.Nil)))))))
+  Nx.line(Nx.EConcat(0, false, Nx.l2(Nx.ts(""), Nx.tv("x"))))
+  // rule 2, (interp): a4e5de35...nix.exp; empty str dropped; a lone non-str stays an interp: c649b81d...nix.exp
+  Nx.line(Nx.EConcat(0, true, Coll.Cons(Nx.ts("a"), Coll.Cons(Nx.ts(""), Coll.Cons(Nx.tv("b"), Coll.Cons(Nx.ts("  "), Coll.Nil))))))
+  Nx.line(Nx.EConcat(0, true, Coll.Cons(Nx.ts(""), Coll.Cons(Nx.tv("a"), Coll.Cons(Nx.ts("x"), Coll.Cons(Nx.ts("y"), Coll.Nil))))))
+  Nx.line(Nx.EConcat(0, true, Nx.l1(Nx.tv("a"))))
+  // only strings -> one (str ..); none at all -> (str ""): c1a705c8...nix.exp shows (str "$\x0a")
+  Nx.line(Nx.EConcat(0, true, Nx.l2(Nx.ts("a"), Nx.ts("b"))))
+  Nx.line(Nx.EConcat(0, true, Nx.l2(Nx.ts("$"), Nx.ts(Nx.byte(10)))))
+  Nx.line(Nx.EConcat(0, true, Nx.l1(Nx.ts(""))))
+  Nx.line(Nx.EConcat(0, true, Coll.Nil))
+
+def Nx.cases4(): Unit =
+  // rule 3: -5, - -1, float, more args keep the literal as head, non-literal untouched; bb8d0de6...nix.exp, 5d615003...nix.exp
+  Nx.line(Nx.tneg(Nx.ti(5)))
+  Nx.line(Nx.tneg(Nx.tneg(Nx.ti(1))))
+  Nx.line(Nx.tneg(Nx.tf(4609434218613702656)))
+  Nx.line(Nx.tsub(Nx.l3(Nx.ti(0), Nx.ti(5), Nx.tv("x"))))
+  Nx.line(Nx.tneg(Nx.tv("x")))
+  Nx.line(Nx.tsub(Nx.l2(Nx.tv("a"), Nx.ti(1))))
+  Nx.line(Nx.tneg(Nx.tsub(Nx.l3(Nx.ti(0), Nx.ti(5), Nx.tv("x")))))
+  Nx.line(Nx.tneg(Nx.tneg(Nx.tneg(Nx.tf(4612811918334230528)))))
+
+def main(): I64 =
+  handle io = Srs.Console()
+  handle r = Srs.Arena()
+  Nx.cases1()
+  Nx.cases2()
+  Nx.cases3()
+  Nx.cases4()
+  0

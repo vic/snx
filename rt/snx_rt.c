@@ -66,3 +66,8 @@ srs_str Nx__hex64(int64_t v) {
   for (int i = 15; i >= 0; i--) { p[i] = "0123456789abcdef"[u & 15]; u >>= 4; }
   return (srs_str){p, 16};
 }
+
+// the bits of -d for the bits of a double d: the sign bit flipped (nx/tree.srs, SPEC.md rule 3)
+int64_t Nx__treeFloatNeg(int64_t bits) {
+  return (int64_t)((uint64_t)bits ^ 0x8000000000000000ULL);
+}
