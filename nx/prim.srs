@@ -79,6 +79,8 @@ enum Nx.Prim:
   case Nx.PBitXor
   case Nx.PHashString
   case Nx.PConvertHash
+  case Nx.PParseFlakeRef
+  case Nx.PFlakeRefToString
   case Nx.PReplaceStrings
   case Nx.PParseDrvName
   case Nx.PCompareVersions
@@ -202,6 +204,8 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PGroupBy => Nx.pGroupBy(a, Nx.force(b))
     case Nx.PHashString => Nx.pHashString(Nx.force(a), Nx.force(b))
     case Nx.PConvertHash => Nx.pConvertHash(Nx.force(a))
+    case Nx.PParseFlakeRef => Nx.pParseFlakeRef(Nx.force(a))
+    case Nx.PFlakeRefToString => Nx.pFlakeRefToString(Nx.force(a))
     case Nx.PReplaceStrings => Nx.pReplace(Nx.force(a), Nx.force(b), Nx.force(c))
     case Nx.PParseDrvName => Nx.pParseDrvName(Nx.force(a))
     case Nx.PCompareVersions => Nx.pCompareVersions(Nx.force(a), Nx.force(b))

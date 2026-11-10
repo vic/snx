@@ -225,6 +225,8 @@ def Nx.bsPrims(b: Nx.BB): Unit =
   Nx.bsPrim(b, "__bitXor", 2, Nx.PBitXor)
   Nx.bsPrim(b, "__hashString", 2, Nx.PHashString)
   Nx.bsPrim(b, "__convertHash", 1, Nx.PConvertHash)
+  Nx.bsPrim(b, "__parseFlakeRef", 1, Nx.PParseFlakeRef)
+  Nx.bsPrim(b, "__flakeRefToString", 1, Nx.PFlakeRefToString)
   Nx.bsPrim(b, "__replaceStrings", 3, Nx.PReplaceStrings)
   Nx.bsPrim(b, "__parseDrvName", 1, Nx.PParseDrvName)
   Nx.bsPrim(b, "__compareVersions", 2, Nx.PCompareVersions)

@@ -1,0 +1,1150 @@
+// snx builtins.parseFlakeRef and builtins.flakeRefToString (libflake/flake-primops.cc; libflake/flakeref.cc;
+// libfetchers/{github,git,tarball,path,indirect,mercurial}.cc inputFromURL, inputFromAttrs, toURL; libutil/url.cc).
+// A flake reference is a Nx.FlakeRef: one Nx.Fr case per input type and its dir. A URL is a Nx.Url, as ParsedURL.
+// shortcut: Boost.URL is read as RFC 3986 with the checks flake references reach; git ref names follow
+// git check-ref-format (libgit2's isLegalRefName); upgrade when a case needs a finer refusal.
+
+// ---- small string tools ----------------------------------------------------------------------------------------
+
+enum Nx.FrR [A: Type]:
+  case Nx.FrOk(v: A)
+  case Nx.FrErr(msg: Str)
+
+def Nx.fuHas(s: Str, i: I64, p: Str): Bool = i >= 0 && i + Str.len(p) <= Str.len(s) && Str.eq(Str.slice(s, i, i + Str.len(p)), p)
+
+def Nx.fuPre(s: Str, p: Str): Bool = Nx.fuHas(s, 0, p)
+
+def Nx.fuSuf(s: Str, p: Str): Bool = Nx.fuHas(s, Str.len(s) - Str.len(p), p)
+
+def Nx.fuAfter(s: Str, n: I64): Str = Str.slice(s, n, Str.len(s))
+
+def Nx.fuErr(a: Str, b: Str): Str = Nx.cat(Nx.cat(a, b), "'")
+
+// the index of the first byte of set in s from i, or the length
+def Nx.fuFirstOf(s: Str, i: I64, set: Str): I64 =
+  if i >= Str.len(s) then Str.len(s)
+  else if Nx.byteAt(set, Str.at(s, i), 0) >= 0 then i
+  else Nx.fuFirstOf(s, i + 1, set)
+
+// splitString: every piece kept, so "" gives [""]
+def Nx.fuSplit(s: Str, sep: I64, from: I64, acc: Coll.List[Str]): Coll.List[Str] =
+  val k = Nx.byteAt(s, sep, from)
+  if k < 0 then Coll.rev(Coll.Cons(Str.slice(s, from, Str.len(s)), acc))
+  else Nx.fuSplit(s, sep, k + 1, Coll.Cons(Str.slice(s, from, k), acc))
+
+def Nx.fuJoin(acc: Str, xs: Coll.List[Str], sep: Str): Str = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => Nx.fuJoin(Nx.cat(Nx.cat(acc, sep), h), t, sep)
+
+// the pieces joined by sep
+def Nx.fuJoinAll(xs: Coll.List[Str], sep: Str): Str = xs match
+  case Coll.Nil => ""
+  case Coll.Cons(h, t) => Nx.fuJoin(h, t, sep)
+
+def Nx.fuNth(xs: Coll.List[Str], i: I64): Str = xs match
+  case Coll.Nil => ""
+  case Coll.Cons(h, t) => if i == 0 then h else Nx.fuNth(t, i - 1)
+
+def Nx.fuNonEmpty(xs: Coll.List[Str], acc: Coll.List[Str]): Coll.List[Str] = xs match
+  case Coll.Nil => Coll.rev(acc)
+  case Coll.Cons(h, t) => Nx.fuNonEmpty(t, if Str.len(h) == 0 then acc else Coll.Cons(h, acc))
+
+def Nx.fuHex(c: I64): I64 =
+  if c >= '0' && c <= '9' then c - '0'
+  else if c >= 'a' && c <= 'f' then c - 'a' + 10
+  else if c >= 'A' && c <= 'F' then c - 'A' + 10
+  else 0 - 1
+
+def Nx.fuAlpha(c: I64): Bool = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+
+def Nx.fuAlnum(c: I64): Bool = Nx.fuAlpha(c) || (c >= '0' && c <= '9')
+
+def Nx.fuUnres(c: I64): Bool = Nx.fuAlnum(c) || c == '-' || c == '.' || c == '_' || c == '~'
+
+// sub-delims: !$&'()*+,;=
+def Nx.fuSub(c: I64): Bool = Nx.byteAt("!$&'()*+,;=", c, 0) >= 0
+
+def Nx.fuHexDigit(n: I64): I64 = if n < 10 then '0' + n else 'A' + n - 10
+
+// percentEncode: all but unreserved and keep
+def Nx.fuEnc(s: Str, keep: Str): Str = Nx.fuEncGo(s, keep, 0, Nx.sbNew())
+
+def Nx.fuEncGo(s: Str, keep: Str, i: I64, b: Ptr): Str =
+  if i >= Str.len(s) then Nx.sbGet(b)
+  else
+    val c = Str.at(s, i)
+    val piece = if Nx.fuUnres(c) || Nx.byteAt(keep, c, 0) >= 0 then Nx.byte(c) else Nx.cat(Nx.cat("%", Nx.byte(Nx.fuHexDigit(c / 16))), Nx.byte(Nx.fuHexDigit(c % 16)))
+    Nx.sbAdd(b, piece)
+    Nx.fuEncGo(s, keep, i + 1, b)
+
+// percentDecode: None for a bad %XX
+def Nx.fuDec(s: Str): Coll.Option[Str] =
+  val b = Nx.sbNew()
+  if Nx.fuDecGo(s, 0, b) then Coll.Some(Nx.sbGet(b)) else Coll.None
+
+def Nx.fuDecGo(s: Str, i: I64, b: Ptr): Bool =
+  if i >= Str.len(s) then true
+  else
+    val c = Str.at(s, i)
+    if c == '%' then
+      val h = Nx.fuHex(Str.at(s, i + 1))
+      val l = Nx.fuHex(Str.at(s, i + 2))
+      if h < 0 || l < 0 then false
+      else
+        Nx.sbAdd(b, Nx.byte(h * 16 + l))
+        Nx.fuDecGo(s, i + 3, b)
+    else
+      Nx.sbAdd(b, Nx.byte(c))
+      Nx.fuDecGo(s, i + 1, b)
+
+// a string of unreserved bytes, sub-delims, valid %XX and the bytes of extra
+def Nx.fuChars(s: Str, i: I64, e: I64, extra: Str): Bool =
+  if i >= e then true
+  else
+    val c = Str.at(s, i)
+    if c == '%' then i + 2 < e && Nx.fuHex(Str.at(s, i + 1)) >= 0 && Nx.fuHex(Str.at(s, i + 2)) >= 0 && Nx.fuChars(s, i + 3, e, extra)
+    else (Nx.fuUnres(c) || Nx.fuSub(c) || Nx.byteAt(extra, c, 0) >= 0) && Nx.fuChars(s, i + 1, e, extra)
+
+// ---- URLs: libutil/url.hh ParsedURL ----------------------------------------------------------------------------
+
+// v6: the host is a bracketed literal
+enum Nx.UAuth:
+  case Nx.UAuth(user: Coll.Option[Str], pass: Coll.Option[Str], host: Str, v6: Bool, port: Coll.Option[I64])
+
+// the query is sorted by key, one entry a key (a StringMap)
+enum Nx.QP:
+  case Nx.QP(k: Str, v: Str)
+
+enum Nx.Url:
+  case Nx.Url(scheme: Str, auth: Coll.Option[Nx.UAuth], path: Coll.List[Str], query: Coll.List[Nx.QP], frag: Str)
+
+def Nx.uScheme(u: Nx.Url): Str = u match
+  case Nx.Url(s, _, _, _, _) => s
+
+def Nx.uAuth(u: Nx.Url): Coll.Option[Nx.UAuth] = u match
+  case Nx.Url(_, a, _, _, _) => a
+
+def Nx.uPath(u: Nx.Url): Coll.List[Str] = u match
+  case Nx.Url(_, _, p, _, _) => p
+
+def Nx.uQuery(u: Nx.Url): Coll.List[Nx.QP] = u match
+  case Nx.Url(_, _, _, q, _) => q
+
+def Nx.uFrag(u: Nx.Url): Str = u match
+  case Nx.Url(_, _, _, _, f) => f
+
+def Nx.uWithQuery(u: Nx.Url, q: Coll.List[Nx.QP]): Nx.Url = u match
+  case Nx.Url(s, a, p, _, f) => Nx.Url(s, a, p, q, f)
+
+def Nx.uWithScheme(u: Nx.Url, s: Str): Nx.Url = u match
+  case Nx.Url(_, a, p, q, f) => Nx.Url(s, a, p, q, f)
+
+def Nx.uNoFrag(u: Nx.Url): Nx.Url = u match
+  case Nx.Url(s, a, p, q, _) => Nx.Url(s, a, p, q, "")
+
+// the query with (k, v) added: an existing k wins (std::map::insert / emplace)
+def Nx.qIns(q: Coll.List[Nx.QP], k: Str, v: Str): Coll.List[Nx.QP] = q match
+  case Coll.Nil => Coll.Cons(Nx.QP(k, v), Coll.Nil)
+  case Coll.Cons(h, t) =>
+    val Nx.QP(hk, _) = h
+    if Str.eq(hk, k) then q
+    else if Nx.strLess(k, hk) then Coll.Cons(Nx.QP(k, v), q)
+    else Coll.Cons(h, Nx.qIns(t, k, v))
+
+// the query with k set to v (insert_or_assign)
+def Nx.qSet(q: Coll.List[Nx.QP], k: Str, v: Str): Coll.List[Nx.QP] = q match
+  case Coll.Nil => Coll.Cons(Nx.QP(k, v), Coll.Nil)
+  case Coll.Cons(h, t) =>
+    val Nx.QP(hk, _) = h
+    if Str.eq(hk, k) then Coll.Cons(Nx.QP(k, v), t)
+    else if Nx.strLess(k, hk) then Coll.Cons(Nx.QP(k, v), q)
+    else Coll.Cons(h, Nx.qSet(t, k, v))
+
+def Nx.qSetOpt(q: Coll.List[Nx.QP], k: Str, v: Coll.Option[Str]): Coll.List[Nx.QP] = v match
+  case Coll.None => q
+  case Coll.Some(x) => Nx.qSet(q, k, x)
+
+def Nx.qGet(q: Coll.List[Nx.QP], k: Str): Coll.Option[Str] = q match
+  case Coll.Nil => Coll.None
+  case Coll.Cons(h, t) =>
+    val Nx.QP(hk, hv) = h
+    if Str.eq(hk, k) then Coll.Some(hv) else Nx.qGet(t, k)
+
+def Nx.qDel(q: Coll.List[Nx.QP], k: Str): Coll.List[Nx.QP] = q match
+  case Coll.Nil => q
+  case Coll.Cons(h, t) =>
+    val Nx.QP(hk, _) = h
+    if Str.eq(hk, k) then t else Coll.Cons(h, Nx.qDel(t, k))
+
+def Nx.qDelAll(q: Coll.List[Nx.QP], ks: Coll.List[Str]): Coll.List[Nx.QP] = ks match
+  case Coll.Nil => q
+  case Coll.Cons(k, t) => Nx.qDelAll(Nx.qDel(q, k), t)
+
+// a flag read from the query: Explicit<bool>{value == "1"}
+def Nx.qFlag(q: Coll.List[Nx.QP], k: Str): Coll.Option[Bool] = Nx.qGet(q, k) match
+  case Coll.None => Coll.None
+  case Coll.Some(v) => Coll.Some(Str.eq(v, "1"))
+
+def Nx.words(s: Str): Coll.List[Str] = Nx.fuSplit(s, ' ', 0, Coll.Nil)
+
+// decodeQuery: "k=v" pieces split at &, a piece without = dropped, the first of a repeated key kept; the text was checked
+def Nx.qParse(s: Str, from: I64, e: I64, acc: Coll.List[Nx.QP]): Coll.List[Nx.QP] =
+  if from > e then acc
+  else
+    val amp = Nx.fuFirstOf(s, from, "&")
+    val stop = if amp > e then e else amp
+    val piece = Str.slice(s, from, stop)
+    val eq = Nx.byteAt(piece, '=', 0)
+    val next = Nx.qParse(s, stop + 1, e, acc)
+    if eq < 0 then next
+    else
+      val k = Nx.fuDecOr(Str.slice(piece, 0, eq))
+      val v = Nx.fuDecOr(Nx.fuAfter(piece, eq + 1))
+      Nx.qSet(next, k, v)
+
+def Nx.fuDecOr(s: Str): Str = Nx.fuDec(s) match
+  case Coll.None => s
+  case Coll.Some(x) => x
+
+// the text of a query: space and " as %20 and %22 (extraAllowedCharsInQuery)
+def Nx.fuFixChars(s: Str, i: I64, e: I64, hat: Bool, b: Ptr): Unit =
+  if i >= e then ()
+  else
+    val c = Str.at(s, i)
+    val enc = c == ' ' || c == '"' || (hat && c == '^')
+    Nx.sbAdd(b, if enc then Nx.cat(Nx.cat("%", Nx.byte(Nx.fuHexDigit(c / 16))), Nx.byte(Nx.fuHexDigit(c % 16))) else Nx.byte(c))
+    Nx.fuFixChars(s, i + 1, e, hat, b)
+
+// the text up to and with the query's fixed form added to b; where the fragment may start
+def Nx.fuFixQuery(s: Str, q: I64, b: Ptr): I64 =
+  if q < 0 then 0
+  else
+    Nx.sbAdd(b, Str.slice(s, 0, q + 1))
+    val fs = Nx.fuFirstOf(s, q + 1, "#")
+    Nx.fuFixChars(s, q + 1, fs, false, b)
+    fs
+
+// parseURL's lenient rewrite: the query keeps no raw space or ", the fragment no raw space, " or ^
+def Nx.fuFix(s: Str): Str =
+  val b = Nx.sbNew()
+  val q = Nx.byteAt(s, '?', 0)
+  val afterQ = Nx.fuFixQuery(s, q, b)
+  val h = Nx.byteAt(s, '#', afterQ)
+  if h < 0 then
+    Nx.sbAdd(b, Str.slice(s, afterQ, Str.len(s)))
+    Nx.sbGet(b)
+  else
+    Nx.sbAdd(b, Str.slice(s, afterQ, h + 1))
+    Nx.fuFixChars(s, h + 1, Str.len(s), true, b)
+    Nx.sbGet(b)
+
+def Nx.fuSchemeEnd(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if i == 0 then (if Nx.fuAlpha(c) then Nx.fuSchemeEnd(s, 1) else 0)
+  else if Nx.fuAlnum(c) || c == '+' || c == '-' || c == '.' then Nx.fuSchemeEnd(s, i + 1)
+  else i
+
+// the port in s[i..e): digits, 1..65535
+def Nx.fuPort(s: Str, i: I64, e: I64, n: I64): I64 =
+  if i >= e then n
+  else
+    val c = Str.at(s, i)
+    if c < '0' || c > '9' || n > 65535 then 0 - 1 else Nx.fuPort(s, i + 1, e, n * 10 + (c - '0'))
+
+def Nx.fuAuth(a: Str): Nx.FrR[Nx.UAuth] =
+  val at = Nx.byteAt(a, '@', 0)
+  val hp = if at < 0 then a else Nx.fuAfter(a, at + 1)
+  val ui = if at < 0 then "" else Str.slice(a, 0, at)
+  val colon = Nx.byteAt(ui, ':', 0)
+  val userRaw = if colon < 0 then ui else Str.slice(ui, 0, colon)
+  val passRaw = Nx.fuAfter(ui, colon + 1)
+  val v6 = Str.len(hp) > 0 && Str.at(hp, 0) == '['
+  val close = Nx.byteAt(hp, ']', 0)
+  val hostRaw = if v6 then (if close < 0 then "" else Str.slice(hp, 1, close)) else Str.slice(hp, 0, Nx.fuFirstOf(hp, 0, ":"))
+  val tailAt = if v6 then close + 1 else Str.len(hostRaw)
+  val tail = Nx.fuAfter(hp, tailAt)
+  val portOk = Str.len(tail) == 0 || Str.at(tail, 0) == ':'
+  val port = if Str.len(tail) <= 1 then 0 else Nx.fuPort(tail, 1, Str.len(tail), 0)
+  val user = Nx.fuDec(userRaw)
+  val pass = Nx.fuDec(passRaw)
+  val host = Nx.fuDec(hostRaw)
+  val bad = (v6 && close < 0) || !portOk || port < 0 || port > 65535 || (Str.len(tail) > 1 && port == 0)
+  val charsOk = Nx.fuChars(ui, 0, Str.len(ui), ":") && (v6 || Nx.fuChars(hostRaw, 0, Str.len(hostRaw), ""))
+  if bad || !charsOk then Nx.FrErr(Nx.fuErr("invalid URL authority: '", a))
+  else user match
+    case Coll.None => Nx.FrErr(Nx.fuErr("invalid URL authority: '", a))
+    case Coll.Some(u) => pass match
+      case Coll.None => Nx.FrErr(Nx.fuErr("invalid URL authority: '", a))
+      case Coll.Some(p) => host match
+        case Coll.None => Nx.FrErr(Nx.fuErr("invalid URL authority: '", a))
+        case Coll.Some(h) =>
+          val us: Coll.Option[Str] = if at < 0 then Coll.None else Coll.Some(u)
+          val ps: Coll.Option[Str] = if at < 0 || colon < 0 then Coll.None else Coll.Some(p)
+          val pt: Coll.Option[I64] = if Str.len(tail) <= 1 then Coll.None else Coll.Some(port)
+          Nx.FrOk(Nx.UAuth(us, ps, h, v6, pt))
+
+// the transport of a scheme "app+transport"
+def Nx.fuTransport(sc: Str): Str =
+  val k = Nx.byteAt(sc, '+', 0)
+  if k < 0 then sc else Nx.fuAfter(sc, k + 1)
+
+def Nx.fuApp(sc: Str): Coll.Option[Str] =
+  val k = Nx.byteAt(sc, '+', 0)
+  if k < 0 then Coll.None else Coll.Some(Str.slice(sc, 0, k))
+
+def Nx.fuDecAll(xs: Coll.List[Str], acc: Coll.List[Str]): Coll.Option[Coll.List[Str]] = xs match
+  case Coll.Nil => Coll.Some(Coll.rev(acc))
+  case Coll.Cons(h, t) => Nx.fuDec(h) match
+    case Coll.None => Coll.None
+    case Coll.Some(d) => Nx.fuDecAll(t, Coll.Cons(d, acc))
+
+// parseURL (url.cc:100-190)
+def Nx.fuParse(s0: Str, lenient: Bool): Nx.FrR[Nx.Url] =
+  val s = if lenient then Nx.fuFix(s0) else s0
+  val k = Nx.fuSchemeEnd(s, 0)
+  if k == 0 || Str.at(s, k) != ':' then Nx.FrErr(Nx.fuErr("'", Nx.cat(s0, "' doesn't have a scheme")))
+  else Nx.fuParseRest(s0, s, k)
+
+def Nx.fuParseRest(s0: Str, s: Str, k: I64): Nx.FrR[Nx.Url] =
+  val scheme = Str.slice(s, 0, k)
+  val p0 = k + 1
+  val hasAuth = Nx.fuHas(s, p0, "//")
+  val aEnd = if hasAuth then Nx.fuFirstOf(s, p0 + 2, "/?#") else p0
+  val pEnd = Nx.fuFirstOf(s, aEnd, "?#")
+  val qEnd = if pEnd < Str.len(s) && Str.at(s, pEnd) == '?' then Nx.fuFirstOf(s, pEnd + 1, "#") else pEnd
+  val fStart = if qEnd < Str.len(s) then qEnd + 1 else Str.len(s)
+  val chars = Nx.fuChars(s, aEnd, pEnd, ":@/") && Nx.fuChars(s, pEnd + 1, qEnd, ":@/?") && Nx.fuChars(s, fStart, Str.len(s), ":@/?")
+  val isFile = Str.eq(Nx.fuTransport(scheme), "file")
+  val rawPath = if isFile && aEnd == pEnd then "/" else Str.slice(s, aEnd, pEnd)
+  if !chars then Nx.FrErr(Nx.fuErr("'", Nx.cat(s0, "' is not a valid URL")))
+  else Nx.fuDecAll(Nx.fuSplit(rawPath, '/', 0, Coll.Nil), Coll.Nil) match
+    case Coll.None => Nx.FrErr(Nx.fuErr("'", Nx.cat(s0, "' is not a valid URL")))
+    case Coll.Some(path) =>
+      val q = if qEnd > pEnd then Nx.qParse(s, pEnd + 1, qEnd, Coll.Nil) else Coll.Nil
+      val frag = Nx.fuDecOr(Nx.fuAfter(s, fStart))
+      if !hasAuth then Nx.FrOk(Nx.Url(scheme, Coll.None, path, q, frag))
+      else Nx.fuAuth(Str.slice(s, p0 + 2, aEnd)) match
+        case Nx.FrErr(m) => Nx.FrErr(m)
+        case Nx.FrOk(a) =>
+          val Nx.UAuth(_, _, host, _, _) = a
+          if isFile && Str.len(host) > 0 then Nx.FrErr(Nx.fuErr("file:// URL '", Nx.cat(s0, "' has an unexpected authority")))
+          else Nx.FrOk(Nx.Url(scheme, Coll.Some(a), path, q, frag))
+
+// ---- URLs to text -----------------------------------------------------------------------------------------------
+
+def Nx.fuAuthStr(a: Nx.UAuth): Str =
+  val Nx.UAuth(user, pass, host, v6, port) = a
+  val us: Str = user match
+    case Coll.None => ""
+    case Coll.Some(u) =>
+      val ps: Str = pass match
+        case Coll.None => ""
+        case Coll.Some(p) => Nx.cat(":", Nx.fuEnc(p, ""))
+      Nx.cat(Nx.cat(Nx.fuEnc(u, ""), ps), "@")
+  val hs = if v6 then Nx.cat(Nx.cat("[", Nx.fuEnc(host, ":")), "]") else Nx.fuEnc(host, "")
+  val pt: Str = port match
+    case Coll.None => ""
+    case Coll.Some(n) => Nx.cat(":", Nx.intStr(n))
+  Nx.cat(Nx.cat(us, hs), pt)
+
+def Nx.fuPathStr(xs: Coll.List[Str]): Str = xs match
+  case Coll.Nil => ""
+  case Coll.Cons(h, t) => Nx.fuPathGo(Nx.fuEnc(h, ":@"), t)
+
+def Nx.fuPathGo(acc: Str, xs: Coll.List[Str]): Str = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) => Nx.fuPathGo(Nx.cat(Nx.cat(acc, "/"), Nx.fuEnc(h, ":@")), t)
+
+def Nx.fuQueryStr(q: Coll.List[Nx.QP], acc: Str): Str = q match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) =>
+    val Nx.QP(k, v) = h
+    val sep = if Str.len(acc) == 0 then "?" else Nx.cat(acc, "&")
+    Nx.fuQueryStr(t, Nx.cat(Nx.cat(Nx.cat(sep, Nx.fuEnc(k, ":@/?")), "="), Nx.fuEnc(v, ":@/?")))
+
+// ParsedURL::to_string
+def Nx.fuStr(u: Nx.Url): Str = u match
+  case Nx.Url(scheme, auth, path, q, frag) =>
+    val a: Str = auth match
+      case Coll.None => ""
+      case Coll.Some(x) => Nx.cat("//", Nx.fuAuthStr(x))
+    val f = if Str.len(frag) == 0 then "" else Nx.cat("#", Nx.fuEnc(frag, ""))
+    Nx.cat(Nx.cat(Nx.cat(Nx.cat(scheme, ":"), a), Nx.cat(Nx.fuPathStr(path), Nx.fuQueryStr(q, ""))), f)
+
+// ---- the flake reference ----------------------------------------------------------------------------------------
+
+enum Nx.Hub:
+  case Nx.HGithub
+  case Nx.HGitlab
+  case Nx.HSourcehut
+
+// an attribute value: a string, a non-negative integer or a Boolean (the types flakeRefToString takes)
+enum Nx.AV:
+  case Nx.AStr(s: Str)
+  case Nx.AInt(n: I64)
+  case Nx.ABool(b: Bool)
+
+enum Nx.FA:
+  case Nx.FA(name: Str, v: Nx.AV)
+
+enum Nx.GitFlags:
+  case Nx.GitFlags(shallow: Coll.Option[Bool], submodules: Coll.Option[Bool], lfs: Coll.Option[Bool], exportIgnore: Coll.Option[Bool], allRefs: Coll.Option[Bool])
+
+// an input, one case per type. The attributes kept are those toAttrs and toURL read (the rest a type allows are checked
+// and dropped); a rev stays as given, to be read as a hash when a URL is made
+enum Nx.Fr:
+  case Nx.FrHub(hub: Nx.Hub, owner: Str, repo: Str, ref: Coll.Option[Str], rev: Coll.Option[Str], host: Coll.Option[Str], narHash: Coll.Option[Str])
+  case Nx.FrGit(url: Str, ref: Coll.Option[Str], rev: Coll.Option[Str], flags: Nx.GitFlags)
+  case Nx.FrCurl(file: Bool, url: Str, narHash: Coll.Option[Str], rev: Coll.Option[Str], revCount: Coll.Option[I64], lastMod: Coll.Option[I64])
+  case Nx.FrPath(path: Str, rev: Coll.Option[Nx.AV], narHash: Coll.Option[Nx.AV], revCount: Coll.Option[I64], lastMod: Coll.Option[I64])
+  case Nx.FrInd(id: Str, ref: Coll.Option[Str], rev: Coll.Option[Str])
+  case Nx.FrHg(url: Str, ref: Coll.Option[Str], rev: Coll.Option[Str])
+
+// FlakeRef: the input and the subdirectory (dir, "" = none)
+enum Nx.FlakeRef:
+  case Nx.FlakeRef(input: Nx.Fr, dir: Str)
+
+def Nx.isSome [A: Type] (o: Coll.Option[A]): Bool = o match
+  case Coll.None => false
+  case Coll.Some(_) => true
+
+// a if it is an error, else b
+def Nx.fuFirst(a: Coll.Option[Str], b: Coll.Option[Str]): Coll.Option[Str] = a match
+  case Coll.None => b
+  case Coll.Some(_) => a
+
+def Nx.fuWhen(c: Bool, m: Str): Coll.Option[Str] = if c then Coll.Some(m) else Coll.None
+
+// Nx.FrOk r, unless chk is an error
+def Nx.frOkUnless(chk: Coll.Option[Str], r: Nx.Fr): Nx.FrR[Nx.Fr] = chk match
+  case Coll.None => Nx.FrOk(r)
+  case Coll.Some(m) => Nx.FrErr(m)
+
+def Nx.frMissing(name: Str): Nx.FrR[Nx.Fr] = Nx.FrErr(Nx.fuErr("input attribute '", Nx.cat(name, "' is missing")))
+
+def Nx.fuLower(s: Str): Str = Nx.fuLowerGo(s, 0, Nx.sbNew())
+
+def Nx.fuLowerGo(s: Str, i: I64, b: Ptr): Str =
+  if i >= Str.len(s) then Nx.sbGet(b)
+  else
+    val c = Str.at(s, i)
+    Nx.sbAdd(b, Nx.byte(if c >= 'A' && c <= 'Z' then c + 32 else c))
+    Nx.fuLowerGo(s, i + 1, b)
+
+def Nx.fuContains(s: Str, p: Str, i: I64): Bool =
+  if i + Str.len(p) > Str.len(s) then false
+  else if Nx.fuHas(s, i, p) then true
+  else Nx.fuContains(s, p, i + 1)
+
+// string2Int<uint64_t>: an optional +, then digits (kept below 2^63: an integer of Nix)
+def Nx.fuU64(s: Str): Coll.Option[I64] =
+  val from = if Str.len(s) > 0 && Str.at(s, 0) == '+' then 1 else 0
+  if from >= Str.len(s) || Str.len(s) - from > 18 || Nx.fuDigits(s, from) < Str.len(s) then Coll.None
+  else Coll.Some(Nx.intValue(Str.slice(s, from, Str.len(s))))
+
+def Nx.fuDigits(s: Str, i: I64): I64 =
+  if i < Str.len(s) && Str.at(s, i) >= '0' && Str.at(s, i) <= '9' then Nx.fuDigits(s, i + 1) else i
+
+def Nx.fuLastIdx(s: Str, c: I64, i: I64): I64 =
+  if i < 0 then 0 - 1 else if Str.at(s, i) == c then i else Nx.fuLastIdx(s, c, i - 1)
+
+// ---- hashes -----------------------------------------------------------------------------------------------------
+
+def Nx.frAllHex(s: Str, i: I64): Bool = i >= Str.len(s) || (Nx.fuHex(Str.at(s, i)) >= 0 && Nx.frAllHex(s, i + 1))
+
+// revRegex: 40 hex digits
+def Nx.frIsRev(s: Str): Bool = Str.len(s) == 40 && Nx.frAllHex(s, 0)
+
+// Input::getRev, as base 16 (gitRev): a prefixed hash, else a SHA-1
+def Nx.frRevHex(s: Str): Nx.FrR[Str] = Nx.parseAnyHash(s, 0 - 1) match
+  case Nx.HashOk(_, raw) => Nx.FrOk(Nx.b16(raw))
+  case Nx.HashBad(_) => Nx.parseAnyHash(s, 1) match
+    case Nx.HashOk(_, raw) => Nx.FrOk(Nx.b16(raw))
+    case Nx.HashBad(m) => Nx.FrErr(m)
+
+def Nx.frRevOpt(o: Coll.Option[Str]): Nx.FrR[Coll.Option[Str]] = o match
+  case Coll.None => Nx.FrOk(Coll.None)
+  case Coll.Some(s) => Nx.frRevHex(s) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(h) => Nx.FrOk(Coll.Some(h))
+
+// Input::getNarHash, as SRI: "" is the zero SHA-256, else an SRI hash of SHA-256
+def Nx.frNarSri(s: Str): Nx.FrR[Str] =
+  val k = Nx.byteAt(s, '-', 0)
+  if Str.len(s) == 0 then Nx.FrOk(Nx.cat("sha256-", Nx.b64(Nx.zeros(32))))
+  else if k < 0 then Nx.FrErr(Nx.fuErr("hash '", Nx.cat(s, "' does not include a type")))
+  else
+    val algo = Nx.algoOf(Str.slice(s, 0, k))
+    if algo < 0 then Nx.FrErr("unknown hash algorithm")
+    else Nx.hashBody(Nx.fuAfter(s, k + 1), algo, true) match
+      case Nx.HashBad(m) => Nx.FrErr(m)
+      case Nx.HashOk(a, raw) => if a != 2 then Nx.FrErr("narHash must use SHA-256") else Nx.FrOk(Nx.cat("sha256-", Nx.b64(raw)))
+
+def Nx.frNarOpt(o: Coll.Option[Str]): Nx.FrR[Coll.Option[Str]] = o match
+  case Coll.None => Nx.FrOk(Coll.None)
+  case Coll.Some(s) => Nx.frNarSri(s) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(h) => Nx.FrOk(Coll.Some(h))
+
+// ---- git ref names (git check-ref-format, as libgit2 reads it for a branch or tag) -------------------------------
+
+def Nx.frBadRefChar(s: Str, i: I64): Bool =
+  if i >= Str.len(s) then false
+  else
+    val c = Str.at(s, i)
+    c < 32 || c == 127 || Nx.byteAt(" ~^:?*[\\", c, 0) >= 0 || Nx.frBadRefChar(s, i + 1)
+
+def Nx.frRefComps(xs: Coll.List[Str]): Bool = xs match
+  case Coll.Nil => true
+  case Coll.Cons(h, t) => Str.len(h) > 0 && !Nx.fuPre(h, ".") && !Nx.fuSuf(h, ".lock") && Nx.frRefComps(t)
+
+def Nx.frLegalRef(s: Str): Bool =
+  !Str.eq(s, "@") && !Nx.fuSuf(s, ".") && !Nx.fuContains(s, "..", 0) && !Nx.fuContains(s, "@{", 0) && !Nx.frBadRefChar(s, 0) && Nx.frRefComps(Nx.fuSplit(s, '/', 0, Coll.Nil))
+
+// refRegex: [a-zA-Z0-9@][a-zA-Z0-9_.\/@+-]*
+def Nx.frRefRun(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if i < Str.len(s) && (Nx.fuAlnum(c) || Nx.byteAt("_./@+-", c, 0) >= 0) then Nx.frRefRun(s, i + 1) else i
+
+def Nx.frRefOk(s: Str): Bool =
+  Str.len(s) > 0 && (Nx.fuAlnum(Str.at(s, 0)) || Str.at(s, 0) == '@') && Nx.frRefRun(s, 1) == Str.len(s)
+
+// hostRegex: [a-zA-Z0-9.-]*
+def Nx.frHostOk(s: Str, i: I64): Bool = i >= Str.len(s) || ((Nx.fuAlnum(Str.at(s, i)) || Str.at(s, i) == '.' || Str.at(s, i) == '-') && Nx.frHostOk(s, i + 1))
+
+// flakeRegex: [a-zA-Z][a-zA-Z0-9_-]*
+def Nx.frIdRun(s: Str, i: I64): I64 =
+  val c = Str.at(s, i)
+  if i < Str.len(s) && (Nx.fuAlnum(c) || c == '_' || c == '-') then Nx.frIdRun(s, i + 1) else i
+
+def Nx.frIdOk(s: Str): Bool = Str.len(s) > 0 && Nx.fuAlpha(Str.at(s, 0)) && Nx.frIdRun(s, 1) == Str.len(s)
+
+// ---- github, gitlab, sourcehut (github.cc GitArchiveInputScheme) ------------------------------------------------
+
+def Nx.hubName(h: Nx.Hub): Str = h match
+  case Nx.HGithub => "github"
+  case Nx.HGitlab => "gitlab"
+  case Nx.HSourcehut => "sourcehut"
+
+// inputFromAttrs' refusals
+def Nx.frHubChk(ref: Coll.Option[Str], rev: Coll.Option[Str], host: Coll.Option[Str]): Coll.Option[Str] =
+  val both = Nx.isSome(ref) && Nx.isSome(rev)
+  val revErr: Coll.Option[Str] = rev match
+    case Coll.None => Coll.None
+    case Coll.Some(r) => Nx.parseAnyHash(r, 1) match
+      case Nx.HashOk(_, _) => Coll.None
+      case Nx.HashBad(m) => Coll.Some(m)
+  val refErr: Coll.Option[Str] = ref match
+    case Coll.None => Coll.None
+    case Coll.Some(r) => Nx.fuWhen(!Nx.frLegalRef(r), "input contains an invalid branch/tag name")
+  val hostErr: Coll.Option[Str] = host match
+    case Coll.None => Coll.None
+    case Coll.Some(h) => Nx.fuWhen(!Nx.frHostOk(h, 0), "input contains an invalid instance host")
+  Nx.fuFirst(Nx.fuWhen(both, "input contains both a commit hash and a branch/tag name"), Nx.fuFirst(revErr, Nx.fuFirst(refErr, hostErr)))
+
+def Nx.frHubFromUrl(hub: Nx.Hub, u: Nx.Url): Nx.FrR[Nx.Fr] =
+  val path = Nx.fuNonEmpty(Nx.uPath(u), Coll.Nil)
+  val n = Coll.length(path)
+  val q = Nx.uQuery(u)
+  val p2 = Nx.fuNth(path, 2)
+  val pathRev: Coll.Option[Str] = if n == 3 && Nx.frIsRev(p2) then Coll.Some(p2) else Coll.None
+  val pathRef: Coll.Option[Str] =
+    if n == 3 then (if Nx.frIsRev(p2) then Coll.None else Coll.Some(p2))
+    else if n > 3 then Coll.Some(Nx.fuJoinAll(Nx.drop(path, 2), "/"))
+    else Coll.None
+  val qRev = Nx.qGet(q, "rev")
+  val qRef = Nx.qGet(q, "ref")
+  if n < 2 then Nx.FrErr("URL is invalid")
+  else if Nx.isSome(pathRev) && Nx.isSome(qRev) then Nx.FrErr("URL contains multiple commit hashes")
+  else if Nx.isSome(pathRef) && Nx.isSome(qRef) then Nx.FrErr("URL contains multiple branch/tag names")
+  else
+    val rev = Nx.fuFirst(qRev, pathRev)
+    val ref = Nx.fuFirst(qRef, pathRef)
+    val host = Nx.qGet(q, "host")
+    Nx.frOkUnless(Nx.frHubChk(ref, rev, host), Nx.FrHub(hub, Nx.fuNth(path, 0), Nx.fuNth(path, 1), ref, rev, host, Nx.qGet(q, "narHash")))
+
+def Nx.frHubToUrl(hub: Nx.Hub, owner: Str, repo: Str, ref: Coll.Option[Str], rev: Coll.Option[Str], host: Coll.Option[Str], nar: Coll.Option[Str]): Nx.FrR[Nx.Url] =
+  Nx.frRevOpt(rev) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(rv) => Nx.frNarOpt(nar) match
+      case Nx.FrErr(m) => Nx.FrErr(m)
+      case Nx.FrOk(nv) =>
+        val tail1: Coll.List[Str] = Nx.fuOne(ref)
+        val tail2: Coll.List[Str] = Nx.fuOne(rv)
+        val path = Coll.Cons(owner, Coll.Cons(repo, Coll.revOnto(Coll.rev(tail1), tail2)))
+        val q = Nx.qSetOpt(Nx.qSetOpt(Coll.Nil, "narHash", nv), "host", host)
+        Nx.FrOk(Nx.Url(Nx.hubName(hub), Coll.None, path, q, ""))
+
+// ---- indirect (indirect.cc) -------------------------------------------------------------------------------------
+
+enum Nx.RR:
+  case Nx.RR(ref: Coll.Option[Str], rev: Coll.Option[Str])
+
+def Nx.frIndRR(path: Coll.List[Str], n: I64): Nx.FrR[Nx.RR] =
+  val p1 = Nx.fuNth(path, 1)
+  val p2 = Nx.fuNth(path, 2)
+  if n == 1 then Nx.FrOk(Nx.RR(Coll.None, Coll.None))
+  else if n == 2 then
+    if Nx.frIsRev(p1) then Nx.FrOk(Nx.RR(Coll.None, Coll.Some(Nx.fuLower(p1))))
+    else if Nx.frLegalRef(p1) then Nx.FrOk(Nx.RR(Coll.Some(p1), Coll.None))
+    else Nx.FrErr("in flake URL, the second part is not a commit hash or branch/tag name")
+  else if n == 3 then
+    if !Nx.frLegalRef(p1) then Nx.FrErr("in flake URL, the second part is not a branch/tag name")
+    else if !Nx.frIsRev(p2) then Nx.FrErr("in flake URL, the third part is not a commit hash")
+    else Nx.FrOk(Nx.RR(Coll.Some(p1), Coll.Some(Nx.fuLower(p2))))
+  else Nx.FrErr("flake URL is invalid")
+
+def Nx.frIndFromUrl(u: Nx.Url): Nx.FrR[Nx.Fr] =
+  val path = Nx.fuNonEmpty(Nx.uPath(u), Coll.Nil)
+  val id = Nx.fuNth(path, 0)
+  Nx.frIndRR(path, Coll.length(path)) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(rr) =>
+      val Nx.RR(ref, rev) = rr
+      if !Nx.frIdOk(id) then Nx.FrErr(Nx.fuErr("'", Nx.cat(id, "' is not a valid flake ID")))
+      else Nx.FrOk(Nx.FrInd(id, ref, rev))
+
+def Nx.frIndToUrl(id: Str, ref: Coll.Option[Str], rev: Coll.Option[Str]): Nx.FrR[Nx.Url] =
+  Nx.frRevOpt(rev) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(rv) => Nx.FrOk(Nx.Url("flake", Coll.None, Coll.Cons(id, Coll.revOnto(Coll.rev(Nx.fuOne(ref)), Nx.fuOne(rv))), Coll.Nil, ""))
+
+// the one string of an option as a list
+def Nx.fuOne(o: Coll.Option[Str]): Coll.List[Str] = o match
+  case Coll.None => Coll.Nil
+  case Coll.Some(s) => Coll.Cons(s, Coll.Nil)
+
+// ---- git (git.cc) -----------------------------------------------------------------------------------------------
+
+// the last @ before the first / that has a : after it (the greedy match of ([^/]*)@(.*):(.*))
+def Nx.frScpAt(url: Str, i: I64): I64 =
+  if i < 0 then 0 - 1
+  else if Str.at(url, i) == '@' && Nx.byteAt(Nx.fuAfter(url, i + 1), ':', 0) >= 0 then i
+  else Nx.frScpAt(url, i - 1)
+
+def Nx.frScp(url: Str): Str =
+  if Nx.fuPre(url, "/") then url
+  else
+    val a = Nx.frScpAt(url, Nx.fuFirstOf(url, 0, "/") - 1)
+    if a < 0 then url
+    else
+      val rest = Nx.fuAfter(url, a + 1)
+      val c = Nx.fuLastIdx(rest, ':', Str.len(rest) - 1)
+      Nx.cat(Nx.cat(Nx.cat("ssh://", Str.slice(url, 0, a)), Nx.cat("@", Str.slice(rest, 0, c))), Nx.cat("/", Nx.fuAfter(rest, c + 1)))
+
+// fixGitURL (url.cc:420-446), as the text of the URL it gives
+def Nx.frFixGit(url0: Str): Nx.FrR[Str] =
+  val url = Nx.frScp(url0)
+  if !Nx.fuPre(url, "file:") && !Nx.fuPre(url, "git+file:") && !Nx.fuContains(url, "://", 0) then
+    val comps = Nx.fuSplit(url, '/', 0, Coll.Nil)
+    if Nx.byteAt(Nx.fuNth(comps, 0), ':', 0) >= 0 then Nx.FrErr(Nx.fuErr("SCP-like URL '", Nx.cat(url, "' is not supported; use SSH URL syntax instead (ssh://...)")))
+    else
+      val auth: Coll.Option[Nx.UAuth] = if Nx.fuPre(url, "/") then Coll.Some(Nx.UAuth(Coll.None, Coll.None, "", false, Coll.None)) else Coll.None
+      Nx.FrOk(Nx.fuStr(Nx.Url("file", auth, comps, Coll.Nil, "")))
+  else Nx.fuParse(url, false) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(p) =>
+      val sc = Nx.uScheme(p)
+      val dropGit = Nx.fuAppIs(Nx.fuApp(sc), "git")
+      Nx.FrOk(Nx.fuStr(if dropGit then Nx.uWithScheme(p, Nx.fuTransport(sc)) else p))
+
+def Nx.fuAppIs(app: Coll.Option[Str], name: Str): Bool = app match
+  case Coll.None => false
+  case Coll.Some(a) => Str.eq(a, name)
+
+def Nx.frGitMake(url: Str, ref: Coll.Option[Str], rev: Coll.Option[Str], flags: Nx.GitFlags): Nx.FrR[Nx.Fr] =
+  val refErr: Coll.Option[Str] = ref match
+    case Coll.None => Coll.None
+    case Coll.Some(r) => Nx.fuWhen(!Nx.frLegalRef(r), Nx.fuErr("invalid Git branch/tag name '", r))
+  refErr match
+    case Coll.Some(m) => Nx.FrErr(m)
+    case Coll.None => Nx.frFixGit(url) match
+      case Nx.FrErr(m) => Nx.FrErr(m)
+      case Nx.FrOk(fixed) => Nx.FrOk(Nx.FrGit(fixed, ref, rev, flags))
+
+def Nx.frGitFromUrl(u: Nx.Url): Nx.FrR[Nx.Fr] =
+  val q = Nx.uQuery(u)
+  val verified = Nx.isSome(Nx.qGet(q, "keytype")) || Nx.isSome(Nx.qGet(q, "publicKey")) || Nx.isSome(Nx.qGet(q, "publicKeys")) || Nx.isSome(Nx.qGet(q, "verifyCommit"))
+  val flags = Nx.GitFlags(Nx.qFlag(q, "shallow"), Nx.qFlag(q, "submodules"), Nx.qFlag(q, "lfs"), Nx.qFlag(q, "exportIgnore"), Nx.qFlag(q, "allRefs"))
+  val rest = Nx.qDelAll(q, Nx.words("rev ref keytype publicKey publicKeys shallow submodules lfs exportIgnore allRefs verifyCommit"))
+  if verified then Nx.FrErr("experimental Nix feature 'verified-fetches' is disabled")
+  else Nx.frGitMake(Nx.fuStr(Nx.uWithQuery(Nx.uNoFrag(u), rest)), Nx.qGet(q, "ref"), Nx.qGet(q, "rev"), flags)
+
+def Nx.qFlagSet(q: Coll.List[Nx.QP], k: Str, f: Coll.Option[Bool]): Coll.List[Nx.QP] = f match
+  case Coll.None => q
+  case Coll.Some(b) => if b then Nx.qSet(q, k, "1") else q
+
+def Nx.frGitToUrl(url: Str, ref: Coll.Option[Str], rev: Coll.Option[Str], flags: Nx.GitFlags): Nx.FrR[Nx.Url] =
+  Nx.fuParse(url, false) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(u) => Nx.frRevOpt(rev) match
+      case Nx.FrErr(m) => Nx.FrErr(m)
+      case Nx.FrOk(rv) =>
+        val Nx.GitFlags(shallow, submodules, lfs, exportIgnore, _) = flags
+        val sc = Nx.uScheme(u)
+        val q0 = Nx.qSetOpt(Nx.qSetOpt(Nx.uQuery(u), "rev", rv), "ref", ref)
+        val q1 = Nx.qFlagSet(Nx.qFlagSet(Nx.qFlagSet(Nx.qFlagSet(q0, "shallow", shallow), "lfs", lfs), "submodules", submodules), "exportIgnore", exportIgnore)
+        val u2 = Nx.uWithQuery(u, q1)
+        Nx.FrOk(if Str.eq(sc, "git") then u2 else Nx.uWithScheme(u2, Nx.cat("git+", sc)))
+
+// ---- tarball and file (tarball.cc CurlInputScheme) --------------------------------------------------------------
+
+def Nx.frCurlFromUrl(file: Bool, u: Nx.Url): Nx.FrR[Nx.Fr] =
+  val q = Nx.uQuery(u)
+  val rest = Nx.qDelAll(q, Nx.words("url narHash name unpack rev revCount lastModified"))
+  val u2 = Nx.uWithQuery(Nx.uWithScheme(Nx.uNoFrag(u), Nx.fuTransport(Nx.uScheme(u))), rest)
+  Nx.FrOk(Nx.FrCurl(file, Nx.fuStr(u2), Nx.qGet(q, "narHash"), Nx.qGet(q, "rev"), Nx.fuU64Opt(Nx.qGet(q, "revCount")), Nx.fuU64Opt(Nx.qGet(q, "lastModified"))))
+
+def Nx.fuU64Opt(o: Coll.Option[Str]): Coll.Option[I64] = o match
+  case Coll.None => Coll.None
+  case Coll.Some(s) => Nx.fuU64(s)
+
+def Nx.frCurlToUrl(url: Str, nar: Coll.Option[Str]): Nx.FrR[Nx.Url] =
+  Nx.fuParse(url, false) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(u) => Nx.frNarOpt(nar) match
+      case Nx.FrErr(m) => Nx.FrErr(m)
+      case Nx.FrOk(nv) => Nx.FrOk(Nx.uWithQuery(u, Nx.qSetOpt(Nx.uQuery(u), "narHash", nv)))
+
+// ---- path (path.cc) ---------------------------------------------------------------------------------------------
+
+// urlPathToPath: segments joined by /, a leading empty one making it absolute, empty ones collapsed
+def Nx.frJoinPath(xs: Coll.List[Str], acc: Str): Str = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) =>
+    val sep = if Str.len(acc) == 0 || Nx.fuSuf(acc, "/") then acc else Nx.cat(acc, "/")
+    Nx.frJoinPath(t, Nx.cat(sep, h))
+
+def Nx.frUrlPath(xs: Coll.List[Str]): Nx.FrR[Str] = xs match
+  case Coll.Nil => Nx.FrOk("")
+  case Coll.Cons(h, t) =>
+    if Nx.frSegBad(xs) then Nx.FrErr("URL path component contains '/' or NUL, which is not allowed in file names")
+    else Nx.FrOk(Nx.frJoinPath(t, if Str.len(h) == 0 then "/" else h))
+
+def Nx.frSegBad(xs: Coll.List[Str]): Bool = xs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => Nx.byteAt(h, '/', 0) >= 0 || Nx.byteAt(h, 0, 0) >= 0 || Nx.frSegBad(t)
+
+def Nx.frPathQ(q: Coll.List[Nx.QP], path: Str, rev: Coll.Option[Nx.AV], nar: Coll.Option[Nx.AV], rc: Coll.Option[I64], lm: Coll.Option[I64]): Nx.FrR[Nx.Fr] = q match
+  case Coll.Nil => Nx.FrOk(Nx.FrPath(path, rev, nar, rc, lm))
+  case Coll.Cons(h, t) =>
+    val Nx.QP(k, v) = h
+    val n = Nx.fuU64(v)
+    if Str.eq(k, "rev") then Nx.frPathQ(t, path, Coll.Some(Nx.AStr(v)), nar, rc, lm)
+    else if Str.eq(k, "narHash") then Nx.frPathQ(t, path, rev, Coll.Some(Nx.AStr(v)), rc, lm)
+    else if Str.eq(k, "revCount") || Str.eq(k, "lastModified") then n match
+      case Coll.None => Nx.FrErr(Nx.fuErr("path URL has invalid parameter '", k))
+      case Coll.Some(x) => if Str.eq(k, "revCount") then Nx.frPathQ(t, path, rev, nar, Coll.Some(x), lm) else Nx.frPathQ(t, path, rev, nar, rc, Coll.Some(x))
+    else Nx.FrErr(Nx.fuErr("path URL has unsupported parameter '", k))
+
+def Nx.frPathFromUrl(u: Nx.Url): Nx.FrR[Nx.Fr] =
+  val hasHost: Bool = Nx.uAuth(u) match
+    case Coll.None => false
+    case Coll.Some(a) =>
+      val Nx.UAuth(_, _, host, _, _) = a
+      Str.len(host) > 0
+  if hasHost then Nx.FrErr("path URL should not have an authority")
+  else Nx.frUrlPath(Nx.uPath(u)) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(p) => Nx.frPathQ(Nx.uQuery(u), p, Coll.None, Coll.None, Coll.None, Coll.None)
+
+def Nx.avStr(v: Nx.AV): Str = v match
+  case Nx.AStr(s) => s
+  case Nx.AInt(n) => Nx.intStr(n)
+  case Nx.ABool(b) => if b then "1" else "0"
+
+def Nx.qSetAv(q: Coll.List[Nx.QP], k: Str, v: Coll.Option[Nx.AV]): Coll.List[Nx.QP] = v match
+  case Coll.None => q
+  case Coll.Some(x) => Nx.qSet(q, k, Nx.avStr(x))
+
+def Nx.frIntOpt(o: Coll.Option[I64]): Coll.Option[Nx.AV] = o match
+  case Coll.None => Coll.None
+  case Coll.Some(n) => Coll.Some(Nx.AInt(n))
+
+def Nx.frPathToUrl(path: Str, rev: Coll.Option[Nx.AV], nar: Coll.Option[Nx.AV], rc: Coll.Option[I64], lm: Coll.Option[I64]): Nx.Url =
+  val q = Nx.qSetAv(Nx.qSetAv(Nx.qSetAv(Nx.qSetAv(Coll.Nil, "rev", rev), "narHash", nar), "revCount", Nx.frIntOpt(rc)), "lastModified", Nx.frIntOpt(lm))
+  Nx.Url("path", Coll.None, Nx.fuSplit(path, '/', 0, Coll.Nil), q, "")
+
+// ---- mercurial (mercurial.cc) -----------------------------------------------------------------------------------
+
+def Nx.frHgMake(url: Str, ref: Coll.Option[Str], rev: Coll.Option[Str]): Nx.FrR[Nx.Fr] =
+  val refErr: Coll.Option[Str] = ref match
+    case Coll.None => Coll.None
+    case Coll.Some(r) => Nx.fuWhen(!Nx.frRefOk(r), Nx.fuErr("invalid Mercurial branch/tag name '", r))
+  refErr match
+    case Coll.Some(m) => Nx.FrErr(m)
+    case Coll.None => Nx.fuParse(url, false) match
+      case Nx.FrErr(m) => Nx.FrErr(m)
+      case Nx.FrOk(_) => Nx.FrOk(Nx.FrHg(url, ref, rev))
+
+def Nx.frHgFromUrl(u: Nx.Url): Nx.FrR[Nx.Fr] =
+  val q = Nx.uQuery(u)
+  val rest = Nx.qDelAll(q, Nx.words("rev ref"))
+  val u2 = Nx.uWithQuery(Nx.uWithScheme(Nx.uNoFrag(u), Nx.fuAfter(Nx.uScheme(u), 3)), rest)
+  Nx.frHgMake(Nx.fuStr(u2), Nx.qGet(q, "ref"), Nx.qGet(q, "rev"))
+
+def Nx.frHgToUrl(url: Str, ref: Coll.Option[Str], rev: Coll.Option[Str]): Nx.FrR[Nx.Url] =
+  Nx.fuParse(url, false) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(u) => Nx.frRevOpt(rev) match
+      case Nx.FrErr(m) => Nx.FrErr(m)
+      case Nx.FrOk(rv) => Nx.FrOk(Nx.uWithScheme(Nx.uWithQuery(u, Nx.qSetOpt(Nx.qSetOpt(Nx.uQuery(u), "rev", rv), "ref", ref)), Nx.cat("hg+", Nx.uScheme(u))))
+
+// ---- URL to input: Input::fromURL -------------------------------------------------------------------------------
+
+def Nx.frIsHg(sc: Str): Bool = Str.eq(sc, "hg+http") || Str.eq(sc, "hg+https") || Str.eq(sc, "hg+ssh") || Str.eq(sc, "hg+file")
+
+def Nx.frFromUrl(u: Nx.Url): Nx.FrR[Nx.Fr] =
+  val sc = Nx.uScheme(u)
+  val app = Nx.fuApp(sc)
+  val tr = Nx.fuTransport(sc)
+  val curl = Str.eq(tr, "file") || Str.eq(tr, "http") || Str.eq(tr, "https")
+  if curl && Nx.fuAppIs(app, "file") then Nx.frCurlFromUrl(true, u)
+  else if Str.eq(sc, "git") || Nx.fuAppIs(app, "git") then Nx.frGitFromUrl(u)
+  else if Str.eq(sc, "github") then Nx.frHubFromUrl(Nx.HGithub, u)
+  else if Str.eq(sc, "gitlab") then Nx.frHubFromUrl(Nx.HGitlab, u)
+  else if Str.eq(sc, "flake") then Nx.frIndFromUrl(u)
+  else if Nx.frIsHg(sc) then Nx.frHgFromUrl(u)
+  else if Str.eq(sc, "path") then Nx.frPathFromUrl(u)
+  else if Str.eq(sc, "sourcehut") then Nx.frHubFromUrl(Nx.HSourcehut, u)
+  else if curl && (!Nx.isSome(app) ||Nx.fuAppIs(app, "tarball")) then Nx.frCurlFromUrl(false, u)
+  else Nx.FrErr(Nx.fuErr("input '", Nx.cat(Nx.fuStr(u), "' is unsupported")))
+
+// fromParsedURL: the dir takes out of the query, a fragment is refused
+def Nx.frFromParsed(u: Nx.Url): Nx.FrR[Nx.FlakeRef] =
+  val dir: Str = Nx.qGet(Nx.uQuery(u), "dir") match
+    case Coll.None => ""
+    case Coll.Some(d) => d
+  if Str.len(Nx.uFrag(u)) > 0 then Nx.FrErr(Nx.fuErr("unexpected fragment '", Nx.cat(Nx.uFrag(u), "' in flake reference")))
+  else Nx.frFromUrl(Nx.uWithQuery(u, Nx.qDel(Nx.uQuery(u), "dir"))) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(fr) => Nx.FrOk(Nx.FlakeRef(fr, dir))
+
+// ---- text to flake reference: parseFlakeRefWithFragment ---------------------------------------------------------
+
+// a flake id with a ref or rev and a fragment (flakeref.cc:228): None when the text is not of that form
+def Nx.frIdParse(s: Str): Coll.Option[Nx.FrR[Nx.FlakeRef]] =
+  val e = Nx.frIdRun(s, 1)
+  val n = Str.len(s)
+  val slash = e < n && Str.at(s, e) == '/'
+  val refEnd = if slash then Nx.frRefRun(s, e + 2) else e
+  val refOk = !slash || (e + 1 < n && (Nx.fuAlnum(Str.at(s, e + 1)) || Str.at(s, e + 1) == '@'))
+  val tailOk = refEnd == n || (Str.at(s, refEnd) == '#' && Nx.fuChars(s, refEnd + 1, n, ":@/? \"^"))
+  if n == 0 || !Nx.fuAlpha(Str.at(s, 0)) || !refOk || !tailOk then Coll.None
+  else if refEnd < n && refEnd + 1 < n then Coll.Some(Nx.FrErr(Nx.fuErr("unexpected fragment '", Nx.cat(Nx.fuAfter(s, refEnd + 1), "' in flake reference"))))
+  else Coll.Some(Nx.frFromParsed(Nx.Url("flake", Coll.None, Nx.fuSplit(Str.slice(s, 0, refEnd), '/', 0, Coll.Nil), Coll.Nil, "")))
+
+def Nx.fuFixStr(s: Str): Str =
+  val b = Nx.sbNew()
+  Nx.fuFixChars(s, 0, Str.len(s), false, b)
+  Nx.sbGet(b)
+
+// parsePathFlakeRefWithFragment without a base directory: an absolute path, as a path: URL
+def Nx.frPathRoute(s: Str): Nx.FrR[Nx.FlakeRef] =
+  val n = Str.len(s)
+  val pe = Nx.fuFirstOf(s, 0, "?#")
+  val qe = if pe < n && Str.at(s, pe) == '?' then Nx.fuFirstOf(s, pe + 1, "#") else pe
+  val qs = Nx.fuFixStr(if qe > pe then Str.slice(s, pe + 1, qe) else "")
+  val frag = if qe < n then Nx.fuAfter(s, qe + 1) else ""
+  val pathS = Str.slice(s, 0, pe)
+  if Str.len(pathS) == 0 || Str.at(pathS, 0) != '/' then Nx.FrErr(Nx.fuErr("flake reference '", Nx.cat(s, "' is not an absolute path")))
+  else if Nx.byteAt(frag, 10, 0) >= 0 || Nx.byteAt(frag, 13, 0) >= 0 then Nx.FrErr(Nx.fuErr("invalid flakeref '", s))
+  else if !Nx.fuChars(qs, 0, Str.len(qs), ":@/?") then Nx.FrErr(Nx.fuErr("invalid URI query '", qs))
+  else
+    val segs = Nx.fuNonEmpty(Nx.fuSplit(pathS, '/', 0, Coll.Nil), Coll.Nil)
+    val trail: Coll.List[Str] = if Nx.fuSuf(pathS, "/") then Coll.Cons("", Coll.Nil) else Coll.Nil
+    val path = Coll.Cons("", Coll.revOnto(Coll.rev(segs), trail))
+    val q = Nx.qParse(qs, 0, Str.len(qs), Coll.Nil)
+    Nx.frFromParsed(Nx.Url("path", Coll.Some(Nx.UAuth(Coll.None, Coll.None, "", false, Coll.None)), path, q, Nx.fuDecOr(frag)))
+
+def Nx.frParse(s: Str): Nx.FrR[Nx.FlakeRef] = Nx.frIdParse(s) match
+  case Coll.Some(r) => r
+  case Coll.None => Nx.fuParse(s, true) match
+    case Nx.FrOk(u) => Nx.frFromParsed(u)
+    case Nx.FrErr(_) => Nx.frPathRoute(s)
+
+// ---- input to attributes: toAttrs -------------------------------------------------------------------------------
+
+def Nx.faStrOpt(acc: Coll.List[Nx.FA], name: Str, o: Coll.Option[Str]): Coll.List[Nx.FA] = o match
+  case Coll.None => acc
+  case Coll.Some(s) => Coll.Cons(Nx.FA(name, Nx.AStr(s)), acc)
+
+def Nx.faIntOpt(acc: Coll.List[Nx.FA], name: Str, o: Coll.Option[I64]): Coll.List[Nx.FA] = o match
+  case Coll.None => acc
+  case Coll.Some(n) => Coll.Cons(Nx.FA(name, Nx.AInt(n)), acc)
+
+def Nx.faBoolOpt(acc: Coll.List[Nx.FA], name: Str, o: Coll.Option[Bool]): Coll.List[Nx.FA] = o match
+  case Coll.None => acc
+  case Coll.Some(b) => Coll.Cons(Nx.FA(name, Nx.ABool(b)), acc)
+
+def Nx.faAvOpt(acc: Coll.List[Nx.FA], name: Str, o: Coll.Option[Nx.AV]): Coll.List[Nx.FA] = o match
+  case Coll.None => acc
+  case Coll.Some(v) => Coll.Cons(Nx.FA(name, v), acc)
+
+def Nx.faStr1(acc: Coll.List[Nx.FA], name: Str, s: Str): Coll.List[Nx.FA] = Coll.Cons(Nx.FA(name, Nx.AStr(s)), acc)
+
+def Nx.frAttrsOf(fr: Nx.Fr): Coll.List[Nx.FA] = fr match
+  case Nx.FrHub(hub, owner, repo, ref, rev, host, nar) =>
+    Nx.faStrOpt(Nx.faStrOpt(Nx.faStrOpt(Nx.faStrOpt(Nx.faStr1(Nx.faStr1(Nx.faStr1(Coll.Nil, "type", Nx.hubName(hub)), "owner", owner), "repo", repo), "ref", ref), "rev", rev), "host", host), "narHash", nar)
+  case Nx.FrGit(url, ref, rev, flags) =>
+    val Nx.GitFlags(sh, sm, lfs, ei, ar) = flags
+    val a = Nx.faStrOpt(Nx.faStrOpt(Nx.faStr1(Nx.faStr1(Coll.Nil, "type", "git"), "url", url), "ref", ref), "rev", rev)
+    Nx.faBoolOpt(Nx.faBoolOpt(Nx.faBoolOpt(Nx.faBoolOpt(Nx.faBoolOpt(a, "shallow", sh), "submodules", sm), "lfs", lfs), "exportIgnore", ei), "allRefs", ar)
+  case Nx.FrCurl(file, url, nar, rev, rc, lm) =>
+    val a = Nx.faStr1(Nx.faStr1(Coll.Nil, "type", if file then "file" else "tarball"), "url", url)
+    Nx.faIntOpt(Nx.faIntOpt(Nx.faStrOpt(Nx.faStrOpt(a, "narHash", nar), "rev", rev), "revCount", rc), "lastModified", lm)
+  case Nx.FrPath(path, rev, nar, rc, lm) =>
+    val a = Nx.faStr1(Nx.faStr1(Coll.Nil, "type", "path"), "path", path)
+    Nx.faIntOpt(Nx.faIntOpt(Nx.faAvOpt(Nx.faAvOpt(a, "rev", rev), "narHash", nar), "revCount", rc), "lastModified", lm)
+  case Nx.FrInd(id, ref, rev) =>
+    Nx.faStrOpt(Nx.faStrOpt(Nx.faStr1(Nx.faStr1(Coll.Nil, "type", "indirect"), "id", id), "ref", ref), "rev", rev)
+  case Nx.FrHg(url, ref, rev) =>
+    Nx.faStrOpt(Nx.faStrOpt(Nx.faStr1(Nx.faStr1(Coll.Nil, "type", "hg"), "url", url), "ref", ref), "rev", rev)
+
+// FlakeRef::toAttrs
+def Nx.frAttrs(f: Nx.FlakeRef): Coll.List[Nx.FA] =
+  val Nx.FlakeRef(fr, dir) = f
+  val a = Nx.frAttrsOf(fr)
+  if Str.len(dir) == 0 then a else Nx.faStr1(a, "dir", dir)
+
+def Nx.faVal(v: Nx.AV): Nx.Val = v match
+  case Nx.AStr(s) => Nx.VStr(s, Coll.Nil)
+  case Nx.AInt(n) => Nx.int(n)
+  case Nx.ABool(b) => Nx.bool(b)
+
+def Nx.faPairs(xs: Coll.List[Nx.FA], acc: Coll.List[Nx.Pair]): Coll.List[Nx.Pair] = xs match
+  case Coll.Nil => acc
+  case Coll.Cons(h, t) =>
+    val Nx.FA(name, v) = h
+    Nx.faPairs(t, Coll.Cons(Nx.pair(name, Nx.faVal(v)), acc))
+
+// ---- attributes to input: Input::fromAttrs ----------------------------------------------------------------------
+
+enum Nx.AK:
+  case Nx.AkStr
+  case Nx.AkInt
+  case Nx.AkBool
+  case Nx.AkAny
+  case Nx.AkNo
+
+def Nx.frIn(name: Str, names: Str): Bool = Nx.fuAppIsIn(Nx.words(names), name)
+
+def Nx.fuAppIsIn(xs: Coll.List[Str], name: Str): Bool = xs match
+  case Coll.Nil => false
+  case Coll.Cons(h, t) => Str.eq(h, name) || Nx.fuAppIsIn(t, name)
+
+// the type of attribute name an input of type t holds (allowedAttrs, and what fromAttrs and toURL read of them)
+def Nx.frKind(t: Str, name: Str): Nx.AK =
+  val hub = Str.eq(t, "github") || Str.eq(t, "gitlab") || Str.eq(t, "sourcehut")
+  val curl = Str.eq(t, "tarball") || Str.eq(t, "file")
+  if Nx.frIn(name, "type") then Nx.AkStr
+  else if Nx.frIn(name, "__final") then Nx.AkAny
+  else if hub then
+    if Nx.frIn(name, "owner repo ref rev narHash host") then Nx.AkStr
+    else if Nx.frIn(name, "lastModified") then Nx.AkInt
+    else if Nx.frIn(name, "treeHash") then Nx.AkAny
+    else Nx.AkNo
+  else if Str.eq(t, "git") then
+    if Nx.frIn(name, "url ref rev") then Nx.AkStr
+    else if Nx.frIn(name, "shallow submodules lfs exportIgnore allRefs") then Nx.AkBool
+    else if Nx.frIn(name, "lastModified revCount") then Nx.AkInt
+    else if Nx.frIn(name, "narHash name dirtyRev dirtyShortRev") then Nx.AkAny
+    else Nx.AkNo
+  else if curl then
+    if Nx.frIn(name, "url narHash") then Nx.AkStr
+    else if Nx.frIn(name, "revCount lastModified") then Nx.AkInt
+    else if Nx.frIn(name, "name unpack rev") then Nx.AkAny
+    else Nx.AkNo
+  else if Str.eq(t, "path") then
+    if Nx.frIn(name, "path") then Nx.AkStr
+    else if Nx.frIn(name, "revCount lastModified") then Nx.AkInt
+    else if Nx.frIn(name, "rev narHash") then Nx.AkAny
+    else Nx.AkNo
+  else if Str.eq(t, "indirect") then
+    if Nx.frIn(name, "id ref rev") then Nx.AkStr
+    else if Nx.frIn(name, "narHash") then Nx.AkAny
+    else Nx.AkNo
+  else
+    if Nx.frIn(name, "url ref rev") then Nx.AkStr
+    else if Nx.frIn(name, "revCount") then Nx.AkInt
+    else if Nx.frIn(name, "narHash name") then Nx.AkAny
+    else Nx.AkNo
+
+def Nx.faGet(xs: Coll.List[Nx.FA], name: Str): Coll.Option[Nx.AV] = xs match
+  case Coll.Nil => Coll.None
+  case Coll.Cons(h, t) =>
+    val Nx.FA(n, v) = h
+    if Str.eq(n, name) then Coll.Some(v) else Nx.faGet(t, name)
+
+// the attributes were checked by Nx.faChk: a value of another type is absent
+def Nx.faStr(xs: Coll.List[Nx.FA], name: Str): Coll.Option[Str] = Nx.faGet(xs, name) match
+  case Coll.None => Coll.None
+  case Coll.Some(v) => v match
+    case Nx.AStr(s) => Coll.Some(s)
+    case _ => Coll.None
+
+def Nx.faInt(xs: Coll.List[Nx.FA], name: Str): Coll.Option[I64] = Nx.faGet(xs, name) match
+  case Coll.None => Coll.None
+  case Coll.Some(v) => v match
+    case Nx.AInt(n) => Coll.Some(n)
+    case _ => Coll.None
+
+def Nx.faBool(xs: Coll.List[Nx.FA], name: Str): Coll.Option[Bool] = Nx.faGet(xs, name) match
+  case Coll.None => Coll.None
+  case Coll.Some(v) => v match
+    case Nx.ABool(b) => Coll.Some(b)
+    case _ => Coll.None
+
+def Nx.faDel(xs: Coll.List[Nx.FA], name: Str): Coll.List[Nx.FA] = xs match
+  case Coll.Nil => xs
+  case Coll.Cons(h, t) =>
+    val Nx.FA(n, _) = h
+    if Str.eq(n, name) then t else Coll.Cons(h, Nx.faDel(t, name))
+
+// every attribute allowed by the type and of its type: the first refusal
+def Nx.faChk(xs: Coll.List[Nx.FA], t: Str): Coll.Option[Str] = xs match
+  case Coll.Nil => Coll.None
+  case Coll.Cons(h, rest) =>
+    val Nx.FA(n, v) = h
+    val k = Nx.frKind(t, n)
+    val bad: Coll.Option[Str] = k match
+      case Nx.AkNo => Coll.Some(Nx.cat(Nx.cat("input attribute '", n), Nx.cat("' not supported by scheme ", t)))
+      case Nx.AkStr => v match
+        case Nx.AStr(_) => Coll.None
+        case _ => Coll.Some(Nx.fuErr("input attribute '", Nx.cat(n, "' is not a string")))
+      case Nx.AkInt => v match
+        case Nx.AInt(_) => Coll.None
+        case _ => Coll.Some(Nx.fuErr("input attribute '", Nx.cat(n, "' is not an integer")))
+      case Nx.AkBool => v match
+        case Nx.ABool(_) => Coll.None
+        case _ => Coll.Some(Nx.fuErr("input attribute '", Nx.cat(n, "' is not a Boolean")))
+      case Nx.AkAny => Coll.None
+    Nx.fuFirst(bad, Nx.faChk(rest, t))
+
+def Nx.frBuild(t: Str, xs: Coll.List[Nx.FA]): Nx.FrR[Nx.Fr] =
+  val hub = Str.eq(t, "github") || Str.eq(t, "gitlab") || Str.eq(t, "sourcehut")
+  if hub then Nx.frHubBuild(t, xs)
+  else if Str.eq(t, "git") then Nx.faStr(xs, "url") match
+    case Coll.None => Nx.frMissing("url")
+    case Coll.Some(url) =>
+      val flags = Nx.GitFlags(Nx.faBool(xs, "shallow"), Nx.faBool(xs, "submodules"), Nx.faBool(xs, "lfs"), Nx.faBool(xs, "exportIgnore"), Nx.faBool(xs, "allRefs"))
+      val bad = Nx.isSome(Nx.faGet(xs, "verifyCommit")) || Nx.isSome(Nx.faGet(xs, "keytype")) || Nx.isSome(Nx.faGet(xs, "publicKey")) || Nx.isSome(Nx.faGet(xs, "publicKeys"))
+      if bad then Nx.FrErr("experimental Nix feature 'verified-fetches' is disabled")
+      else Nx.frGitMake(url, Nx.faStr(xs, "ref"), Nx.faStr(xs, "rev"), flags)
+  else if Str.eq(t, "tarball") || Str.eq(t, "file") then Nx.faStr(xs, "url") match
+    case Coll.None => Nx.frMissing("url")
+    case Coll.Some(url) => Nx.FrOk(Nx.FrCurl(Str.eq(t, "file"), url, Nx.faStr(xs, "narHash"), Coll.None, Coll.None, Coll.None))
+  else if Str.eq(t, "path") then Nx.faStr(xs, "path") match
+    case Coll.None => Nx.frMissing("path")
+    case Coll.Some(p) => Nx.FrOk(Nx.FrPath(p, Nx.faGet(xs, "rev"), Nx.faGet(xs, "narHash"), Nx.faInt(xs, "revCount"), Nx.faInt(xs, "lastModified")))
+  else if Str.eq(t, "indirect") then Nx.faStr(xs, "id") match
+    case Coll.None => Nx.frMissing("id")
+    case Coll.Some(id) =>
+      if !Nx.frIdOk(id) then Nx.FrErr(Nx.fuErr("'", Nx.cat(id, "' is not a valid flake ID")))
+      else Nx.FrOk(Nx.FrInd(id, Nx.faStr(xs, "ref"), Nx.faStr(xs, "rev")))
+  else if Str.eq(t, "hg") then Nx.faStr(xs, "url") match
+    case Coll.None => Nx.frMissing("url")
+    case Coll.Some(url) => Nx.frHgMake(url, Nx.faStr(xs, "ref"), Nx.faStr(xs, "rev"))
+  else Nx.FrErr(Nx.fuErr("cannot show unsupported input of type '", t))
+
+def Nx.frHubBuild(t: Str, xs: Coll.List[Nx.FA]): Nx.FrR[Nx.Fr] = Nx.faStr(xs, "owner") match
+  case Coll.None => Nx.frMissing("owner")
+  case Coll.Some(owner) => Nx.faStr(xs, "repo") match
+    case Coll.None => Nx.frMissing("repo")
+    case Coll.Some(repo) =>
+      val hub = if Str.eq(t, "github") then Nx.HGithub else if Str.eq(t, "gitlab") then Nx.HGitlab else Nx.HSourcehut
+      val ref = Nx.faStr(xs, "ref")
+      val rev = Nx.faStr(xs, "rev")
+      val host = Nx.faStr(xs, "host")
+      Nx.frOkUnless(Nx.frHubChk(ref, rev, host), Nx.FrHub(hub, owner, repo, ref, rev, host, Nx.faStr(xs, "narHash")))
+
+// FlakeRef::fromAttrs
+def Nx.frFromAttrs(as0: Coll.List[Nx.FA]): Nx.FrR[Nx.FlakeRef] =
+  val dirBad: Coll.Option[Str] = Nx.faGet(as0, "dir") match
+    case Coll.None => Coll.None
+    case Coll.Some(v) => v match
+      case Nx.AStr(_) => Coll.None
+      case _ => Coll.Some("input attribute 'dir' is not a string")
+  val dir: Str = Nx.fuOr(Nx.faStr(as0, "dir"))
+  val xs = Nx.faDel(as0, "dir")
+  Nx.faGet(xs, "type") match
+    case Coll.None => Nx.FrErr("'type' attribute to specify input scheme is required but not provided")
+    case Coll.Some(v) => v match
+      case Nx.AStr(t) => Nx.frFromAttrsT(t, xs, dir, dirBad)
+      case _ => Nx.FrErr("input attribute 'type' is not a string")
+
+def Nx.fuOr(o: Coll.Option[Str]): Str = o match
+  case Coll.None => ""
+  case Coll.Some(s) => s
+
+def Nx.frFromAttrsT(t: Str, xs: Coll.List[Nx.FA], dir: Str, dirBad: Coll.Option[Str]): Nx.FrR[Nx.FlakeRef] =
+  val bad = Nx.fuFirst(dirBad, Nx.faChk(xs, t))
+  bad match
+    case Coll.Some(m) => Nx.FrErr(m)
+    case Coll.None => Nx.frBuild(t, xs) match
+      case Nx.FrErr(m) => Nx.FrErr(m)
+      case Nx.FrOk(fr) => Nx.FrOk(Nx.FlakeRef(fr, dir))
+
+// ---- input to URL: toURL, FlakeRef::to_string -------------------------------------------------------------------
+
+def Nx.frToUrl(fr: Nx.Fr): Nx.FrR[Nx.Url] = fr match
+  case Nx.FrHub(hub, owner, repo, ref, rev, host, nar) => Nx.frHubToUrl(hub, owner, repo, ref, rev, host, nar)
+  case Nx.FrGit(url, ref, rev, flags) => Nx.frGitToUrl(url, ref, rev, flags)
+  case Nx.FrCurl(_, url, nar, _, _, _) => Nx.frCurlToUrl(url, nar)
+  case Nx.FrPath(path, rev, nar, rc, lm) => Nx.FrOk(Nx.frPathToUrl(path, rev, nar, rc, lm))
+  case Nx.FrInd(id, ref, rev) => Nx.frIndToUrl(id, ref, rev)
+  case Nx.FrHg(url, ref, rev) => Nx.frHgToUrl(url, ref, rev)
+
+def Nx.frToString(f: Nx.FlakeRef): Nx.FrR[Str] =
+  val Nx.FlakeRef(fr, dir) = f
+  Nx.frToUrl(fr) match
+    case Nx.FrErr(m) => Nx.FrErr(m)
+    case Nx.FrOk(u) => Nx.FrOk(Nx.fuStr(if Str.len(dir) == 0 then u else Nx.uWithQuery(u, Nx.qIns(Nx.uQuery(u), "dir", dir))))
+
+// ---- the primops ------------------------------------------------------------------------------------------------
+
+// builtins.parseFlakeRef str
+def Nx.pParseFlakeRef(v: Nx.Val): Nx.Val = v match
+  case Nx.VStr(s, ctx) => ctx match
+    case Coll.Nil => Nx.frParse(s) match
+      case Nx.FrErr(m) => Nx.VErr(Nx.KOther, m)
+      case Nx.FrOk(f) => Nx.attrsOf(Nx.faPairs(Nx.frAttrs(f), Coll.Nil))
+    case _ => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("the string '", s), "' is not allowed to refer to a store path"))
+  case _ => Nx.typeErr("a string", v)
+
+// the first error among the n cells, else Nx.VNull
+def Nx.frForce(vals: Ptr, i: I64, n: I64): Nx.Val =
+  if i >= n then Nx.VNull
+  else
+    val x = Nx.force(Nx.aget[Ptr](vals, i))
+    x match
+      case Nx.VErr(_, _) => x
+      case _ => Nx.frForce(vals, i + 1, n)
+
+def Nx.frReadAttrs(syms: Ptr, vals: Ptr, i: I64, acc: Coll.List[Nx.FA]): Nx.FrR[Coll.List[Nx.FA]] =
+  if i < 0 then Nx.FrOk(acc)
+  else
+    val name = Nx.symName(Nx.ageti(syms, i))
+    val x = Nx.force(Nx.aget[Ptr](vals, i))
+    x match
+      case Nx.VInt(k) =>
+        if k < 0 then Nx.FrErr(Nx.cat(Nx.cat(Nx.cat("negative value given for flake ref attr ", name), ": "), Nx.intStr(k)))
+        else Nx.frReadAttrs(syms, vals, i - 1, Coll.Cons(Nx.FA(name, Nx.AInt(k)), acc))
+      case Nx.VBool(b) => Nx.frReadAttrs(syms, vals, i - 1, Coll.Cons(Nx.FA(name, Nx.ABool(b)), acc))
+      case Nx.VStr(s, _) => Nx.frReadAttrs(syms, vals, i - 1, Coll.Cons(Nx.FA(name, Nx.AStr(s)), acc))
+      case _ => Nx.FrErr(Nx.cat(Nx.cat(Nx.cat("flake reference attribute sets may only contain integers, Booleans, and strings, but attribute '", name), "' is "), Nx.showType(x)))
+
+// builtins.flakeRefToString attrs
+def Nx.pFlakeRefToString(v: Nx.Val): Nx.Val = Nx.flat(v) match
+  case Nx.VAttrs(n, syms, vals) =>
+    val err = Nx.frForce(vals, 0, n)
+    err match
+      case Nx.VErr(_, _) => err
+      case _ => Nx.frReadAttrs(syms, vals, n - 1, Coll.Nil) match
+        case Nx.FrErr(m) => Nx.VErr(Nx.KOther, m)
+        case Nx.FrOk(xs) => Nx.frFromAttrs(xs) match
+          case Nx.FrErr(m) => Nx.VErr(Nx.KOther, m)
+          case Nx.FrOk(f) => Nx.frToString(f) match
+            case Nx.FrErr(m) => Nx.VErr(Nx.KOther, m)
+            case Nx.FrOk(s) => Nx.VStr(s, Coll.Nil)
+  case _ => Nx.typeErr("a set", v)
