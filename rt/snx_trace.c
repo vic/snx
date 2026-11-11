@@ -11,6 +11,7 @@
 // SNX_CACHE_DEBUG=1: one line on stderr, `snx-cache: hit|miss|store|skip ...`, written past the captured stderr.
 // Store roots: an observation under the store dir (SNX_CACHE_STORE, default /nix/store) is stored as its store root, checked once
 // by (dev, inode, ctime_ns); the executable is keyed by its path and (dev, inode, size, mtime_ns), not its bytes.
+#define _GNU_SOURCE  // memfd_create (the miss run's stdout capture)
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -21,12 +22,15 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 
 typedef struct { const uint8_t* p; int64_t n; } srs_str;
 
 srs_str Nx__hashBytes(int64_t algo, srs_str s);
 int64_t rt_argc(void);
 srs_str rt_arg(int64_t i);
+// srs rt/srs_rt.c: writes the srs stdout buffer to fd 1 (declared in srs rt/srs_cap.h, not on this build's include path)
+int64_t rt_out_flush(void);
 
 srs_str __real_Nx__readFile(srs_str path);
 srs_str __real_rt_read_file(srs_str path);
@@ -64,6 +68,7 @@ static struct {
   uint8_t key[32];
   char* path;
   buf out, err;
+  int out_fd, saved_fd;     // a miss run: the memfd fd 1 points at, and the fd 1 it replaced
 } T;
 
 static void* t_alloc(size_t n) { void* p = malloc(n ? n : 1); if (!p) { fputs("snx: out of memory\n", stderr); exit(70); } return p; }
@@ -396,6 +401,16 @@ static bool make_key(void) {
   return true;
 }
 
+static bool out_end(void);
+
+// an exit before Nx__cacheEnd (exit(70) on out of memory): fd 1 goes back and the captured bytes are written; nothing is stored.
+// srs's own atexit flush was registered later, so it has already run
+static void out_atexit(void) {
+  if (!T.on) return;
+  T.on = false;
+  fflush(stdout); rt_out_flush(); out_end();
+}
+
 // -1: evaluate (recording when SNX_CACHE is set); else the exit code of a stored run whose output was just written
 int64_t Nx__cacheBegin(void) {
   const char* dir = getenv("SNX_CACHE");
@@ -442,19 +457,44 @@ int64_t Nx__cacheBegin(void) {
   free(e.o); free(keep);
   mkdir(dir, 0777);
   T.t0 = now_ns();
-  FILE* o = tee_open(1, &T.out, _IOFBF);
   FILE* er = tee_open(2, &T.err, _IONBF);
-  if (!o || !er) { dbg("skip", "no capture", 0); return -1; }
-  fflush(stdout); stdout = o; stderr = er;
+  if (!er) { dbg("skip", "no capture", 0); return -1; }
+  // fd 1 becomes a memfd: srs writes stdout with write(1) at its flush points, so a FILE tee on stdout sees none of it
+  T.saved_fd = dup(1);
+  T.out_fd = memfd_create("snx-stdout", 0);
+  if (T.saved_fd < 0 || T.out_fd < 0 || dup2(T.out_fd, 1) < 0) {
+    if (T.saved_fd >= 0) close(T.saved_fd);
+    if (T.out_fd >= 0) close(T.out_fd);
+    dbg("skip", "no capture", 0); return -1;
+  }
+  fflush(stdout); stderr = er;
   T.on = true;
+  static bool hooked;
+  if (!hooked) { hooked = true; atexit(out_atexit); }
   return -1;
+}
+
+// fd 1 back to the saved fd; the bytes the run wrote to the memfd go to T.out, then to fd 1
+static bool out_end(void) {
+  bool ok = lseek(T.out_fd, 0, SEEK_SET) == 0;
+  uint8_t tmp[65536];
+  while (ok) {
+    ssize_t k = read(T.out_fd, tmp, sizeof tmp);
+    if (k == 0) break;
+    if (k < 0) { if (errno == EINTR) continue; ok = false; break; }
+    b_add(&T.out, tmp, (size_t)k);
+  }
+  ok = dup2(T.saved_fd, 1) >= 0 && ok;
+  close(T.saved_fd); close(T.out_fd);
+  return ok && write_all(1, T.out.p, T.out.n);
 }
 
 // code, after the run is stored when it may be
 int64_t Nx__cacheEnd(int64_t code) {
   if (!T.on) return code;
-  fflush(stdout); fflush(stderr);
+  fflush(stdout); rt_out_flush(); fflush(stderr);
   T.on = false;
+  if (!out_end()) { dbg("skip", "cannot write stdout", T.n); return 70; }
   const char* why = code != 0 ? "the run failed" : T.taint ? T.taint : store(code);
   if (T.dbg) { char l[96]; int k = snprintf(l, sizeof l, "snx-cache: %zu observation calls\n", T.calls); if (write(2, l, (size_t)k) < 0) return code; }
   if (why) dbg("skip", why, T.n); else dbg("store", T.path, T.n);

@@ -75,5 +75,34 @@ run store-replace-warm '"s3"' hit "$t/s.nix"
 rm -rf "$t/store/h1-pkg"
 run store-gone    ''     miss  "$t/s.nix"
 unset SNX_CACHE_STORE
+# stdout over 200 bytes: the stored bytes, the hit's replay and a run without SNX_CACHE are the same bytes
+printf '"%0250d"\n' 0 > "$t/long.nix"
+long() {
+  local name=$1 ev=$2
+  (cd "$t" && SNX_CACHE=$C SNX_CACHE_DEBUG=1 timeout 1 "$SNX" eval "$t/long.nix" > "$t/$name.out" 2> "$t/err")
+  local err; err=$(grep -o 'snx-cache: [a-z]\+' "$t/err" | tr '\n' ' ')
+  if [[ $err == *"snx-cache: $ev"* ]]; then echo "ok   $name: $(wc -c < "$t/$name.out") bytes [$err]"
+  else echo "FAIL $name: want ($ev) got [$err]"; fail=1; fi
+}
+long long-cold store
+long long-warm hit
+(cd "$t" && timeout 1 "$SNX" eval "$t/long.nix" > "$t/long-none.out")
+if [[ $(wc -c < "$t/long-cold.out") -ge 200 ]] && cmp -s "$t/long-cold.out" "$t/long-warm.out" && cmp -s "$t/long-cold.out" "$t/long-none.out"; then echo "ok   long-same-bytes"
+else echo "FAIL long-same-bytes: cold $(wc -c < "$t/long-cold.out") warm $(wc -c < "$t/long-warm.out") none $(wc -c < "$t/long-none.out")"; fail=1; fi
+# a fatal exit (exit 70, no Nx__cacheEnd) after output: the stdout already produced still reaches fd 1, the code is the
+# same as without SNX_CACHE, and nothing is stored. The limit is the binary's own floor (the smallest ulimit -v, in MB
+# steps, that evaluates a tiny file) plus room for one copy of the file, not two: the file is read, its copy runs out of
+# memory after "[ 1 2 "
+echo 1 > "$t/tiny.nix"
+lo=0 hi=4096
+while (( hi - lo > 1 )); do m=$(( (lo + hi) / 2 )); if (ulimit -v $((m * 1024)); SNX_STACK_SET=1 timeout 1 "$SNX" eval "$t/tiny.nix" >/dev/null 2>&1); then hi=$m; else lo=$m; fi; done
+mb=64
+head -c ${mb}M /dev/zero | tr '\0' a > "$t/big.txt"
+echo "[ 1 2 (builtins.readFile $t/big.txt) ]" > "$t/fatal.nix"
+fatal() { (ulimit -v $(( (hi + mb * 3 / 2) * 1024 )); export SNX_STACK_SET=1; cd "$t" && timeout 1 "$SNX" eval "$t/fatal.nix" 2>/dev/null; echo "rc=$?"); }
+want=$(fatal)
+got=$(SNX_CACHE=$t/cache-fatal fatal)
+if [[ $want == "[ 1 2 rc=70" && $got == "$want" && -z $(ls "$t/cache-fatal" 2>/dev/null) ]]; then echo "ok   fatal-exit: $got"
+else echo "FAIL fatal-exit: want [$want] got [$got] entries [$(ls "$t/cache-fatal" 2>/dev/null)]"; fail=1; fi
 [[ $fail == 0 ]] && echo "cache: all pass" || echo "cache: FAILURES"
 exit $fail
