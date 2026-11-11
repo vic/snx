@@ -216,6 +216,8 @@ def Nx.bsPrims(b: Nx.BB): Unit =
   Nx.bsPrim(b, "__substring", 3, Nx.PSubstring)
   Nx.bsPrim(b, "__functionArgs", 1, Nx.PFunctionArgs)
   Nx.bsPrimScope(b, "__snxHasFormals", 1, Nx.PHasFormals)
+  Nx.bsPrimScope(b, "__snxPosLine", 1, Nx.PPosLine)
+  Nx.bsPrimScope(b, "__snxPosCol", 1, Nx.PPosCol)
   Nx.bsPrim(b, "__mapAttrs", 2, Nx.PMapAttrs)
   Nx.bsPrim(b, "__intersectAttrs", 2, Nx.PIntersectAttrs)
   Nx.bsPrim(b, "__catAttrs", 2, Nx.PCatAttrs)

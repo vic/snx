@@ -47,6 +47,8 @@ enum Nx.Prim:
   case Nx.PSubstring
   case Nx.PFunctionArgs
   case Nx.PHasFormals
+  case Nx.PPosLine
+  case Nx.PPosCol
   case Nx.PMapAttrs
   case Nx.PIntersectAttrs
   case Nx.PCatAttrs
@@ -177,6 +179,8 @@ def Nx.prim(id: I64, a: Ptr, b: Ptr, c: Ptr): Nx.Val =
     case Nx.PSubstring => Nx.pSubstring(Nx.force(a), Nx.force(b), c)
     case Nx.PFunctionArgs => Nx.pFunctionArgs(Nx.force(a))
     case Nx.PHasFormals => Nx.bool(Nx.pHasFormals(Nx.force(a)))
+    case Nx.PPosLine => Nx.pPosLC(Nx.force(a), true)
+    case Nx.PPosCol => Nx.pPosLC(Nx.force(a), false)
     case Nx.PMapAttrs => Nx.pMapAttrs(a, Nx.force(b))
     case Nx.PIntersectAttrs => Nx.pIntersect(Nx.force(a), Nx.force(b))
     case Nx.PCatAttrs => Nx.pCatAttrs(Nx.force(a), Nx.force(b))
