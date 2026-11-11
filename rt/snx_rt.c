@@ -90,10 +90,46 @@ int64_t Nx__treeFloatNeg(int64_t bits) {
 
 // ── word arrays: env frames, set and list slots. One bump arena for the whole run, never freed.
 static uint8_t* g_bump; static size_t g_bump_left; static uint8_t* g_chunk; static uint8_t* g_pin;
+#ifdef SNX_CENSUS
+#include <malloc.h>
+// g_cz_done: high-water of the full word chunks; g_cz_hw: of the current one (rewinds never lower it)
+static int64_t g_cz_used, g_cz_foot, g_cz_done, g_cz_hw;
+int64_t srs_cz_chunks(void); int64_t srs_cz_bytes(void); int64_t srs_cz_head_untouched(void);
+int64_t srs_cz_spare_n(void); int64_t srs_cz_spare_bytes(void);
+#define MiB(x) ((double)(x) / 1048576.0)
+int64_t srs_cz_s_region(void); int64_t srs_cz_s_n(void);
+// census: words chunks come from malloc (nx_alloc), as do the srs arena chunks. label "sample" = at the main arena's free
+static void nx_census_print(const char* label, double srs, int64_t n) {
+  struct mallinfo2 m = mallinfo2();
+  double alloc = MiB(srs_cz_bytes()), words_alloc = MiB(g_cz_foot), spare = MiB(srs_cz_spare_bytes());
+  double words = MiB(g_cz_done + g_cz_hw);                    // sum of per-chunk bump high-water
+  double other = MiB(m.uordblks) + MiB(m.hblkhd) - alloc - words_alloc;
+  fprintf(stderr, "census %s srs-region %.1f chunks=%lld\n", label, srs, (long long)n);
+  fprintf(stderr, "census %s srs-spare=%.1f n=%lld (apart, not in sum)\n", label, spare, (long long)srs_cz_spare_n());
+  fprintf(stderr, "census %s words highwater=%.1f used=%.1f footprint=%.1f source=malloc\n", label, words, MiB(g_cz_used), words_alloc);
+  fprintf(stderr, "census %s malloc uordblks=%.1f hblkhd=%.1f\n", label, MiB(m.uordblks), MiB(m.hblkhd));
+  fprintf(stderr, "census %s other-malloc=%.1f\n", label, other);
+  fprintf(stderr, "census %s sum=%.1f\n", label, srs + words + other);
+}
+void snx_cz_sample(void) { nx_census_print("sample", MiB(srs_cz_s_region()), srs_cz_s_n()); }
+__attribute__((destructor)) static void nx_census(void) {
+  nx_census_print("exit", MiB(srs_cz_bytes()) - MiB(srs_cz_spare_bytes()) - MiB(srs_cz_head_untouched()), srs_cz_chunks());
+}
+#endif
 static void* nx_words(int64_t n) {
   size_t sz = (size_t)(n > 0 ? n : 1) * sizeof(void*);
-  if (sz > g_bump_left) { size_t cap = sz > (64u << 20) ? sz : (64u << 20); g_pin = g_chunk = g_bump = nx_alloc((int64_t)cap); g_bump_left = cap; }
+#ifdef SNX_CENSUS
+  g_cz_used += (int64_t)sz;
+#endif
+  if (sz > g_bump_left) { size_t cap = sz > (64u << 20) ? sz : (64u << 20);
+#ifdef SNX_CENSUS
+    g_cz_foot += (int64_t)cap; g_cz_done += g_cz_hw; g_cz_hw = 0;
+#endif
+    g_pin = g_chunk = g_bump = nx_alloc((int64_t)cap); g_bump_left = cap; }
   void* p = g_bump; g_bump += sz; g_bump_left -= sz;
+#ifdef SNX_CENSUS
+  if (g_bump - g_chunk > g_cz_hw) g_cz_hw = (int64_t)(g_bump - g_chunk);
+#endif
   return p;
 }
 void* Nx__arrNew(int64_t n) { return nx_words(n); }
