@@ -28,6 +28,25 @@ def Nx.gReal(): I64 = 17
 def Nx.gResolved(): I64 = 18
 // the directory each search-path entry resolves to, by symbol (Nx.lookupRoot)
 def Nx.gLookup(): I64 = 19
+// the loaded files by id, ids 0.. in load order: [file cell, source cell] (Nx.fileReg); a position is (id, byte offset)
+def Nx.gFiles(): I64 = 20
+
+// the file and its text registered; its id. Call it outside the arena of a load: the entry lives for the run
+def Nx.fileReg(file: Str, src: Str): I64 = Nx.baseEnv() match
+  case _ => Nx.fileRegIn(file, src)
+
+def Nx.fileRegIn(file: Str, src: Str): I64 =
+  val g = Nx.globals()
+  val m = Nx.aget[Coll.IMap[Ptr]](g, Nx.gFiles())
+  val id = Coll.size(m)
+  val e = Nx.arrNew(2)
+  Nx.aset[Ptr](e, 0, Nx.strCell(file))
+  Nx.aset[Ptr](e, 1, Nx.strCell(src))
+  Nx.aset[Coll.IMap[Ptr]](g, Nx.gFiles(), Coll.insert(m, id, e))
+  id
+
+// the [file cell, source cell] of file id
+def Nx.fileOf(id: I64): Coll.Option[Ptr] = Coll.lookup(Nx.aget[Coll.IMap[Ptr]](Nx.globals(), Nx.gFiles()), id)
 
 // the integers 0 until Nx.smallInts() are made once, as the Booleans
 def Nx.smallInts(): I64 = 256
@@ -133,6 +152,7 @@ def Nx.baseEnv(): Nx.Val =
     Nx.aset[Coll.IMap[Nx.StoreObj]](g, Nx.gStore(), Coll.Tip)
     Nx.aset[Coll.IMap[Str]](g, Nx.gSrcs(), Coll.Tip)
     Nx.aset[Coll.IMap[Str]](g, Nx.gReal(), Coll.Tip)
+    Nx.aset[Coll.IMap[Ptr]](g, Nx.gFiles(), Coll.Tip)
     Nx.aset[Coll.IMap[Str]](g, Nx.gResolved(), Coll.Tip)
     Nx.aset[Coll.IMap[Coll.Option[Str]]](g, Nx.gLookup(), Coll.Tip)
     if Nx.ageti(g, Nx.gMaxDepth()) == 0 then Nx.aseti(g, Nx.gMaxDepth(), 10000) else ()

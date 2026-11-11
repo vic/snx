@@ -87,9 +87,6 @@ extern def Nx.wbGetP(b: Ptr): Ptr
 extern def Nx.wbPutS(b: Ptr, s: Str): Unit
 extern def Nx.wbGetS(b: Ptr): Str
 extern def Nx.wbFree(b: Ptr): Unit
-// a loaded file's position records get its file and source cells (nx/load.srs)
-extern def Nx.posCells(file: Ptr, src: Ptr): Unit
-extern def Nx.posMove(old: Ptr, key: Ptr): Unit
 // the token vector (nx/lex.srs): pointers pushed in order, read back by index; one array reused file after file
 extern def Nx.tvNew(): Ptr
 extern def Nx.tvPush [A: Type] (v: Ptr, x: A): Ptr

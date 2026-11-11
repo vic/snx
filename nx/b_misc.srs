@@ -437,14 +437,19 @@ def Nx.pAttrPos(nv: Nx.Val, sv: Nx.Val): Nx.Val = nv match
 
 def Nx.posVal(rec: Ptr, i: I64): Nx.Val =
   if Nx.ptrEq(rec, Nx.noFrame()) then Nx.VNull
-  else
-    val xs = Nx.arrNew(2)
-    Nx.aset[Ptr](xs, 0, Nx.aget[Ptr](rec, 1))
-    Nx.aset[Ptr](xs, 1, Nx.cell(Nx.int(Nx.ageti(rec, i + 2))))
-    val at = Nx.cell(Nx.VList(2, xs))
-    val line = Nx.Pair(Nx.intern("line"), Nx.app1(Nx.CApp1(Nx.scopeCell("__snxPosLine")), at))
-    val col = Nx.Pair(Nx.intern("column"), Nx.app1(Nx.CApp1(Nx.scopeCell("__snxPosCol")), at))
-    Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.get(Nx.aget[Ptr](rec, 0))), Coll.Cons(line, Coll.Cons(col, Coll.Nil))))
+  else Nx.fileOf(Nx.ageti(rec, 0)) match
+    case Coll.Some(fl) => Nx.posAt(fl, Nx.ageti(rec, i + 1))
+    case Coll.None => Nx.VNull
+
+def Nx.posAt(fl: Ptr, off: I64): Nx.Val =
+  val xs = Nx.arrNew(2)
+  Nx.aset[Ptr](xs, 0, Nx.aget[Ptr](fl, 1))
+  Nx.aset[Ptr](xs, 1, Nx.cell(Nx.int(off)))
+  val at = Nx.cell(Nx.VList(2, xs))
+  val line = Nx.Pair(Nx.intern("line"), Nx.app1(Nx.CApp1(Nx.scopeCell("__snxPosLine")), at))
+  val col = Nx.Pair(Nx.intern("column"), Nx.app1(Nx.CApp1(Nx.scopeCell("__snxPosCol")), at))
+  Nx.attrsOf(Coll.Cons(Nx.pair("file", Nx.get(Nx.aget[Ptr](fl, 0))), Coll.Cons(line, Coll.Cons(col, Coll.Nil))))
+
 
 // the line (or the column) of [source cell, byte offset]: the scan of the source waits until the value is read
 def Nx.pPosLC(at: Nx.Val, line: Bool): Nx.Val = at match

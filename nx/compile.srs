@@ -13,17 +13,22 @@ enum Nx.Sc:
   case Nx.ScWith
   case Nx.ScAnon
 
-// the file, its text (for __curPos), the first undefined variable ([set, offset, symbol]) and the base env
+// the file, its text (for __curPos) and its id (Nx.fileReg: the positions that outlive the text hold the id), the first undefined variable ([set, offset, symbol]) and the base env
 enum Nx.Cx:
-  case Nx.Cx(file: Str, src: Str, undef: Ptr, base: Nx.Val)
+  case Nx.Cx(file: Str, src: Str, id: I64, undef: Ptr, base: Nx.Val)
 
 def Nx.compile(e: Nx.Expr, file: Str, src: Str): Nx.CompileResult = Nx.compileIn(e, file, src, Coll.Nil)
 
+// a load registers its file before its arena opens, and compiles under that id
+def Nx.compileAs(e: Nx.Expr, file: Str, src: Str, id: I64): Nx.CompileResult = Nx.compileInAs(e, file, src, id, Coll.Nil)
+
 // sc = the scope levels the file starts in (scopedImport: the names of its set)
-def Nx.compileIn(e: Nx.Expr, file: Str, src: Str, sc: Coll.List[Nx.Sc]): Nx.CompileResult =
+def Nx.compileIn(e: Nx.Expr, file: Str, src: Str, sc: Coll.List[Nx.Sc]): Nx.CompileResult = Nx.compileInAs(e, file, src, Nx.fileReg(file, src), sc)
+
+def Nx.compileInAs(e: Nx.Expr, file: Str, src: Str, id: I64, sc: Coll.List[Nx.Sc]): Nx.CompileResult =
   val u = Nx.arrNew(3)
   Nx.aseti(u, 0, 0)
-  val c = Nx.cp(e, sc, Nx.Cx(file, src, u, Nx.baseEnv()))
+  val c = Nx.cp(e, sc, Nx.Cx(file, src, id, u, Nx.baseEnv()))
   if Nx.ageti(u, 0) == 1 then Nx.Undefined(Nx.ageti(u, 1), Nx.symName(Nx.ageti(u, 2))) else Nx.Compiled(c)
 
 // a literal: its value, and one cell of it for every lazy use (a forced cell is never written again)
@@ -142,11 +147,11 @@ def Nx.cpKeys(path: Coll.List[Nx.Attr], sc: Coll.List[Nx.Sc], cx: Nx.Cx, acc: Co
     case Nx.ADyn(x) => Nx.cpKeys(t, sc, cx, Coll.Cons(Nx.KDyn(Nx.cp(x, sc, cx)), acc))
 
 def Nx.cpPos(p: I64, cx: Nx.Cx): Nx.Code = cx match
-  case Nx.Cx(file, src, _, _) => Nx.lineCol(src, p) match
+  case Nx.Cx(file, src, _, _, _) => Nx.lineCol(src, p) match
     case Nx.LineCol(l, c) => Nx.CCurPos(file, l, c)
 
 def Nx.cpAssert(p: I64, c: Nx.Code, b: Nx.Code, cx: Nx.Cx): Nx.Code = cx match
-  case Nx.Cx(_, src, _, _) => Nx.CAssert(c, b, src, p)
+  case Nx.Cx(_, _, id, _, _) => Nx.CAssert(c, b, id, p)
 
 // ---- variables ------------------------------------------------------------------------------------------------
 
@@ -159,7 +164,7 @@ def Nx.cpVar(p: I64, sym: I64, name: Str, sc: Coll.List[Nx.Sc], up: I64, withs: 
     case Nx.ScWith => Nx.cpVar(p, sym, name, rest, up + 1, Coll.Cons(up, withs), cx)
     case Nx.ScAnon => Nx.cpVar(p, sym, name, rest, up + 1, withs, cx)
   case Coll.Nil => cx match
-    case Nx.Cx(_, _, u, base) => base match
+    case Nx.Cx(_, _, _, u, base) => base match
       case Nx.VAttrs(n, syms, vals) =>
         val i = Nx.findSym(syms, n, sym)
         if i < n then Nx.CCell(Nx.aget[Ptr](vals, i)) else Nx.cpWithVar(p, sym, name, withs, u)
@@ -325,13 +330,12 @@ def Nx.cpFormals(syms: Ptr, arr: Ptr, out: Ptr, i: I64, nf: I64, inner: Coll.Lis
 
 // ---- source positions of attribute names and formals (unsafeGetAttrPos) --------------------------------------------
 
-// the record of a set or a pattern: [file cell, source cell, byte offset of name 0, ..]; kept in the table of rt/snx_fs.c
+// the record of a set or a pattern: [file id (Nx.fileReg), byte offset of name 0, ..]; kept in the table of rt/snx_fs.c
 // under the address of the array of the symbols, which every evaluation of the set shares
 def Nx.posRec(cx: Nx.Cx, n: I64): Ptr = cx match
-  case Nx.Cx(file, src, _, _) =>
-    val r = Nx.arrNew(n + 2)
-    Nx.aset[Ptr](r, 0, Nx.strCell(file))
-    Nx.aset[Ptr](r, 1, Nx.strCell(src))
+  case Nx.Cx(_, _, id, _, _) =>
+    val r = Nx.arrNew(n + 1)
+    Nx.aseti(r, 0, id)
     r
 
 def Nx.posOfBinds(cx: Nx.Cx, arr: Ptr, n: I64): Ptr =
@@ -341,7 +345,7 @@ def Nx.posOfBinds(cx: Nx.Cx, arr: Ptr, n: I64): Ptr =
 
 def Nx.fillBindPos(arr: Ptr, r: Ptr, i: I64, n: I64): Unit =
   if i < n then
-    Nx.aseti(r, i + 2, Nx.bindPos(Nx.aget[Nx.Binding](arr, i)))
+    Nx.aseti(r, i + 1, Nx.bindPos(Nx.aget[Nx.Binding](arr, i)))
     Nx.fillBindPos(arr, r, i + 1, n)
   else ()
 
@@ -358,7 +362,7 @@ def Nx.posOfFormals(cx: Nx.Cx, arr: Ptr, n: I64): Ptr =
 def Nx.fillFormalPos(arr: Ptr, r: Ptr, i: I64, n: I64): Unit =
   if i < n then
     Nx.aget[Nx.Formal](arr, i) match
-      case Nx.Fm(_, _, p) => Nx.aseti(r, i + 2, p)
+      case Nx.Fm(_, _, p) => Nx.aseti(r, i + 1, p)
     Nx.fillFormalPos(arr, r, i + 1, n)
   else ()
 

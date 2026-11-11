@@ -29,8 +29,7 @@ def Nx.loadFileMax(src: Str, dir: Str, home: Str, file: Str, max: I64): Nx.LoadR
   else Nx.loadFileIn(src, dir, home, file)
 
 def Nx.loadFileIn(src: Str, dir: Str, home: Str, file: Str): Nx.LoadResult =
-  val b = Nx.loadWords(src, dir, home, file)
-  Nx.posCells(Nx.strCell(file), Nx.strCell(src))
+  val b = Nx.loadWords(src, dir, home, file, Nx.fileReg(file, src))
   val r = Nx.loadRead(b, Nx.wbGet(b))
   Nx.wbFree(b)
   r
@@ -44,12 +43,12 @@ def Nx.loadUndef(b: Ptr): Nx.LoadResult =
   val p = Nx.wbGet(b)
   Nx.LoadUndefined(p, Nx.wbGetS(b))
 
-def Nx.loadWords(src: Str, dir: Str, home: Str, file: Str): Ptr =
+def Nx.loadWords(src: Str, dir: Str, home: Str, file: Str, id: I64): Ptr =
   handle r = Srs.Arena()
   val b = Nx.wbNew()
   Nx.aseti(Nx.globals(), Nx.gFile(), Nx.intern(file))
   Nx.parse(src, dir, home) match
-    case Nx.Parsed(e) => Nx.compile(e, file, src) match
+    case Nx.Parsed(e) => Nx.compileAs(e, file, src, id) match
       case Nx.Compiled(c) =>
         Nx.wbPut(b, Nx.wbOk())
         Nx.serC(b, c)
@@ -159,11 +158,11 @@ def Nx.serC(b: Ptr, c: Nx.Code): Unit = c match
     Nx.serC(b, x)
     Nx.serC(b, t)
     Nx.serC(b, e)
-  case Nx.CAssert(x, body, src, p) =>
+  case Nx.CAssert(x, body, id, p) =>
     Nx.wbPut(b, 20)
     Nx.serC(b, x)
     Nx.serC(b, body)
-    Nx.wbPutS(b, src)
+    Nx.wbPut(b, id)
     Nx.wbPut(b, p)
   case Nx.CNot(a) =>
     Nx.wbPut(b, 21)
@@ -368,8 +367,8 @@ def Nx.desC(b: Ptr): Nx.Code =
   else if t == 20 then
     val x = Nx.desC(b)
     val body = Nx.desC(b)
-    val src = Nx.wbGetS(b)
-    Nx.CAssert(x, body, src, Nx.wbGet(b))
+    val id = Nx.wbGet(b)
+    Nx.CAssert(x, body, id, Nx.wbGet(b))
   else if t == 21 then Nx.CNot(Nx.desC(b))
   else if t == 22 then
     val x = Nx.desC(b)
@@ -421,7 +420,6 @@ def Nx.desArr(b: Ptr, a: Ptr, i: I64, n: I64): Ptr =
 def Nx.desSet(b: Ptr, isRec: Bool): Nx.Code =
   val n = Nx.wbGet(b)
   val syms = Nx.wbGetP(b)
-  Nx.posMove(syms, syms)
   val vals = Nx.desArr(b, Nx.arrNew(n), 0, n)
   val m = Nx.wbGet(b)
   val dyn = Nx.desDyn(b, m, Coll.Nil)
@@ -439,11 +437,16 @@ def Nx.desLam(b: Ptr): Nx.Code =
   val nf = Nx.wbGet(b)
   val old = Nx.wbGetP(b)
   val fms = Nx.desFormals(b, Nx.arrNew(nf), 0, nf)
-  Nx.posMove(old, fms)
+  Nx.posShare(old, fms)
   val ell = Nx.rdBool(b)
   val ns = Nx.wbGet(b)
   val body = Nx.desC(b)
   Nx.CLam(arg, nf, fms, ell, ns, body, Nx.wbGetS(b))
+
+// the record of the formals of a pattern is also the record of its copy
+def Nx.posShare(old: Ptr, fms: Ptr): Unit =
+  val r = Nx.posGet(old)
+  if Nx.ptrEq(r, Nx.noFrame()) then () else Nx.posPut(fms, r)
 
 def Nx.desFormals(b: Ptr, a: Ptr, i: I64, n: I64): Ptr =
   if i < n then
