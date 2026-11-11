@@ -98,15 +98,16 @@ int64_t srs_cz_chunks(void); int64_t srs_cz_bytes(void); int64_t srs_cz_head_unt
 int64_t srs_cz_spare_n(void); int64_t srs_cz_spare_bytes(void);
 #define MiB(x) ((double)(x) / 1048576.0)
 int64_t srs_cz_s_region(void); int64_t srs_cz_s_n(void);
-// census: words chunks come from malloc (nx_alloc), as do the srs arena chunks. label "sample" = at the main arena's free
+// census: words chunks and 1 MiB srs arena chunks are srs pages; malloc holds the rest (srs chunks over 1 MiB included).
+// label "sample" = at the main arena's free
 static void nx_census_print(const char* label, double srs, int64_t n) {
   struct mallinfo2 m = mallinfo2();
-  double alloc = MiB(srs_cz_bytes()), words_alloc = MiB(g_cz_foot), spare = MiB(srs_cz_spare_bytes());
+  double words_alloc = MiB(g_cz_foot), spare = MiB(srs_cz_spare_bytes());
   double words = MiB(g_cz_done + g_cz_hw);                    // sum of per-chunk bump high-water
-  double other = MiB(m.uordblks) + MiB(m.hblkhd) - alloc - words_alloc;
+  double other = MiB(m.uordblks) + MiB(m.hblkhd);
   fprintf(stderr, "census %s srs-region %.1f chunks=%lld\n", label, srs, (long long)n);
   fprintf(stderr, "census %s srs-spare=%.1f n=%lld (apart, not in sum)\n", label, spare, (long long)srs_cz_spare_n());
-  fprintf(stderr, "census %s words highwater=%.1f used=%.1f footprint=%.1f source=malloc\n", label, words, MiB(g_cz_used), words_alloc);
+  fprintf(stderr, "census %s words highwater=%.1f used=%.1f footprint=%.1f source=srs_pages\n", label, words, MiB(g_cz_used), words_alloc);
   fprintf(stderr, "census %s malloc uordblks=%.1f hblkhd=%.1f\n", label, MiB(m.uordblks), MiB(m.hblkhd));
   fprintf(stderr, "census %s other-malloc=%.1f\n", label, other);
   fprintf(stderr, "census %s sum=%.1f\n", label, srs + words + other);
@@ -116,6 +117,8 @@ __attribute__((destructor)) static void nx_census(void) {
   nx_census_print("exit", MiB(srs_cz_bytes()) - MiB(srs_cz_spare_bytes()) - MiB(srs_cz_head_untouched()), srs_cz_chunks());
 }
 #endif
+// the word chunks are srs pages (rt/srs_cap.h): program lifetime, huge-page advised, as the arena chunks
+void* srs_pages(int64_t size);
 static void* nx_words(int64_t n) {
   size_t sz = (size_t)(n > 0 ? n : 1) * sizeof(void*);
 #ifdef SNX_CENSUS
@@ -125,7 +128,8 @@ static void* nx_words(int64_t n) {
 #ifdef SNX_CENSUS
     g_cz_foot += (int64_t)cap; g_cz_done += g_cz_hw; g_cz_hw = 0;
 #endif
-    g_pin = g_chunk = g_bump = nx_alloc((int64_t)cap); g_bump_left = cap; }
+    g_pin = g_chunk = g_bump = srs_pages((int64_t)cap); g_bump_left = cap;
+    if (!g_bump) { fputs("snx: out of memory\n", stderr); exit(70); } }
   void* p = g_bump; g_bump += sz; g_bump_left -= sz;
 #ifdef SNX_CENSUS
   if (g_bump - g_chunk > g_cz_hw) g_cz_hw = (int64_t)(g_bump - g_chunk);
