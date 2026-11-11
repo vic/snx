@@ -121,7 +121,7 @@ def Nx.cellIn(v: Nx.Val, sym: I64): Coll.Option[Ptr] = v match
   case Nx.VAttrs(n, syms, vals) =>
     val i = Nx.findSym(syms, n, sym)
     if i < n then Coll.Some(Nx.aget[Ptr](vals, i)) else Coll.None
-  case Nx.VUnion(_, ls) => Nx.cellOfLeaves(ls, sym)
+  case Nx.VUnion(_, ls, _) => Nx.cellOfLeaves(ls, sym)
   case _ => Coll.None
 
 // xs compiled into arr from slot i

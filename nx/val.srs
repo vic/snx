@@ -31,7 +31,7 @@ enum Nx.Val:
   case Nx.VStr(s: Str, ctx: Coll.List[Nx.Ctx])
   case Nx.VPath(s: Str)
   case Nx.VAttrs(n: I64, syms: Ptr, vals: Ptr)    // n names sorted by symbol id (Nx.intern), vals = their n cells
-  case Nx.VUnion(k: I64, ls: Nx.Leaves)           // x // y kept as k (2..8) flat leaves, newest first (Nx.update): never empty
+  case Nx.VUnion(k: I64, ls: Nx.Leaves, memo: Ptr)  // x // y kept as k (2..8) flat leaves, newest first (Nx.update): never empty; memo = 1 word, the flat form once made (Nx.flat)
   case Nx.VList(n: I64, xs: Ptr)                  // n cells
   case Nx.VLam(env: Ptr, code: Nx.Code)           // code = a Nx.CLam
   case Nx.VPrim(id: I64, arity: I64)

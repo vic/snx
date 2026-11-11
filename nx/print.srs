@@ -12,7 +12,7 @@ def Nx.pv(v: Nx.Val, seen: Ptr): Unit = v match
   case Nx.VNull => Console.print("null")
   case Nx.VStr(s, _) => Console.print(Nx.escStr(s))
   case Nx.VPath(s) => Console.print(s)
-  case Nx.VUnion(_, _) => if !Nx.seenAdd(seen, Nx.valPtr(v)) then Console.print("«repeated»") else Nx.pv(Nx.flat(v), seen)
+  case Nx.VUnion(_, _, _) => if !Nx.seenAdd(seen, Nx.valPtr(v)) then Console.print("«repeated»") else Nx.pv(Nx.flat(v), seen)
   case Nx.VAttrs(n, syms, vals) =>
     if n > 0 && !Nx.seenAdd(seen, vals) then Console.print("«repeated»")
     else

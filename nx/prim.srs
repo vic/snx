@@ -253,7 +253,7 @@ def Nx.typeName(v: Nx.Val): Str = v match
   case Nx.VStr(_, _) => "string"
   case Nx.VPath(_) => "path"
   case Nx.VAttrs(_, _, _) => "set"
-  case Nx.VUnion(_, _) => "set"
+  case Nx.VUnion(_, _, _) => "set"
   case Nx.VList(_, _) => "list"
   case _ => "lambda"
 
@@ -711,7 +711,7 @@ def Nx.pGetAttr(nv: Nx.Val, sv: Nx.Val, has: Bool): Nx.Val = nv match
       if has then Nx.bool(i < n)
       else if i < n then Nx.force(Nx.aget[Ptr](vals, i))
       else Nx.VErr(Nx.KMissing, Nx.cat(Nx.cat("attribute '", name), "' missing"))
-    case Nx.VUnion(_, ls) => Nx.cellOfLeaves(ls, Nx.intern(name)) match
+    case Nx.VUnion(_, ls, _) => Nx.cellOfLeaves(ls, Nx.intern(name)) match
       case Coll.Some(c) => if has then Nx.bool(true) else Nx.force(c)
       case Coll.None => if has then Nx.bool(false) else Nx.VErr(Nx.KMissing, Nx.cat(Nx.cat("attribute '", name), "' missing"))
     case _ => Nx.typeErr("a set", sv)
@@ -805,7 +805,7 @@ def Nx.pIntersect(x: Nx.Val, y: Nx.Val): Nx.Val =
     case Nx.VAttrs(n, syms, _) => y match
       case Nx.VAttrs(m, ys, yv) =>
         if m <= n then Nx.filterAttrs(m, ys, yv, fx, true) else Nx.pickGo(n, syms, y, Nx.arrNew(n), Nx.arrNew(n), 0, 0)
-      case Nx.VUnion(_, _) => Nx.pickGo(n, syms, y, Nx.arrNew(n), Nx.arrNew(n), 0, 0)
+      case Nx.VUnion(_, _, _) => Nx.pickGo(n, syms, y, Nx.arrNew(n), Nx.arrNew(n), 0, 0)
       case _ => Nx.typeErr("a set", y)
     case _ => Nx.typeErr("a set", x)
 
