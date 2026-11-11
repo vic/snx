@@ -267,15 +267,20 @@ def Nx.answerFlake(path: Str): I64 =
 
 // SNX_CACHE=<dir> (rt/snx_trace.c): -1 = evaluate, else the exit code of a stored run whose output was just written;
 // cacheEnd stores a recorded run that may be stored, and gives back its code
-extern def Nx.cacheBegin(): I64
+extern def Nx.cacheBegin {r: Region} <r: Open> (): I64
 extern def Nx.cacheEnd(code: I64): I64
+
+// the replay reads its files into a Region of its own, gone when it ends
+def Nx.cacheScratch(): I64 =
+  handle q = Srs.Arena()
+  Nx.cacheBegin()
 
 def main(): I64 =
   handle r = Srs.Arena()
   handle c = Srs.Console()
   handle a = Srs.Args()
   handle f = Srs.Files()
-  val hit = Nx.cacheBegin()
+  val hit = Nx.cacheScratch()
   if hit >= 0 then hit else Nx.cacheEnd(Nx.run())
 
 def Nx.run(): I64 =

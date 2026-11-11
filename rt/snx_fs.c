@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include "srs_cap.h"
 
 typedef struct { const uint8_t* p; int64_t n; } srs_str;
 
@@ -55,17 +56,15 @@ srs_str Nx__dirNames(srs_str path) {
 }
 
 // the bytes of the file at path as PosixSourceAccessor::readFile reads them: st_size bytes of a regular file
-srs_str Nx__fileBytes(srs_str path) {
+srs_str Nx__fileBytes(srs_cap* r, srs_str path) {
   char* c = fs_cstr(path);
   FILE* f = fopen(c, "rb");
   free(c);
   if (!f) return (srs_str){(const uint8_t*)"", -1};
   struct stat st;
   if (fstat(fileno(f), &st) != 0 || S_ISDIR(st.st_mode)) { fclose(f); return (srs_str){(const uint8_t*)"", -1}; }
-  size_t want = (size_t)st.st_size;
-  uint8_t* b = malloc(want + 1);
-  if (!b) exit(70);
-  size_t got = fread(b, 1, want, f);
+  uint8_t* b = srs_cap_alloc(r, st.st_size + 1);
+  size_t got = fread(b, 1, (size_t)st.st_size, f);
   fclose(f);
   return (srs_str){b, (int64_t)got};
 }

@@ -18,5 +18,5 @@ timeout 60 "$S2C" lib/prelude.srs s2/coll.srs "${srcs[@]}" > "$B/snx.c"
 wrap=()
 for x in Nx__readFile rt_read_file Nx__fileBytes Nx__getEnv Nx__dirNames Nx__readLink Nx__cwd Nx__realPath Nx__isDir Nx__fsExec Nx__fsKind Nx__timeNow Nx__netOpen; do wrap+=("-Wl,--wrap=$x"); done
 # SNX_CFLAGS=-DSNX_PROBES builds in the SNX_PROBE switches (rt/snx_rt.c Nx__probe)
-timeout 120 zig cc -std=gnu11 -O2 -flto -w ${SNX_CFLAGS:-} "${wrap[@]}" -o "$B/snx" "$B/snx.c" "$SRS/rt/srs_rt.c" "$here/rt/snx_rt.c" "$here/rt/snx_hash.c" "$here/rt/snx_fs.c" "$here/rt/snx_net.c" "$here/rt/snx_trace.c"
+timeout 120 zig cc -std=gnu11 -O2 -flto -w ${SNX_CFLAGS:-} "${wrap[@]}" -o "$B/snx" "$B/snx.c" -I "$SRS/rt" "$SRS/rt/srs_rt.c" "$here/rt/snx_rt.c" "$here/rt/snx_hash.c" "$here/rt/snx_fs.c" "$here/rt/snx_net.c" "$here/rt/snx_trace.c"
 echo "$B/snx"

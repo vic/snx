@@ -3,7 +3,7 @@
 
 extern def Nx.fsKind(path: Str, follow: Bool): I64
 extern def Nx.dirNames(path: Str): Str
-extern def Nx.fileBytes(path: Str): Str
+extern def Nx.fileBytes {r: Region} <r: Open> (path: Str): Str
 extern def Nx.cwd(): Str
 extern def Nx.hasNul(s: Str): Bool
 // the path with every symlink resolved (realpath), or path itself when that fails

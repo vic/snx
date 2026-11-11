@@ -421,6 +421,15 @@ def Nx.narPlanKids(dir: Str, names: Coll.List[Str], filt: Coll.Option[Nx.Val], a
             else Nx.narPlanKids(dir, t, filt, acc2)
       case _ => Nx.NarPlan(Nx.NkDir(dir, Coll.rev(acc)), keep)
 
+// the bytes of the file p into sb, read in a Region that ends here; false when p cannot be read
+def Nx.narFileBytes(sb: Ptr, p: Str): Bool =
+  handle q = Srs.Arena()
+  val b = Nx.fileBytes(p)
+  if Str.len(b) < 0 then false
+  else
+    Nx.narW(sb, b)
+    true
+
 // the NAR of a walked tree into sb: Nx.VNull, or the error of reading a file (dumpPath reads each file as it writes it)
 def Nx.dumpKept(sb: Ptr, t: Nx.NarKept): Nx.Val = t match
   case Nx.NkFile(p) =>
@@ -432,12 +441,10 @@ def Nx.dumpKept(sb: Ptr, t: Nx.NarKept): Nx.Val = t match
       Nx.narW(sb, "")
     else ()
     Nx.narW(sb, "contents")
-    val b = Nx.fileBytes(p)
-    if Str.len(b) < 0 then Nx.evalErr(Nx.cat(Nx.cat("reading file '", p), "'"))
-    else
-      Nx.narW(sb, b)
+    if Nx.narFileBytes(sb, p) then
       Nx.narW(sb, ")")
       Nx.VNull
+    else Nx.evalErr(Nx.cat(Nx.cat("reading file '", p), "'"))
   case Nx.NkLink(p) =>
     Nx.narW(sb, "(")
     Nx.narW(sb, "type")
@@ -486,7 +493,9 @@ def Nx.narDigest(pl: Nx.NarPlan): Nx.Val = pl match
 def Nx.pathDigest(p: Str, rec: Bool, filt: Coll.Option[Nx.Val]): Nx.Val =
   if rec then Nx.narDigest(Nx.narPlan(p, filt))
   else if Nx.fsKind(p, true) != 1 then Nx.evalErr(Nx.cat(Nx.cat("file '", p), "' is not a regular file"))
-  else Nx.VStr(Nx.hashBytes(2, Nx.fileBytes(p)), Coll.Nil)
+  else Nx.fileDigest(2, p) match
+    case Coll.Some(d) => Nx.VStr(d, Coll.Nil)
+    case Coll.None => Nx.evalErr(Nx.cat(Nx.cat("reading file '", p), "'"))
 
 // addPath without references: the store path of p under name (NAR or flat SHA-256), checked against want
 def Nx.addPath(name: Str, p: Str, rec: Bool, filt: Coll.Option[Nx.Val], want: Coll.Option[Str]): Nx.Val =

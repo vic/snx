@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <sys/resource.h>
 #include <sys/mman.h>
+#include "srs_cap.h"
 
 typedef struct { const uint8_t* p; int64_t n; } srs_str;
 
@@ -39,7 +40,7 @@ srs_str __real_Nx__getEnv(srs_str name);
 int64_t __real_Nx__timeNow(void);
 int64_t __real_Nx__fsKind(srs_str path, bool follow);
 srs_str __real_Nx__dirNames(srs_str path);
-srs_str __real_Nx__fileBytes(srs_str path);
+srs_str __real_Nx__fileBytes(srs_cap* r, srs_str path);
 bool __real_Nx__fsExec(srs_str path);
 srs_str __real_Nx__readLink(srs_str path);
 srs_str __real_Nx__cwd(void);
@@ -201,7 +202,7 @@ static void rec_str(int op, srs_str a, srs_str r) {
 
 srs_str __wrap_Nx__readFile(srs_str p) { srs_str r = __real_Nx__readFile(p); rec_str(T_READFILE, p, r); return r; }
 srs_str __wrap_rt_read_file(srs_str p) { srs_str r = __real_rt_read_file(p); rec_str(T_RTREAD, p, r); return r; }
-srs_str __wrap_Nx__fileBytes(srs_str p) { srs_str r = __real_Nx__fileBytes(p); rec_str(T_FILEBYTES, p, r); return r; }
+srs_str __wrap_Nx__fileBytes(srs_cap* c, srs_str p) { srs_str r = __real_Nx__fileBytes(c, p); rec_str(T_FILEBYTES, p, r); return r; }
 srs_str __wrap_Nx__getEnv(srs_str p) { srs_str r = __real_Nx__getEnv(p); rec_str(T_GETENV, p, r); return r; }
 srs_str __wrap_Nx__dirNames(srs_str p) { srs_str r = __real_Nx__dirNames(p); rec_str(T_DIRNAMES, p, r); return r; }
 srs_str __wrap_Nx__readLink(srs_str p) { srs_str r = __real_Nx__readLink(p); rec_str(T_READLINK, p, r); return r; }
@@ -215,7 +216,7 @@ int64_t __wrap_Nx__netOpen(srs_str p) { T.taint = "a socket was opened"; return 
 
 // ---- replay ---------------------------------------------------------------------------------------------------------
 // the observation made again now equals the recorded one
-static bool replay1(const obs* o) {
+static bool replay1(const obs* o, srs_cap* cap) {
   srs_str a = {o->a, o->an};
   if (o->op == T_ROOT) {
     struct stat s;
@@ -246,7 +247,7 @@ static bool replay1(const obs* o) {
     case T_LSKIND: return __real_Nx__fsKind(a, false) == o->v;
     case T_READFILE: r = __real_Nx__readFile(a); break;
     case T_RTREAD: r = __real_rt_read_file(a); break;
-    case T_FILEBYTES: r = __real_Nx__fileBytes(a); break;
+    case T_FILEBYTES: r = __real_Nx__fileBytes(cap, a); break;
     case T_GETENV: r = __real_Nx__getEnv(a); break;
     case T_DIRNAMES: r = __real_Nx__dirNames(a); break;
     case T_READLINK: r = __real_Nx__readLink(a); break;
@@ -257,7 +258,7 @@ static bool replay1(const obs* o) {
   if (r.n != o->v) return false;
   if (r.n < 0) return true;
   uint8_t d[32]; dig(r, d);
-  if (t_content(o->op)) free((void*)r.p);  // malloc'd by the extern; the other results may be shared (cwd "/", a path)
+  if (t_content(o->op) && o->op != T_FILEBYTES) free((void*)r.p);  // malloc'd by the extern (fileBytes: the process Region); the other results may be shared (cwd "/", a path)
   return memcmp(d, o->d, 32) == 0;
 }
 
@@ -409,7 +410,7 @@ static void out_atexit(void) {
 }
 
 // -1: evaluate (recording when SNX_CACHE is set); else the exit code of a stored run whose output was just written
-int64_t Nx__cacheBegin(void) {
+int64_t Nx__cacheBegin(srs_cap* cap) {
   const char* dir = getenv("SNX_CACHE");
   if (!dir || !*dir) return -1;
   const char* v;
@@ -436,7 +437,7 @@ int64_t Nx__cacheBegin(void) {
     int64_t pn[T_LAST] = {0}, pb[T_LAST] = {0}, pt[T_LAST] = {0};
     while (i < e.n) {
       int64_t t = prof ? now_ns() : 0;
-      bool same = replay1(&e.o[i]);
+      bool same = replay1(&e.o[i], cap);
       if (prof) { int op = e.o[i].op; pn[op]++; pb[op] += e.o[i].v > 0 ? e.o[i].v : 0; pt[op] += now_ns() - t; }
       if (!same) break;
       i++;

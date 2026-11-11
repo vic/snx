@@ -5,6 +5,16 @@ extern def Nx.blake3(s: Str): Str
 
 def Nx.hashAny(algo: I64, s: Str): Str = if algo == 4 then Nx.blake3(s) else Nx.hashBytes(algo, s)
 
+// the raw digest of the file t, read in a Region that ends here ("" when t cannot be read: a digest is never empty)
+def Nx.fileHash(algo: I64, t: Str): Str =
+  handle q = Srs.Arena()
+  val s = Nx.fileBytes(t)
+  if Str.len(s) < 0 then "" else Nx.hashAny(algo, s)
+
+def Nx.fileDigest(algo: I64, t: Str): Coll.Option[Str] =
+  val d = Nx.fileHash(algo, t)
+  if Str.len(d) == 0 then Coll.None else Coll.Some(d)
+
 // parseHashAlgo: the id of a name (Nx.hashBytes: 0 md5, 1 sha1, 2 sha256, 3 sha512; 4 blake3), or -1
 def Nx.algoOf(s: Str): I64 =
   if Str.eq(s, "md5") then 0
@@ -41,9 +51,9 @@ def Nx.pHashFile(av: Nx.Val, pv: Nx.Val): Nx.Val = av match
       val p = Nx.pathStr(pv)
       p match
         case Nx.VStr(t, _) =>
-          val s = Nx.fileBytes(t)
-          if Str.len(s) < 0 then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("opening file '", t), "': No such file or directory"))
-          else Nx.VStr(Nx.b16(Nx.hashAny(algo, s)), Coll.Nil)
+          Nx.fileDigest(algo, t) match
+            case Coll.Some(d) => Nx.VStr(Nx.b16(d), Coll.Nil)
+            case Coll.None => Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("opening file '", t), "': No such file or directory"))
         case _ => p
   case _ => Nx.typeErr("a string", av)
 
