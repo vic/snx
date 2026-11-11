@@ -918,11 +918,10 @@ def Nx.dirFrom(p: Str, i: I64): Str =
 // evalFile: a file is parsed, compiled and evaluated once per run (a directory means its default.nix)
 def Nx.importFile(p0: Str): Nx.Val =
   val g = Nx.globals()
-  // the base env first: it sets up the import table and the store realpaths of Nx.followLast
+  // the base env first: it sets up the import table and the store tables of Nx.importPath
   val m: Coll.IMap[Ptr] = Nx.baseEnv() match
     case _ => Nx.aget[Coll.IMap[Ptr]](g, Nx.gImports())
-  val p1 = Nx.followLast(p0)
-  val p = if !Nx.inCore(p1) && Nx.isDir(p1) then Nx.cat(p1, "/default.nix") else p1
+  val p = Nx.importPath(p0)
   val key = Nx.intern(p)
   Coll.node(m, key) match
     case Coll.Bin(_, _, c, _, _) => Nx.force(c)
@@ -945,3 +944,23 @@ def Nx.pHasFormals(f: Nx.Val): Bool = f match
     case Nx.CLam(_, _, _, _, _, _, _) => true
     case _ => false
   case _ => false
+
+// the file an import of p0 reads (resolveExprPath: the last component's symlinks followed, a directory's default.nix).
+// A store path that resolves into the store is kept for the run by symbol (Nx.gResolved()): a store path never changes,
+// so a file imported again costs no readlink and no stat
+def Nx.importPath(p0: Str): Str =
+  if !Nx.drvHasPrefix(p0, "/nix/store/") then Nx.resolveExpr(p0)
+  else
+    val g = Nx.globals()
+    val key = Nx.intern(p0)
+    val m = Nx.aget[Coll.IMap[Str]](g, Nx.gResolved())
+    Coll.lookup(m, key) match
+      case Coll.Some(r) => r
+      case Coll.None =>
+        val r = Nx.resolveExpr(p0)
+        if Nx.drvHasPrefix(r, "/nix/store/") then Nx.aset[Coll.IMap[Str]](g, Nx.gResolved(), Coll.insert(m, key, r)) else ()
+        r
+
+def Nx.resolveExpr(p0: Str): Str =
+  val p1 = Nx.followLast(p0)
+  if !Nx.inCore(p1) && Nx.isDir(p1) then Nx.cat(p1, "/default.nix") else p1
