@@ -2,8 +2,6 @@
 extern def Nx.cat(a: Str, b: Str): Str
 extern def Nx.byte(c: I64): Str
 extern def Nx.floatBits(s: Str): I64
-extern def Nx.intOverflows(s: Str): Bool
-extern def Nx.intValue(s: Str): I64
 extern def Nx.hex64(v: I64): Str
 extern def Nx.floatShow(bits: I64): Str
 // eval core services (rt/snx_rt.c "eval core services")
@@ -141,3 +139,24 @@ def Nx.nulWords(s: Str, i: I64, n: I64): Bool =
   else Nx.nulWords(s, i + 16, n)
 def Nx.zeroBits(w: U64): U64 = (w - U64.ofI64(72340172838076673)) & (w ^ U64.ofI64(0 - 1))
 def Nx.nulFrom(s: Str, i: I64, n: I64): Bool = if i >= n then false else if Str.at(s, i) == 0 then true else Nx.nulFrom(s, i + 1, n)
+
+// the decimal integer at the start of s as strtoll reads it, with no leading white space: a sign, digits up to the first
+// other byte. acc holds minus the value read so far, so that the minimum fits
+def Nx.intNeg(s: Str): Bool = Str.at(s, 0) == 45
+def Nx.intFirst(s: Str): I64 = if Str.at(s, 0) == 45 || Str.at(s, 0) == 43 then 1 else 0
+
+// the decimal digits of s do not fit an I64 (Nix: "invalid integer"; strtoll's ERANGE). 18 bytes or fewer hold at most
+// 18 digits, below 10^18 < 2^63: they never overflow. One more digit d overflows when acc * 10 - d < MIN, that is
+// acc < MIN / 10 or (acc = MIN / 10 and d > 8)
+def Nx.intOverflows(s: Str): Bool = Str.len(s) > 18 && Nx.intOv(s, Nx.intFirst(s), Nx.intNeg(s), 0)
+def Nx.intOv(s: Str, i: I64, neg: Bool, acc: I64): Bool =
+  val d = Str.at(s, i) - 48
+  if d < 0 || d > 9 then !neg && acc == Nx.iMin()
+  else if acc < Nx.iMin() / 10 || (acc == Nx.iMin() / 10 && d > 8) then true
+  else Nx.intOv(s, i + 1, neg, acc * 10 - d)
+
+// the value of the decimal digits of s; call Nx.intOverflows first (an overflowing value wraps)
+def Nx.intValue(s: Str): I64 = Nx.intVal(s, Nx.intFirst(s), Nx.intNeg(s), 0)
+def Nx.intVal(s: Str, i: I64, neg: Bool, acc: I64): I64 =
+  val d = Str.at(s, i) - 48
+  if d < 0 || d > 9 then (if neg then acc else Nx.isub(0, acc)) else Nx.intVal(s, i + 1, neg, Nx.isub(Nx.imul(acc, 10), d))

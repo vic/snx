@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 
 typedef struct { const uint8_t* p; int64_t n; } srs_str;
 
@@ -39,37 +38,6 @@ int64_t Nx__floatBits(srs_str s) {
   int64_t bits;
   memcpy(&bits, &d, sizeof bits);
   return bits;
-}
-
-// s as 1 to 18 decimal digits (no sign, always in range: the lexer's INT tokens), or false
-static bool nx_digits18(srs_str s, int64_t* v) {
-  if (s.n < 1 || s.n > 18) return false;
-  int64_t x = 0;
-  for (int64_t i = 0; i < s.n; i++) { unsigned d = s.p[i] - (unsigned)'0'; if (d > 9) return false; x = 10 * x + d; }
-  *v = x;
-  return true;
-}
-
-// true when the decimal digits of s do not fit an int64 (Nix: "invalid integer")
-bool Nx__intOverflows(srs_str s) {
-  char buf[512];
-  int64_t v;
-  if (nx_digits18(s, &v)) return false;
-  if (s.n >= (int64_t)sizeof buf) return true;
-  memcpy(buf, s.p, (size_t)s.n); buf[s.n] = 0;
-  errno = 0;
-  (void)strtoll(buf, 0, 10);
-  return errno == ERANGE;
-}
-
-// the value of the decimal digits of s (call Nx.intOverflows first)
-int64_t Nx__intValue(srs_str s) {
-  char buf[512];
-  int64_t v;
-  if (nx_digits18(s, &v)) return v;
-  int64_t n = s.n < (int64_t)sizeof buf - 1 ? s.n : (int64_t)sizeof buf - 1;
-  memcpy(buf, s.p, (size_t)n); buf[n] = 0;
-  return (int64_t)strtoll(buf, 0, 10);
 }
 
 // v as 16 lowercase hex digits, the bits unsigned (SPEC.md: (float 3ff8000000000000))
