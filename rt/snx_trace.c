@@ -45,7 +45,7 @@ bool __real_Nx__fsExec(srs_str path);
 srs_str __real_Nx__readLink(srs_str path);
 srs_str __real_Nx__cwd(void);
 srs_str __real_Nx__realPath(srs_str path);
-int64_t __real_Nx__netOpen(srs_str path);
+int64_t __real_rt_net_connect(void* self, srs_str path);
 
 // the observations; T_* below 16 have an integer result, the rest a string result
 enum { T_ISDIR = 1, T_FSKIND, T_LSKIND, T_FSEXEC, T_ROOT, T_READFILE = 16, T_RTREAD, T_FILEBYTES, T_GETENV, T_DIRNAMES, T_READLINK,
@@ -212,7 +212,7 @@ bool __wrap_Nx__isDir(srs_str p) { bool r = __real_Nx__isDir(p); rec_int(T_ISDIR
 bool __wrap_Nx__fsExec(srs_str p) { bool r = __real_Nx__fsExec(p); rec_int(T_FSEXEC, p, r); return r; }
 int64_t __wrap_Nx__fsKind(srs_str p, bool follow) { int64_t r = __real_Nx__fsKind(p, follow); rec_int(follow ? T_FSKIND : T_LSKIND, p, r); return r; }
 int64_t __wrap_Nx__timeNow(void) { T.taint = "the clock was read"; return __real_Nx__timeNow(); }
-int64_t __wrap_Nx__netOpen(srs_str p) { T.taint = "a socket was opened"; return __real_Nx__netOpen(p); }
+int64_t __wrap_rt_net_connect(void* s, srs_str p) { T.taint = "a socket was opened"; return __real_rt_net_connect(s, p); }
 
 // ---- replay ---------------------------------------------------------------------------------------------------------
 // the observation made again now equals the recorded one

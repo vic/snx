@@ -486,6 +486,15 @@ def Nx.wGreet(s: Str, m: I64): Nx.WGreet =
 
 // ---- the client's side ------------------------------------------------------------------------------------------
 
+// the bits of v as an unsigned decimal (std::to_string(uint64_t)): u = 2h + b with h = u >> 1 below 2^63, so
+// u / 10 = h / 5 and u % 10 = 2 (h % 5) + b
+def Nx.u64Str(v: I64): Str =
+  if v >= 0 then Nx.intStr(v)
+  else
+    val h = I64.ofU64(U64.ofI64(v) >> 1)
+    val b = if v % 2 == 0 then 0 else 1
+    Nx.cat(Nx.intStr(h / 5), Nx.byte(48 + 2 * (h % 5) + b))
+
 def Nx.wPut(b: Ptr, v: I64): Unit = Nx.wPutGo(b, v, 8)
 
 def Nx.wPutGo(b: Ptr, v: I64, k: I64): Unit =
@@ -961,25 +970,29 @@ def Nx.wConverse(op: Nx.WireOp, s: Str, m: I64): Str = Nx.wGreet(s, m) match
     case Nx.WoUnknown => "error"
 
 // the answer line of op against the daemon at sock: "error" for any reply the client refuses
-def Nx.wireAnswer(sock: Str, op: Nx.WireOp, args: Coll.List[Str]): Str =
-  val fd = Nx.netOpen(sock)
-  if fd < 0 then "error"
-  else
-    val b = Nx.sbNew()
-    Nx.wPut(b, Nx.wMagic1())
-    Nx.wPut(b, Nx.wMajor() * Nx.wMinorSpan() + Nx.wClientMinor())
-    if !Nx.netSend(fd, Nx.sbGet(b)) then "error"
-    else
-      val hello = Nx.netRead(fd, Nx.wHelloLen())
-      Nx.wHello(hello) match
-        case Coll.None => "error"
-        case Coll.Some(m) => Nx.wRequest(op, m, args) match
-          case Coll.None => "error"
-          case Coll.Some(req) =>
-            if !Nx.netSend(fd, req) then "error"
-            else
-              val rest = Nx.netDrain(fd)
-              if Str.len(rest) < 0 then "error" else Nx.wConverse(op, Nx.cat(hello, rest), m)
+def Nx.wireAnswer {Net} (sock: Str, op: Nx.WireOp, args: Coll.List[Str]): Str =
+  handle n = Srs.Net()
+  val a: Str = n.connect(sock) match
+    case Os.Failed(e) => "error"
+    case Os.Done =>
+      val b = Nx.sbNew()
+      Nx.wPut(b, Nx.wMagic1())
+      Nx.wPut(b, Nx.wMajor() * Nx.wMinorSpan() + Nx.wClientMinor())
+      n.send(Nx.sbGet(b)) match
+        case Os.Failed(e) => "error"
+        case Os.Done => n.recv(Nx.wHelloLen()) match
+          case Os.Fail(e) => "error"
+          case Os.Ok(hello) => Nx.wHello(hello) match
+            case Coll.None => "error"
+            case Coll.Some(m) => Nx.wRequest(op, m, args) match
+              case Coll.None => "error"
+              case Coll.Some(req) => n.send(req) match
+                case Os.Failed(e) => "error"
+                case Os.Done => n.drain() match
+                  case Os.Fail(e) => "error"
+                  case Os.Ok(rest) => Nx.wConverse(op, Nx.cat(hello, rest), m)
+  n.close()
+  a
 
 def Nx.wArgs(i: I64, acc: Coll.List[Str]): Coll.List[Str] =
   if i < 4 then acc else Nx.wArgs(i - 1, Coll.Cons(Args.at(i), acc))

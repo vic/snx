@@ -280,6 +280,7 @@ def main(): I64 =
   handle c = Srs.Console()
   handle a = Srs.Args()
   handle f = Srs.Files()
+  handle n = Srs.Net()
   val hit = Nx.cacheScratch()
   if hit >= 0 then hit else Nx.cacheEnd(Nx.run())
 
