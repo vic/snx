@@ -103,7 +103,6 @@ srs_str Nx__cwd(void) {
   if (!b || !getcwd(b, 4096)) return (srs_str){(const uint8_t*)"/", 1};
   return (srs_str){(const uint8_t*)b, (int64_t)strlen(b)};
 }
-
 bool Nx__hasNul(srs_str s) { return s.n > 0 && memchr(s.p, 0, (size_t)s.n) != NULL; }
 
 // the path with every symlink resolved (resolveExprPath), or path itself when that fails

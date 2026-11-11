@@ -8,23 +8,12 @@ extern def Nx.hex64(v: I64): Str
 extern def Nx.floatShow(bits: I64): Str
 // eval core services (rt/snx_rt.c "eval core services")
 extern def Nx.globals(): Ptr
-extern def Nx.ptrEq(a: Ptr, b: Ptr): Bool
 extern def Nx.slots(f: Ptr): Ptr
 extern def Nx.sortPairs(keys: Ptr, vals: Ptr, n: I64): Unit
 extern def Nx.byName(syms: Ptr, n: I64): Ptr
 extern def Nx.strLess(a: Str, b: Str): Bool
 extern def Nx.seenNew(): Ptr
 extern def Nx.seenAdd(set: Ptr, p: Ptr): Bool
-extern def Nx.iadd(a: I64, b: I64): I64
-extern def Nx.isub(a: I64, b: I64): I64
-extern def Nx.imul(a: I64, b: I64): I64
-extern def Nx.addOv(a: I64, b: I64): Bool
-extern def Nx.subOv(a: I64, b: I64): Bool
-extern def Nx.mulOv(a: I64, b: I64): Bool
-extern def Nx.idiv(a: I64, b: I64): I64
-extern def Nx.iand(a: I64, b: I64): I64
-extern def Nx.ior(a: I64, b: I64): I64
-extern def Nx.ixor(a: I64, b: I64): I64
 extern def Nx.fadd(a: I64, b: I64): I64
 extern def Nx.fsub(a: I64, b: I64): I64
 extern def Nx.fmul(a: I64, b: I64): I64
@@ -116,3 +105,39 @@ extern def Nx.atAt [A: Type] (t: Ptr, i: I64): A
 extern def Nx.atName(t: Ptr, i: I64): Str
 // every attr index freed: call when no set under construction is alive (nx/load.srs, after a file is compiled)
 extern def Nx.atFreeAll(): Unit
+
+// pointer identity
+def Nx.ptrEq(a: Ptr, b: Ptr): Bool = a == b
+
+// machine words for Nix integers: two's complement wrapping arithmetic on the U64 bits, and the overflow tests of
+// __builtin_{add,sub,mul}_overflow
+def Nx.iMax(): I64 = 9223372036854775807
+def Nx.iMin(): I64 = 0 - 9223372036854775807 - 1
+def Nx.iadd(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) + U64.ofI64(b))
+def Nx.isub(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) - U64.ofI64(b))
+def Nx.imul(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) * U64.ofI64(b))
+// the wrapped result r overflowed when its sign differs from the sign both a and b (a and -b) share
+def Nx.addOv(a: I64, b: I64): Bool = Nx.iand(Nx.ixor(a, Nx.iadd(a, b)), Nx.ixor(b, Nx.iadd(a, b))) < 0
+def Nx.subOv(a: I64, b: I64): Bool = Nx.iand(Nx.ixor(a, b), Nx.ixor(a, Nx.isub(a, b))) < 0
+// the wrapped product divided by a gives b back exactly when it did not wrap; a = -1 is tested first, since
+// MIN / -1 is itself an overflow
+def Nx.mulOv(a: I64, b: I64): Bool =
+  if a == 0 then false
+  else if a == 0 - 1 then b == Nx.iMin()
+  else Nx.imul(a, b) / a != b
+// a / b truncated; call only with b != 0 and not (MIN, -1)
+def Nx.idiv(a: I64, b: I64): I64 = a / b
+// prim_bitAnd, prim_bitOr, prim_bitXor
+def Nx.iand(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) & U64.ofI64(b))
+def Nx.ior(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) | U64.ofI64(b))
+def Nx.ixor(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) ^ U64.ofI64(b))
+
+// a NUL byte in s: sixteen bytes per step while two whole words are left (a zero byte of w sets its high bit in
+// (w - 0x01..01) & ~w & 0x80..80), then byte by byte
+def Nx.hasNul(s: Str): Bool = Nx.nulWords(s, 0, Str.len(s))
+def Nx.nulWords(s: Str, i: I64, n: I64): Bool =
+  if n - i < 16 then Nx.nulFrom(s, i, n)
+  else if ((Nx.zeroBits(Str.u64le(s, i)) | Nx.zeroBits(Str.u64le(s, i + 8))) & U64.ofI64(0 - 9187201950435737472)) != U64.ofI64(0) then true
+  else Nx.nulWords(s, i + 16, n)
+def Nx.zeroBits(w: U64): U64 = (w - U64.ofI64(72340172838076673)) & (w ^ U64.ofI64(0 - 1))
+def Nx.nulFrom(s: Str, i: I64, n: I64): Bool = if i >= n then false else if Str.at(s, i) == 0 then true else Nx.nulFrom(s, i + 1, n)

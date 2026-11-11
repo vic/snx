@@ -389,7 +389,6 @@ srs_str Nx__floatShow(int64_t bits) {
 
 // sixteen zeroed words for run-wide state (the base env, the primop table, the call depth): nx/base.srs
 void* Nx__globals(void) { static void* g[21]; return g; }
-bool Nx__ptrEq(void* a, void* b) { return a == b; }
 // the n slots of frame f (a set built from a rec frame shares them)
 void* Nx__slots(void** f) { return f + 1; }
 
@@ -480,19 +479,6 @@ bool Nx__seenAdd(nx_set* s, void* p) {
   return true;
 }
 
-// integers: wrapping results and their overflow tests (NixInt::valueChecked; primops.cc:4286,4317,4348)
-int64_t Nx__iadd(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
-int64_t Nx__isub(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
-int64_t Nx__imul(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
-bool Nx__addOv(int64_t a, int64_t b) { int64_t r; return __builtin_add_overflow(a, b, &r); }
-bool Nx__subOv(int64_t a, int64_t b) { int64_t r; return __builtin_sub_overflow(a, b, &r); }
-bool Nx__mulOv(int64_t a, int64_t b) { int64_t r; return __builtin_mul_overflow(a, b, &r); }
-// a / b truncated; call only with b != 0 and not (INT64_MIN, -1)
-int64_t Nx__idiv(int64_t a, int64_t b) { return a / b; }
-// prim_bitAnd, prim_bitOr, prim_bitXor
-int64_t Nx__iand(int64_t a, int64_t b) { return a & b; }
-int64_t Nx__ior(int64_t a, int64_t b) { return a | b; }
-int64_t Nx__ixor(int64_t a, int64_t b) { return a ^ b; }
 // doubles on their bits
 static double nx_d(int64_t b) { double d; memcpy(&d, &b, sizeof d); return d; }
 static int64_t nx_b(double d) { int64_t b; memcpy(&b, &d, sizeof b); return b; }
