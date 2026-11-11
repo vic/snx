@@ -15,6 +15,9 @@ for f in "$here"/tests/eval/*.nix; do
   if got=$(HOME=/fake-home TEST_VAR=foo timeout 5 "$SNX" eval "$f" "${fl[@]}" 2>/dev/null); then :; else got=error; fi
   [[ $got == "$(cat "$b.exp")" ]] || { echo "FAIL $(basename "$f"): want $(cat "$b.exp") got $got"; fail=1; }
 done
+# a relative file argument is taken from the working directory, and so are its relative imports
+got=$(cd "$here/tests/eval" && timeout 5 "$SNX" eval import.nix 2>&1)
+[[ $got == "$(cat "$here/tests/eval/import.exp")" ]] || { echo "FAIL relative import.nix: want $(cat "$here/tests/eval/import.exp") got $got"; fail=1; }
 echo "unit: $n cases, $([[ $fail == 0 ]] && echo all pass || echo FAILURES)"
 
 # conformance: the runner prints FAIL/SKIP lines; a category's passes = its cases - its failures - its skips

@@ -285,6 +285,8 @@ def Nx.run(): I64 =
   else if Str.eq(Args.at(1), "wire") then Nx.answerWire()
   else
     val src = Files.read(Args.at(2))
+    // the file argument relative to the working directory, as every later import sees it (canonPath takes a path as absolute)
+    val path = Nx.absOf(Args.at(2))
     if Str.len(src) < 0 then
       Console.eprint("snx: cannot read the file\n")
       2
@@ -292,9 +294,9 @@ def Nx.run(): I64 =
       Nx.op(Args.at(1)) match
         case Nx.OpParse => Nx.answerParse(src)
         case Nx.OpNar => Nx.answerNar(src)
-        case Nx.OpDrv => Nx.answerDrv(Args.at(2), src)
-        case Nx.OpCheck => Nx.answerCheck(Args.at(2), src)
-        case Nx.OpEval => Nx.answerEval(Args.at(2))
-        case Nx.OpEvalXml => Nx.answerEvalXml(Args.at(2))
-        case Nx.OpFlake => Nx.answerFlake(Args.at(2))
+        case Nx.OpDrv => Nx.answerDrv(path, src)
+        case Nx.OpCheck => Nx.answerCheck(path, src)
+        case Nx.OpEval => Nx.answerEval(path)
+        case Nx.OpEvalXml => Nx.answerEvalXml(path)
+        case Nx.OpFlake => Nx.answerFlake(path)
         case Nx.OpUnknown => 3
