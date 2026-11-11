@@ -2,7 +2,8 @@
 # snx parse is linear in the input: a pattern of N formals and a set of N merged names (`x = { aI = I; };` N times), N =
 # 1000, 4000, 16000, parsed by `snx parse`; the user-mode instruction count of a 4x larger input must be at most 4.4x
 # (a rescan per name or per formal makes it 16x). Then the load limit: a file one byte over Nx.loadLimit is refused
-# with the "file too large to load" error, before it is lexed. SNX = the snx binary (default: tests/build.sh builds it);
+# with the "file too large to load" error, before it is lexed. Then tests/parsepos: the position of the reported
+# duplicate formal. SNX = the snx binary (default: tests/build.sh builds it);
 # PERF = a perf (default: perf on PATH, else linuxPackages.perf from nix-shell). Exit 0 = ok, 1 = fail, 77 = no perf.
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -46,4 +47,10 @@ truncate -s $((134217728 + 1)) "$big"
 want="error: file too large to load: $big is 134217729 bytes, the limit is 134217728 bytes"
 got=$(timeout 10 "$SNX" eval "$big" 2>&1)
 if [[ $got == "$want" ]]; then echo "ok load limit"; else echo "FAIL load limit: got: $got"; fail=1; fi
+# the duplicate formal a pattern reports (the one whose name is created first; the first repeat on a tie): `snx parse`
+# prints its position, which `snx eval` hides
+for f in "$here"/tests/parsepos/*.nix; do
+  got=$(timeout 5 "$SNX" parse "$f" 2>&1)
+  [[ $got == "$(cat "${f%.nix}.exp")" ]] && echo "ok parsepos $(basename "$f")" || { echo "FAIL parsepos $(basename "$f"): want $(cat "${f%.nix}.exp") got $got"; fail=1; }
+done
 exit $fail
