@@ -162,17 +162,24 @@ def Nx.pReadDir(v: Nx.Val): Nx.Val =
     case Nx.VStr(t, _) =>
       val names = Nx.dirNames(t)
       if Str.len(names) < 0 then Nx.VErr(Nx.KOther, Nx.cat(Nx.cat("reading directory '", t), "': No such file or directory"))
-      else Nx.attrsOf(Nx.dirPairs(t, names, 0, 0, Coll.Nil))
+      else Nx.attrsOf(Nx.dirPairs(t, names, 0, 0, Coll.Nil, Nx.CApp1(Nx.scopeCell("__readFileType"))))
     case _ => p
 
-// the NUL-terminated names of a directory as pairs name = type
-def Nx.dirPairs(dir: Str, names: Str, i: I64, from: I64, acc: Coll.List[Nx.Pair]): Coll.List[Nx.Pair] =
+// the NUL-terminated names of a directory as pairs name = type. Each type is a thunk of readFileType on the entry, as
+// prim_readDir makes it for an entry the directory listing gives no type (primops.cc:2398-2414): a type nobody looks
+// at costs no lstat (nixpkgs' by-name overlay lists 21,713 package directories and reads only their names)
+def Nx.dirPairs(dir: Str, names: Str, i: I64, from: I64, acc: Coll.List[Nx.Pair], rft: Nx.Code): Coll.List[Nx.Pair] =
   if i >= Str.len(names) then acc
   else if Str.at(names, i) == 0 then
     val name = Str.slice(names, from, i)
-    val full = Nx.cat(Nx.cat(dir, "/"), name)
-    Nx.dirPairs(dir, names, i + 1, i + 1, Coll.Cons(Nx.pair(name, Nx.VStr(Nx.kindName(Nx.fsKind(full, false)), Coll.Nil)), acc))
-  else Nx.dirPairs(dir, names, i + 1, from, acc)
+    val ty = Nx.app1(rft, Nx.cell(Nx.VPath(Nx.cat(Nx.cat(dir, "/"), name))))
+    Nx.dirPairs(dir, names, i + 1, i + 1, Coll.Cons(Nx.Pair(Nx.intern(name), ty), acc), rft)
+  else Nx.dirPairs(dir, names, i + 1, from, acc, rft)
+
+// the cell of a name of the base scope (a primop the scope always has)
+def Nx.scopeCell(name: Str): Ptr = Nx.baseEnv() match
+  case Nx.VAttrs(n, syms, vals) => Nx.aget[Ptr](vals, Nx.findSym(syms, n, Nx.intern(name)))
+  case _ => Nx.cell(Nx.VErr(Nx.KOther, Nx.cat("no base scope name ", name)))
 
 // ---- findFile -------------------------------------------------------------------------------------------------
 
