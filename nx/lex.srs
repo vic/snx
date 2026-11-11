@@ -65,6 +65,7 @@ def Nx.lxList(v: Ptr, i: I64, acc: Coll.List[Nx.Tok]): Coll.List[Nx.Tok] = if i 
 
 def Nx.tokPos(t: Nx.Tok): I64 = t match
   case Nx.TId(_, p) => p
+  case Nx.TKw(_, p) => p
   case Nx.TInt(_, p) => p
   case Nx.TFloat(_, p) => p
   case Nx.TUri(_, p) => p
@@ -141,7 +142,7 @@ def Nx.lxGo(s: Str, n: I64, i: I64, st: Coll.List[Nx.LxState], out: Ptr, lb: I64
             if Str.at(s, j) == 0 then Nx.lxEnd(out, j + 1)
             else Nx.lxGo(s, n, e, st, Nx.tvPush(out, Nx.TOp(t, j)), j, lb)
           case Nx.LxOp => Nx.lxGo(s, n, e, st, Nx.tvPush(out, Nx.TOp(t, j)), j, lb)
-          case Nx.LxId => Nx.lxGo(s, n, e, st, Nx.tvPush(out, Nx.TId(t, j)), j, lb)
+          case Nx.LxId => Nx.lxGo(s, n, e, st, Nx.tvPush(out, Nx.lxKw(t, j)), j, lb)
           case Nx.LxInt =>
             if Nx.intOverflows(t) then Nx.lxBad(out, j)
             else Nx.lxGo(s, n, e, st, Nx.tvPush(out, Nx.TInt(Nx.intValue(t), j)), j, lb)
@@ -213,6 +214,7 @@ def Nx.lexVec(src: Str): Ptr = Nx.lxGo(src, Str.len(src), 0, Coll.Nil, Nx.tvNew(
 // one line, no newline: <kind> <p> [<payload>]; payload bytes escaped \" \\ \n, \xHH below 0x20 and above 0x7e
 def Nx.printTok(t: Nx.Tok): Unit = t match
   case Nx.TId(s, p) => Nx.lxShow("id ", p, s)
+  case Nx.TKw(k, p) => Nx.lxShow("id ", p, Nx.kwText(k))
   case Nx.TInt(v, p) => Nx.lxShowInt(p, v)
   case Nx.TFloat(b, p) => Nx.lxShow("float ", p, Nx.hex64(b))
   case Nx.TUri(s, p) => Nx.lxShow("uri ", p, s)
@@ -263,3 +265,30 @@ def Nx.lxPrintByte(c: I64): Unit =
 def Nx.lxPrintHex(c: I64): Unit =
   Console.print("\\x")
   Console.print(Str.slice(Nx.hex64(c), 14, 16))
+
+// an identifier token at j: a keyword (lexer.l:125-134) is its own token kind, so the parser tests a keyword without
+// comparing its text
+def Nx.lxKw(t: Str, j: I64): Nx.Tok =
+  if Str.eq(t, "if") then Nx.TKw(Nx.KwIf, j)
+  else if Str.eq(t, "then") then Nx.TKw(Nx.KwThen, j)
+  else if Str.eq(t, "else") then Nx.TKw(Nx.KwElse, j)
+  else if Str.eq(t, "assert") then Nx.TKw(Nx.KwAssert, j)
+  else if Str.eq(t, "with") then Nx.TKw(Nx.KwWith, j)
+  else if Str.eq(t, "let") then Nx.TKw(Nx.KwLet, j)
+  else if Str.eq(t, "in") then Nx.TKw(Nx.KwIn, j)
+  else if Str.eq(t, "rec") then Nx.TKw(Nx.KwRec, j)
+  else if Str.eq(t, "inherit") then Nx.TKw(Nx.KwInherit, j)
+  else if Str.eq(t, "or") then Nx.TKw(Nx.KwOr, j)
+  else Nx.TId(t, j)
+
+def Nx.kwText(k: Nx.Kw): Str = k match
+  case Nx.KwIf => "if"
+  case Nx.KwThen => "then"
+  case Nx.KwElse => "else"
+  case Nx.KwAssert => "assert"
+  case Nx.KwWith => "with"
+  case Nx.KwLet => "let"
+  case Nx.KwIn => "in"
+  case Nx.KwRec => "rec"
+  case Nx.KwInherit => "inherit"
+  case Nx.KwOr => "or"

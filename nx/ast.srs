@@ -3,7 +3,8 @@
 
 // a token; p = byte offset of its first byte
 enum Nx.Tok:
-  case Nx.TId(s: Str, p: I64)              // identifier or keyword (the parser tells them apart)
+  case Nx.TId(s: Str, p: I64)              // identifier, not a keyword
+  case Nx.TKw(k: Nx.Kw, p: I64)            // keyword (lexer.l:125-134)
   case Nx.TInt(v: I64, p: I64)
   case Nx.TFloat(bits: I64, p: I64)        // IEEE 754 double bits (nx_float_parse in rt/snx_rt.c)
   case Nx.TUri(s: Str, p: I64)
@@ -18,6 +19,19 @@ enum Nx.Tok:
   case Nx.TOp(s: Str, p: I64)              // punctuation and operators: { } ( ) [ ] ; : . , @ ? = ++ // == != <= >= < > && || -> ! + - * / |> <|
   case Nx.TEof(p: I64)
   case Nx.TBad(p: I64)                     // Nix's lexer throws here (the parser reports it when it reads this token: the lexer is lazy)
+
+// the keywords (lexer.l:125-134); a nullary case is a static value: a keyword token holds no string
+enum Nx.Kw:
+  case Nx.KwIf
+  case Nx.KwThen
+  case Nx.KwElse
+  case Nx.KwAssert
+  case Nx.KwWith
+  case Nx.KwLet
+  case Nx.KwIn
+  case Nx.KwRec
+  case Nx.KwInherit
+  case Nx.KwOr
 
 enum Nx.LexResult:
   case Nx.Toks(ts: Coll.List[Nx.Tok])

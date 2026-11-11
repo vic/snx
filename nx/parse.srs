@@ -73,6 +73,7 @@ def Nx.psNext(ts: I64): I64 = if ts + 1 < Nx.tsLen() then ts + 1 else ts
 
 def Nx.psPos(t: Nx.Tok): I64 = t match
   case Nx.TId(_, p) => p
+  case Nx.TKw(_, p) => p
   case Nx.TInt(_, p) => p
   case Nx.TFloat(_, p) => p
   case Nx.TUri(_, p) => p
@@ -97,16 +98,22 @@ def Nx.psIsOp(ts: I64, s: Str): Bool = Nx.psPeek(ts) match
   case _ => false
 
 def Nx.psIsKw(ts: I64, s: Str): Bool = Nx.psPeek(ts) match
-  case Nx.TId(x, _) => Str.eq(x, s)
+  case Nx.TKw(k, _) => Str.eq(Nx.kwText(k), s)
   case _ => false
 
-// lexer.l:125-134
-def Nx.psKeyword(x: Str): Bool =
-  Str.eq(x, "if") || Str.eq(x, "then") || Str.eq(x, "else") || Str.eq(x, "assert") || Str.eq(x, "with") || Str.eq(x, "let") || Str.eq(x, "in") || Str.eq(x, "rec") || Str.eq(x, "inherit") || Str.eq(x, "or")
+def Nx.kwLetRec(k: Nx.Kw): Bool = k match
+  case Nx.KwLet => true
+  case Nx.KwRec => true
+  case _ => false
+
+def Nx.kwOr(k: Nx.Kw): Bool = k match
+  case Nx.KwOr => true
+  case _ => false
 
 // a token that starts an expr_simple (parser.y:346-395)
 def Nx.psSimpleStart(ts: I64): Bool = Nx.psPeek(ts) match
-  case Nx.TId(x, _) => !Nx.psKeyword(x) || Str.eq(x, "let") || Str.eq(x, "rec")
+  case Nx.TId(_, _) => true
+  case Nx.TKw(k, _) => Nx.kwLetRec(k)
   case Nx.TInt(_, _) => true
   case Nx.TFloat(_, _) => true
   case Nx.TUri(_, _) => true
@@ -118,7 +125,8 @@ def Nx.psSimpleStart(ts: I64): Bool = Nx.psPeek(ts) match
 
 // a token that starts an attrpath or an inherit: attr (ID, or) or string_attr (" or ${)
 def Nx.psAttrStart(ts: I64): Bool = Nx.psPeek(ts) match
-  case Nx.TId(x, _) => !Nx.psKeyword(x) || Str.eq(x, "or")
+  case Nx.TId(_, _) => true
+  case Nx.TKw(k, _) => Nx.kwOr(k)
   case Nx.TStrOpen(ind, _) => !ind
   case Nx.TDollarCurly(_) => true
   case _ => false
@@ -157,13 +165,16 @@ def Nx.psExprE(cx: Nx.PCx, ts: I64): Nx.PR[Nx.Expr] = Nx.psExpr(cx, ts) match
   case Nx.POk(v, t1) => Nx.POk(Nx.psFin(v), t1)
 
 def Nx.psExpr(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
+  case Nx.TKw(k, p) =>
+    val t1 = Nx.psNext(ts)
+    k match
+      case Nx.KwAssert => Nx.psAssert(cx, t1, p, true)
+      case Nx.KwWith => Nx.psAssert(cx, t1, p, false)
+      case Nx.KwLet => if Nx.psIsOp(t1, "{") then Nx.psIf(cx, ts) else Nx.psLet(cx, t1, p)
+      case _ => Nx.psIf(cx, ts)
   case Nx.TId(x, p) =>
     val t1 = Nx.psNext(ts)
-    if Str.eq(x, "assert") then Nx.psAssert(cx, t1, p, true)
-    else if Str.eq(x, "with") then Nx.psAssert(cx, t1, p, false)
-    else if Str.eq(x, "let") && !Nx.psIsOp(t1, "{") then Nx.psLet(cx, t1, p)
-    else if Nx.psKeyword(x) then Nx.psIf(cx, ts)
-    else if Nx.psIsOp(t1, ":") then Nx.psLambda(cx, Nx.psNext(t1), p, x)
+    if Nx.psIsOp(t1, ":") then Nx.psLambda(cx, Nx.psNext(t1), p, x)
     else if Nx.psIsOp(t1, "@") then Nx.psArgAt(cx, Nx.psNext(t1), p, x)
     else if Nx.psEnds(t1) && !Str.eq(x, "__curPos") then Nx.POk(Nx.PExpr(Nx.EVar(p, x)), t1)
     else Nx.psIf(cx, ts)
@@ -229,9 +240,9 @@ def Nx.psLooksFormals(ts: I64): Bool = Nx.psPeek(ts) match
   case Nx.TOp(s, _) =>
     if Str.eq(s, "}") then Nx.psIsOp(Nx.psNext(ts), ":") || Nx.psIsOp(Nx.psNext(ts), "@")
     else Str.eq(s, "...")
-  case Nx.TId(x, _) =>
+  case Nx.TId(_, _) =>
     val t2 = Nx.psNext(ts)
-    !Nx.psKeyword(x) && (Nx.psIsOp(t2, ",") || Nx.psIsOp(t2, "?") || Nx.psIsOp(t2, "}"))
+    (Nx.psIsOp(t2, ",") || Nx.psIsOp(t2, "?") || Nx.psIsOp(t2, "}"))
   case _ => false
 
 // formal_set ':' expr_function, formal_set '@' ID ':' expr_function; ts after `{`
@@ -243,8 +254,7 @@ def Nx.psFormalsFn(cx: Nx.PCx, ts: I64, p: I64): Nx.PR[Nx.PE] = Nx.psFormalSet(c
       val t2 = Nx.psNext(t1)
       Nx.psPeek(t2) match
         case Nx.TId(x, q) =>
-          if Nx.psKeyword(x) then Nx.PBad(Nx.At(q))
-          else if Nx.psIsOp(Nx.psNext(t2), ":") then Nx.psFormalsBody(cx, Nx.psNext(Nx.psNext(t2)), p, fs, Coll.Some(x))
+          if Nx.psIsOp(Nx.psNext(t2), ":") then Nx.psFormalsBody(cx, Nx.psNext(Nx.psNext(t2)), p, fs, Coll.Some(x))
           else Nx.PBad(Nx.psAtW(Nx.psNext(t2)))
         case _ => Nx.PBad(Nx.psAtW(t2))
     else Nx.PBad(Nx.psAtW(t1))
@@ -389,8 +399,7 @@ def Nx.psFormalList(cx: Nx.PCx, ts: I64, acc: Coll.List[Nx.FmP]): Nx.PR[Nx.FSet]
 def Nx.psFormal(cx: Nx.PCx, ts: I64): Nx.PR[Nx.FmP] = Nx.psPeek(ts) match
   case Nx.TId(x, p) =>
     val t1 = Nx.psNext(ts)
-    if Nx.psKeyword(x) then Nx.PBad(Nx.At(p))
-    else if Nx.psIsOp(t1, "?") then Nx.psExprE(cx, Nx.psNext(t1)) match
+    if Nx.psIsOp(t1, "?") then Nx.psExprE(cx, Nx.psNext(t1)) match
       case Nx.PBad(q) => Nx.PBad(q)
       case Nx.POk(d, t2) => Nx.POk(Nx.FmP(x, p, Nx.psAt(t2), Coll.Some(d)), t2)
     else Nx.POk(Nx.FmP(x, p, Nx.psAt(t1), Coll.None), t1)
@@ -587,12 +596,13 @@ def Nx.psBadFormat(s: Str, i: I64): Bool =
 // ---- expr_simple (parser.y:346-395) ------------------------------------------------------------------------------
 
 def Nx.psSimple(cx: Nx.PCx, ts: I64): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
+  case Nx.TKw(k, p) => k match
+    case Nx.KwLet => Nx.psBraced(cx, Nx.psNext(ts), p, 2)
+    case Nx.KwRec => Nx.psBraced(cx, Nx.psNext(ts), p, 1)
+    case _ => Nx.PBad(Nx.At(p))
   case Nx.TId(x, p) =>
     val t1 = Nx.psNext(ts)
-    if Str.eq(x, "let") then Nx.psBraced(cx, t1, p, 2)
-    else if Str.eq(x, "rec") then Nx.psBraced(cx, t1, p, 1)
-    else if Nx.psKeyword(x) then Nx.PBad(Nx.At(p))
-    else if Str.eq(x, "__curPos") then Nx.POk(Nx.PExpr(Nx.ECurPos(p)), t1)
+    if Str.eq(x, "__curPos") then Nx.POk(Nx.PExpr(Nx.ECurPos(p)), t1)
     else Nx.POk(Nx.PExpr(Nx.EVar(p, x)), t1)
   case Nx.TInt(v, p) => Nx.POk(Nx.PExpr(Nx.EInt(p, v)), Nx.psNext(ts))
   case Nx.TFloat(b, p) => Nx.POk(Nx.PExpr(Nx.EFloat(p, b)), Nx.psNext(ts))
@@ -638,7 +648,7 @@ def Nx.psSetBody(cx: Nx.PCx, ts: I64, s: Nx.BSet): Nx.PR[Nx.PE] = Nx.psBinds(cx,
 def Nx.psList(cx: Nx.PCx, ts: I64, p: I64, acc: Coll.List[Nx.Expr]): Nx.PR[Nx.PE] = Nx.psPeek(ts) match
   case Nx.TId(x, q) =>
     val t1 = Nx.psNext(ts)
-    if Nx.psKeyword(x) || Str.eq(x, "__curPos") || Nx.psIsOp(t1, ".") || Nx.psIsKw(t1, "or") then Nx.psListElem(cx, ts, p, acc)
+    if Str.eq(x, "__curPos") || Nx.psIsOp(t1, ".") || Nx.psIsKw(t1, "or") then Nx.psListElem(cx, ts, p, acc)
     else Nx.psList(cx, t1, p, Coll.Cons(Nx.EVar(q, x), acc))
   case _ => Nx.psListElem(cx, ts, p, acc)
 
@@ -877,6 +887,9 @@ def Nx.psBind(cx: Nx.PCx, ts: I64, s: Nx.BSet): Nx.PR[Nx.BSet] =
     case Nx.TId(x, _) =>
       if Nx.psIsOp(t1, "=") then Nx.psBindValue(cx, Nx.psNext(t1), s, Coll.Cons(Nx.ASym(x), Coll.Nil), pos)
       else Nx.psBindPath(cx, ts, s, pos)
+    case Nx.TKw(k, _) =>
+      if Nx.psIsOp(t1, "=") then Nx.psBindValue(cx, Nx.psNext(t1), s, Coll.Cons(Nx.ASym(Nx.kwText(k)), Coll.Nil), pos)
+      else Nx.psBindPath(cx, ts, s, pos)
     case _ => Nx.psBindPath(cx, ts, s, pos)
 
 def Nx.psBindPath(cx: Nx.PCx, ts: I64, s: Nx.BSet, pos: I64): Nx.PR[Nx.BSet] = Nx.psAttrPath(cx, ts) match
@@ -938,7 +951,8 @@ def Nx.psAttrMore(cx: Nx.PCx, ts: I64, acc: Coll.List[Nx.Attr]): Nx.PR[Coll.List
 
 // attr (ID, or) or string_attr; a string_attr that is one string node names a static attribute (ToBeStringyExpr::visit)
 def Nx.psAttr(cx: Nx.PCx, ts: I64): Nx.PR[Nx.Attr] = Nx.psPeek(ts) match
-  case Nx.TId(x, p) => if Nx.psKeyword(x) && !Str.eq(x, "or") then Nx.PBad(Nx.At(p)) else Nx.POk(Nx.ASym(x), Nx.psNext(ts))
+  case Nx.TId(x, p) => Nx.POk(Nx.ASym(x), Nx.psNext(ts))
+  case Nx.TKw(k, p) => if Nx.kwOr(k) then Nx.POk(Nx.ASym("or"), Nx.psNext(ts)) else Nx.PBad(Nx.At(p))
   case Nx.TStrOpen(ind, p) =>
     if ind then Nx.PBad(Nx.At(p))
     else Nx.psStr(cx, Nx.psNext(ts), p) match
@@ -1081,13 +1095,17 @@ def Nx.psIdsRead(ids: Ptr, n: Str, ts: I64, none: I64): I64 =
   else
     val t = Nx.psPeek(ts)
     t match
-      case Nx.TId(x, q) =>
-        if Nx.ptrEq(Nx.atFind(ids, x), Nx.noFrame()) then Nx.atPut[Nx.Tok](ids, x, t) else ()
-        if Str.eq(x, n) then
-          Nx.atPut[Nx.Where](ids, "", Nx.At(ts + 1))
-          q
-        else Nx.psIdsRead(ids, n, ts + 1, none)
+      case Nx.TId(x, q) => if Nx.psIdsHit(ids, n, ts, t, x) then q else Nx.psIdsRead(ids, n, ts + 1, none)
+      case Nx.TKw(k, q) => if Nx.psIdsHit(ids, n, ts, t, Nx.kwText(k)) then q else Nx.psIdsRead(ids, n, ts + 1, none)
       case _ => Nx.psIdsRead(ids, n, ts + 1, none)
+
+// identifier token t named x, read at ts: its name's first token goes into ids; true (the read ends after ts) when x is n
+def Nx.psIdsHit(ids: Ptr, n: Str, ts: I64, t: Nx.Tok, x: Str): Bool =
+  if Nx.ptrEq(Nx.atFind(ids, x), Nx.noFrame()) then Nx.atPut[Nx.Tok](ids, x, t) else ()
+  if Str.eq(x, n) then
+    Nx.atPut[Nx.Where](ids, "", Nx.At(ts + 1))
+    true
+  else false
 
 // xs (in insertion order) stably sorted by psSymRank, each rank computed once
 def Nx.psBySym(cx: Nx.PCx, xs: Coll.List[Str], acc: Coll.List[Str]): Coll.List[Str] =
