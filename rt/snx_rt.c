@@ -424,12 +424,6 @@ void* Nx__byName(const int64_t* syms, int64_t n) {
   free(t);
   return s;
 }
-// a < b, bytes
-bool Nx__strLess(srs_str a, srs_str b) {
-  int64_t m = a.n < b.n ? a.n : b.n;
-  int c = memcmp(a.p, b.p, (size_t)m);
-  return c ? c < 0 : a.n < b.n;
-}
 
 // a set of pointers: open addressing, never shrinks (print-ambiguous.cc:33,49 and forceValueDeep)
 typedef struct { void** t; int64_t cap, n; } nx_set;
@@ -738,12 +732,6 @@ int64_t Nx__lxIndRun(srs_str s, int64_t i) {
     if (c == '\'' && (d == -1 || d == '\'' || d == '$')) return i;
     i += 2;
   }
-}
-// a NUL byte in [i, e)
-bool Nx__lxAnyNul(srs_str s, int64_t i, int64_t e) {
-  if (i < 0) i = 0;
-  if (e > s.n) e = s.n;
-  return e > i && memchr(s.p + i, 0, (size_t)(e - i)) != NULL;
 }
 
 // ── one DEFAULT lexeme (nx/lex.srs Nx.lxGo): the rule flex picks at i (the longest match, the earlier rule on a tie)

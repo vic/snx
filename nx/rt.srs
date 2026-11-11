@@ -9,7 +9,6 @@ extern def Nx.globals(): Ptr
 extern def Nx.slots(f: Ptr): Ptr
 extern def Nx.sortPairs(keys: Ptr, vals: Ptr, n: I64): Unit
 extern def Nx.byName(syms: Ptr, n: I64): Ptr
-extern def Nx.strLess(a: Str, b: Str): Bool
 extern def Nx.seenNew(): Ptr
 extern def Nx.seenAdd(set: Ptr, p: Ptr): Bool
 extern def Nx.fadd(a: I64, b: I64): I64
@@ -86,10 +85,9 @@ extern def Nx.tsAt [A: Type] (i: I64): A
 extern def Nx.tsLen(): I64
 // <STRING> part from i: the end of the first STRING rule's match (the run, and a $ before "), times 2, plus 1 when it
 // has a backslash, CR or NUL (else unescapeStr returns its bytes as they are); <IND_STRING> run
-// ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i; a NUL in [i, e)
+// ([^\$\']|\$[^\{\']|\'[^\'\$])+ from i
 extern def Nx.lxStrPart(s: Str, i: I64): I64
 extern def Nx.lxIndRun(s: Str, i: I64): I64
-extern def Nx.lxAnyNul(s: Str, i: I64, e: I64): Bool
 // the parser's index of a set's entries by name (rt/snx_rt.c, nx/parse.srs Nx.BSet): the entry or none (Nx.noFrame);
 // put replaces the entry of the name or adds it last; the count, entry i and name i in the order names were added
 extern def Nx.atNew(): Ptr
@@ -130,15 +128,10 @@ def Nx.iand(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) & U64.ofI64(b))
 def Nx.ior(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) | U64.ofI64(b))
 def Nx.ixor(a: I64, b: I64): I64 = I64.ofU64(U64.ofI64(a) ^ U64.ofI64(b))
 
-// a NUL byte in s: sixteen bytes per step while two whole words are left (a zero byte of w sets its high bit in
-// (w - 0x01..01) & ~w & 0x80..80), then byte by byte
-def Nx.hasNul(s: Str): Bool = Nx.nulWords(s, 0, Str.len(s))
-def Nx.nulWords(s: Str, i: I64, n: I64): Bool =
-  if n - i < 16 then Nx.nulFrom(s, i, n)
-  else if ((Nx.zeroBits(Str.u64le(s, i)) | Nx.zeroBits(Str.u64le(s, i + 8))) & U64.ofI64(0 - 9187201950435737472)) != U64.ofI64(0) then true
-  else Nx.nulWords(s, i + 16, n)
-def Nx.zeroBits(w: U64): U64 = (w - U64.ofI64(72340172838076673)) & (w ^ U64.ofI64(0 - 1))
-def Nx.nulFrom(s: Str, i: I64, n: I64): Bool = if i >= n then false else if Str.at(s, i) == 0 then true else Nx.nulFrom(s, i + 1, n)
+// a NUL byte in s, in s[i, e) (the lexer: a NUL inside a token); a sorts before b by bytes (memcmp, then the length)
+def Nx.hasNul(s: Str): Bool = Str.has(s, 0, 0, Str.len(s))
+def Nx.lxAnyNul(s: Str, i: I64, e: I64): Bool = Str.has(s, 0, i, e)
+def Nx.strLess(a: Str, b: Str): Bool = Str.less(a, b)
 
 // the decimal integer at the start of s as strtoll reads it, with no leading white space: a sign, digits up to the first
 // other byte. acc holds minus the value read so far, so that the minimum fits
