@@ -26,6 +26,8 @@ def Nx.gFile(): I64 = 16
 def Nx.gReal(): I64 = 17
 // the file each store path imports, by symbol (Nx.importPath)
 def Nx.gResolved(): I64 = 18
+// the directory each search-path entry resolves to, by symbol (Nx.lookupRoot)
+def Nx.gLookup(): I64 = 19
 
 // the integers 0 until Nx.smallInts() are made once, as the Booleans
 def Nx.smallInts(): I64 = 256
@@ -132,6 +134,7 @@ def Nx.baseEnv(): Nx.Val =
     Nx.aset[Coll.IMap[Str]](g, Nx.gSrcs(), Coll.Tip)
     Nx.aset[Coll.IMap[Str]](g, Nx.gReal(), Coll.Tip)
     Nx.aset[Coll.IMap[Str]](g, Nx.gResolved(), Coll.Tip)
+    Nx.aset[Coll.IMap[Coll.Option[Str]]](g, Nx.gLookup(), Coll.Tip)
     if Nx.ageti(g, Nx.gMaxDepth()) == 0 then Nx.aseti(g, Nx.gMaxDepth(), 10000) else ()
     v
 

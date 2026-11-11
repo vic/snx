@@ -9,22 +9,37 @@ extern def Nx.hasNul(s: Str): Bool
 // the path with every symlink resolved (realpath), or path itself when that fails
 extern def Nx.realPath(path: Str): Str
 
-// resolveExprPath (eval.cc:3156): while the last component is a symlink (its ancestors resolved), continue with its
-// target taken relative to the unresolved parent; at most 1024 hops
-def Nx.followLast(path: Str): Str = Nx.followHops(path, 0)
+// what resolveExprPath settles on: a directory (an import reads its default.nix) or anything else
+enum Nx.Resolved:
+  case Nx.ResDir(p: Str)
+  case Nx.ResOther(p: Str)
 
-def Nx.followHops(p0: Str, hops: I64): Str =
-  if hops == 1024 then p0
+// resolveExprPath (eval.cc:3156): while the last component is a symlink (its ancestors resolved), continue with its
+// target taken relative to the unresolved parent; at most 1024 hops. One lstat tells a symlink from a directory or a
+// file, so a path that is no symlink costs that single stat
+def Nx.followLast(path: Str): Nx.Resolved = Nx.followHops(path, 0)
+
+// the answer for a path that is not followed further: a directory unless it is in corepkgs
+def Nx.settled(path: Str): Nx.Resolved =
+  if !Nx.inCore(path) && Nx.isDir(path) then Nx.ResDir(path) else Nx.ResOther(path)
+
+def Nx.followHops(p0: Str, hops: I64): Nx.Resolved =
+  if hops == 1024 then Nx.settled(p0)
   else
     val path = Nx.canonPath(p0)
     val k = Nx.afterSlash(path, Str.len(path))
-    if k <= 1 || Nx.inCore(path) then path
+    if Nx.inCore(path) then Nx.ResOther(path)
+    else if k <= 1 then Nx.settled(path)
     else
-      val parent = Str.slice(path, 0, k - 1)
-      val t = Nx.readLink(Nx.cat(Nx.cat(Nx.parentReal(parent), "/"), Str.slice(path, k, Str.len(path))))
-      if Str.len(t) <= 0 then path
-      else if Str.at(t, 0) == '/' then Nx.followHops(t, hops + 1)
-      else Nx.followHops(Nx.cat(Nx.cat(parent, "/"), t), hops + 1)
+      val kind = Nx.fsKind(path, false)
+      if kind == 2 then Nx.ResDir(path)
+      else if kind != 3 then Nx.ResOther(path)
+      else
+        val parent = Str.slice(path, 0, k - 1)
+        val t = Nx.readLink(Nx.cat(Nx.cat(Nx.parentReal(parent), "/"), Str.slice(path, k, Str.len(path))))
+        if Str.len(t) <= 0 then Nx.settled(path)
+        else if Str.at(t, 0) == '/' then Nx.followHops(t, hops + 1)
+        else Nx.followHops(Nx.cat(Nx.cat(parent, "/"), t), hops + 1)
 
 // the index just past the last '/' before k (0 when there is none)
 def Nx.afterSlash(p: Str, k: I64): I64 = if k > 0 && Str.at(p, k - 1) != '/' then Nx.afterSlash(p, k - 1) else k
@@ -223,11 +238,26 @@ def Nx.findStep(xs: Ptr, i: I64, n: I64, path: Str, pre: Str, dir: Str): Nx.Val 
   val sfx = Nx.suffixAt(pre, path)
   if sfx < 0 then Nx.findGo(xs, i + 1, n, path)
   else
-    val root = Nx.absOf(dir)
-    if Nx.fsKind(root, true) == 0 then Nx.findGo(xs, i + 1, n, path)
-    else
-      val res = Nx.canonPath(Nx.cat(Nx.cat(root, "/"), Str.slice(path, sfx, Str.len(path))))
-      if Nx.fsKind(res, false) != 0 then Nx.VPath(res) else Nx.findGo(xs, i + 1, n, path)
+    Nx.lookupRoot(dir) match
+      case Coll.None => Nx.findGo(xs, i + 1, n, path)
+      case Coll.Some(root) =>
+        val res = Nx.canonPath(Nx.cat(Nx.cat(root, "/"), Str.slice(path, sfx, Str.len(path))))
+        if Nx.fsKind(res, false) != 0 then Nx.VPath(res) else Nx.findGo(xs, i + 1, n, path)
+
+// the resolution of a search-path entry: its absolute directory, or none when it does not exist. Kept for the run by
+// symbol (Nx.gLookup()) as lookupPathResolved does (eval.cc:3279): an entry is resolved once, the file under it is
+// still looked up on every call
+def Nx.lookupRoot(dir: Str): Coll.Option[Str] =
+  val g = Nx.globals()
+  val key = Nx.intern(dir)
+  val m = Nx.aget[Coll.IMap[Coll.Option[Str]]](g, Nx.gLookup())
+  Coll.lookup(m, key) match
+    case Coll.Some(r) => r
+    case Coll.None =>
+      val root = Nx.absOf(dir)
+      val r = if Nx.fsKind(root, true) == 0 then Coll.None else Coll.Some(root)
+      Nx.aset[Coll.IMap[Coll.Option[Str]]](g, Nx.gLookup(), Coll.insert(m, key, r))
+      r
 
 // ---- scopedImport ---------------------------------------------------------------------------------------------
 
@@ -243,7 +273,7 @@ def Nx.pScopedImport(sv: Nx.Val, pv: Nx.Val): Nx.Val = Nx.flat(sv) match
   case Nx.VAttrs(n, syms, vals) =>
     val p = Nx.pathStr(pv)
     p match
-      case Nx.VStr(t, _) => Nx.scopedFile(n, syms, vals, Nx.dirDefault(Nx.followLast(t)))
+      case Nx.VStr(t, _) => Nx.scopedFile(n, syms, vals, Nx.resolveExpr(t))
       case _ => p
   case _ => Nx.typeErr("a set", sv)
 
@@ -259,5 +289,3 @@ def Nx.scopedFile(n: I64, syms: Ptr, vals: Ptr, p: Str): Nx.Val =
           Nx.copyCells(vals, 0, Nx.slots(fr), 0, n)
           Nx.force(Nx.lazy(fr, code))
     case _ => Nx.VErr(Nx.KOther, Nx.cat("syntax error in ", p))
-
-def Nx.dirDefault(p: Str): Str = if Nx.isDir(p) then Nx.cat(p, "/default.nix") else p

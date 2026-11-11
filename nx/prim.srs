@@ -961,6 +961,6 @@ def Nx.importPath(p0: Str): Str =
         if Nx.drvHasPrefix(r, "/nix/store/") then Nx.aset[Coll.IMap[Str]](g, Nx.gResolved(), Coll.insert(m, key, r)) else ()
         r
 
-def Nx.resolveExpr(p0: Str): Str =
-  val p1 = Nx.followLast(p0)
-  if !Nx.inCore(p1) && Nx.isDir(p1) then Nx.cat(p1, "/default.nix") else p1
+def Nx.resolveExpr(p0: Str): Str = Nx.followLast(p0) match
+  case Nx.ResDir(p) => Nx.cat(p, "/default.nix")
+  case Nx.ResOther(p) => p
