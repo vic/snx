@@ -6,7 +6,43 @@ extern def Nx.dirNames(path: Str): Str
 extern def Nx.fileBytes(path: Str): Str
 extern def Nx.cwd(): Str
 extern def Nx.hasNul(s: Str): Bool
-extern def Nx.followLast(path: Str): Str
+// the path with every symlink resolved (realpath), or path itself when that fails
+extern def Nx.realPath(path: Str): Str
+
+// resolveExprPath (eval.cc:3156): while the last component is a symlink (its ancestors resolved), continue with its
+// target taken relative to the unresolved parent; at most 1024 hops
+def Nx.followLast(path: Str): Str = Nx.followHops(path, 0)
+
+def Nx.followHops(p0: Str, hops: I64): Str =
+  if hops == 1024 then p0
+  else
+    val path = Nx.canonPath(p0)
+    val k = Nx.afterSlash(path, Str.len(path))
+    if k <= 1 || Nx.inCore(path) then path
+    else
+      val parent = Str.slice(path, 0, k - 1)
+      val t = Nx.readLink(Nx.cat(Nx.cat(Nx.parentReal(parent), "/"), Str.slice(path, k, Str.len(path))))
+      if Str.len(t) <= 0 then path
+      else if Str.at(t, 0) == '/' then Nx.followHops(t, hops + 1)
+      else Nx.followHops(Nx.cat(Nx.cat(parent, "/"), t), hops + 1)
+
+// the index just past the last '/' before k (0 when there is none)
+def Nx.afterSlash(p: Str, k: I64): I64 = if k > 0 && Str.at(p, k - 1) != '/' then Nx.afterSlash(p, k - 1) else k
+
+// realpath of a parent directory. Under the store the answer is kept for the run (Nx.gReal()): a store path never
+// changes, so each store directory is resolved once (realpath reads every component: one readlink each)
+def Nx.parentReal(parent: Str): Str =
+  if !Nx.drvHasPrefix(parent, "/nix/store/") then Nx.realPath(parent)
+  else
+    val g = Nx.globals()
+    val key = Nx.intern(parent)
+    val m = Nx.aget[Coll.IMap[Str]](g, Nx.gReal())
+    Coll.lookup(m, key) match
+      case Coll.Some(r) => r
+      case Coll.None =>
+        val r = Nx.realPath(parent)
+        Nx.aset[Coll.IMap[Str]](g, Nx.gReal(), Coll.insert(m, key, r))
+        r
 
 // the -I entries so far, joined by NUL, in a cell kept at Nx.gIncl() of Nx.globals() (0 = none)
 

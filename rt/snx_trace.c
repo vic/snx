@@ -43,13 +43,12 @@ srs_str __real_Nx__fileBytes(srs_str path);
 bool __real_Nx__fsExec(srs_str path);
 srs_str __real_Nx__readLink(srs_str path);
 srs_str __real_Nx__cwd(void);
-srs_str __real_Nx__followLast(srs_str path);
 srs_str __real_Nx__realPath(srs_str path);
 int64_t __real_Nx__netOpen(srs_str path);
 
 // the observations; T_* below 16 have an integer result, the rest a string result
 enum { T_ISDIR = 1, T_FSKIND, T_LSKIND, T_FSEXEC, T_ROOT, T_READFILE = 16, T_RTREAD, T_FILEBYTES, T_GETENV, T_DIRNAMES, T_READLINK,
-       T_CWD, T_FOLLOW, T_REALPATH, T_LAST };
+       T_CWD, T_REALPATH, T_LAST };
 static bool t_str(int op) { return op >= T_READFILE; }
 static bool t_content(int op) { return op == T_READFILE || op == T_RTREAD || op == T_FILEBYTES; }
 
@@ -207,7 +206,6 @@ srs_str __wrap_Nx__getEnv(srs_str p) { srs_str r = __real_Nx__getEnv(p); rec_str
 srs_str __wrap_Nx__dirNames(srs_str p) { srs_str r = __real_Nx__dirNames(p); rec_str(T_DIRNAMES, p, r); return r; }
 srs_str __wrap_Nx__readLink(srs_str p) { srs_str r = __real_Nx__readLink(p); rec_str(T_READLINK, p, r); return r; }
 srs_str __wrap_Nx__cwd(void) { srs_str r = __real_Nx__cwd(); rec_str(T_CWD, (srs_str){(const uint8_t*)"", 0}, r); return r; }
-srs_str __wrap_Nx__followLast(srs_str p) { srs_str r = __real_Nx__followLast(p); rec_str(T_FOLLOW, p, r); return r; }
 srs_str __wrap_Nx__realPath(srs_str p) { srs_str r = __real_Nx__realPath(p); rec_str(T_REALPATH, p, r); return r; }
 bool __wrap_Nx__isDir(srs_str p) { bool r = __real_Nx__isDir(p); rec_int(T_ISDIR, p, r); return r; }
 bool __wrap_Nx__fsExec(srs_str p) { bool r = __real_Nx__fsExec(p); rec_int(T_FSEXEC, p, r); return r; }
@@ -253,7 +251,6 @@ static bool replay1(const obs* o) {
     case T_DIRNAMES: r = __real_Nx__dirNames(a); break;
     case T_READLINK: r = __real_Nx__readLink(a); break;
     case T_CWD: r = __real_Nx__cwd(); break;
-    case T_FOLLOW: r = __real_Nx__followLast(a); break;
     case T_REALPATH: r = __real_Nx__realPath(a); break;
     default: return false;
   }

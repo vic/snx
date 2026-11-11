@@ -86,7 +86,7 @@ srs_str Nx__readLink(srs_str path) {
   if (!b) exit(70);
   ssize_t n = readlink(c, (char*)b, 4096);
   free(c);
-  if (n < 0) return (srs_str){(const uint8_t*)"", -1};
+  if (n < 0) { free(b); return (srs_str){(const uint8_t*)"", -1}; }
   return (srs_str){b, (int64_t)n};
 }
 
@@ -228,51 +228,6 @@ srs_str Nx__xmlEsc(srs_str s) {
     if (r) { size_t k = strlen(r); memcpy(o + n, r, k); n += (int64_t)k; } else o[n++] = c;
   }
   return fs_mk(o, n);
-}
-
-extern srs_str Nx__canonPath(srs_str s);
-
-// resolveExprPath (eval.cc:3156): while the last component is a symlink (its ancestors resolved), continue with its target
-// taken relative to the unresolved parent
-srs_str Nx__followLast(srs_str path) {
-  for (int hops = 0; hops < 1024; hops++) {
-    path = Nx__canonPath(path);
-    int64_t k = path.n;
-    while (k > 0 && path.p[k - 1] != '/') k--;
-    if (k <= 1) return path;
-    srs_str parent = {path.p, k - 1};
-    char* pc = fs_cstr(parent);
-    char* rp = realpath(pc, NULL);
-    free(pc);
-    size_t pl = rp ? strlen(rp) : (size_t)parent.n;
-    size_t bl = (size_t)(path.n - k);
-    char* full = malloc(pl + 1 + bl + 1);
-    if (!full) exit(70);
-    memcpy(full, rp ? rp : (const char*)parent.p, pl);
-    full[pl] = '/';
-    memcpy(full + pl + 1, path.p + k, bl);
-    full[pl + 1 + bl] = 0;
-    free(rp);
-    char tgt[4096];
-    ssize_t t = readlink(full, tgt, sizeof tgt);
-    free(full);
-    if (t <= 0) return path;
-    size_t tl = (size_t)t;
-    if (tgt[0] == '/') {
-      char* c = malloc(tl);
-      if (!c) exit(70);
-      memcpy(c, tgt, tl);
-      path = (srs_str){(const uint8_t*)c, (int64_t)tl};
-    } else {
-      char* c = malloc((size_t)parent.n + 1 + tl);
-      if (!c) exit(70);
-      memcpy(c, parent.p, (size_t)parent.n);
-      c[parent.n] = '/';
-      memcpy(c + parent.n + 1, tgt, tl);
-      path = (srs_str){(const uint8_t*)c, (int64_t)((size_t)parent.n + 1 + tl)};
-    }
-  }
-  return path;
 }
 
 // ---- positions: the record of the source positions of the names of a set or of the formals of a function, by the

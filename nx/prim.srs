@@ -917,13 +917,13 @@ def Nx.dirFrom(p: Str, i: I64): Str =
 
 // evalFile: a file is parsed, compiled and evaluated once per run (a directory means its default.nix)
 def Nx.importFile(p0: Str): Nx.Val =
-  val p1 = Nx.followLast(p0)
-  val p = if Nx.isDir(p1) then Nx.cat(p1, "/default.nix") else p1
-  val key = Nx.intern(p)
   val g = Nx.globals()
-  // the base env first: it sets up the import table
+  // the base env first: it sets up the import table and the store realpaths of Nx.followLast
   val m: Coll.IMap[Ptr] = Nx.baseEnv() match
     case _ => Nx.aget[Coll.IMap[Ptr]](g, Nx.gImports())
+  val p1 = Nx.followLast(p0)
+  val p = if !Nx.inCore(p1) && Nx.isDir(p1) then Nx.cat(p1, "/default.nix") else p1
+  val key = Nx.intern(p)
   Coll.node(m, key) match
     case Coll.Bin(_, _, c, _, _) => Nx.force(c)
     case Coll.Tip =>

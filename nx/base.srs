@@ -22,6 +22,8 @@ def Nx.gSrcs(): I64 = 14
 def Nx.gLint(): I64 = 15
 // the symbol of the file being parsed, for lint warnings
 def Nx.gFile(): I64 = 16
+// realpath of the store directories seen so far, by symbol (Nx.parentReal)
+def Nx.gReal(): I64 = 17
 
 // the integers 0 until Nx.smallInts() are made once, as the Booleans
 def Nx.smallInts(): I64 = 256
@@ -126,6 +128,7 @@ def Nx.baseEnv(): Nx.Val =
     Nx.aset[Coll.IMap[Nx.ReResult]](g, Nx.gRegex(), Coll.Tip)
     Nx.aset[Coll.IMap[Nx.StoreObj]](g, Nx.gStore(), Coll.Tip)
     Nx.aset[Coll.IMap[Str]](g, Nx.gSrcs(), Coll.Tip)
+    Nx.aset[Coll.IMap[Str]](g, Nx.gReal(), Coll.Tip)
     if Nx.ageti(g, Nx.gMaxDepth()) == 0 then Nx.aseti(g, Nx.gMaxDepth(), 10000) else ()
     v
 
